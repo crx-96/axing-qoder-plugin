@@ -1,0 +1,28 @@
+# 本机授权、密钥和运行产物不得进入插件市场。
+**/data/
+**/auths/
+**/generated/
+**/launcher-secrets.json
+**/config.yaml
+**/*.pid
+**/*.paused
+**/*.log
+**/*.tmp
+# CLIProxyAPI 在 MCP 初始化时按当前平台下载；源码分发保留平台清单、文档和许可证。
+# 白名单也防止新平台目录、归档和未命名的本地核心被重新纳入。
+qoder-subscription-proxy/bridge/bin/*
+!qoder-subscription-proxy/bridge/bin/LICENSE
+!qoder-subscription-proxy/bridge/bin/README.md
+!qoder-subscription-proxy/bridge/bin/README_CN.md
+!qoder-subscription-proxy/bridge/bin/config.example.yaml
+!qoder-subscription-proxy/bridge/bin/platforms.json
+**/runtimes/
+node_modules/
+coverage/
+.qoder/
+.qoder-cn/
+.codegraph/
+.test-work/
+dist/
+docs/status/
+docs/plans/

@@ -1,0 +1,13 @@
+{
+  "name": "qoder-subscription-proxy",
+  "version": "0.2.2",
+  "description": "qoder订阅代理：本机订阅授权、模型 API 与图片生成，随 MCP 生命周期托管。",
+  "author": { "name": "crx-96" },
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Qoder 订阅代理",
+    "shortDescription": "独立端口的本机订阅代理，随 MCP 生命周期启停",
+    "developerName": "crx-96"
+  }
+}

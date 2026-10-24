@@ -1,0 +1,6 @@
+# POSIX 入口必须保留 LF，不能随 Windows checkout 转为 CRLF。
+*.sh text eol=lf
+# 显式下载当前平台测试核心的 CI 脚本在所有 runner 上保持相同源码字节。
+qoder-subscription-proxy/scripts/prepare-test-core.mjs text eol=lf
+# 此上游资产按原始字节校验 SHA256，Windows 检出时也不得转换换行。
+qoder-subscription-proxy/bridge/panel/management.upstream.html -text

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "qoder-subscription-proxy": {
+      "type": "stdio",
+      "command": "/bin/sh",
+      "args": ["${QODER_PLUGIN_ROOT}/scripts/start-mcp.sh"],
+      "timeout": 660000
+    }
+  }
+}

@@ -1,0 +1,42 @@
+name: Subscription proxy platforms
+
+on:
+  push:
+    paths:
+      - "qoder-subscription-proxy/**"
+      - ".qoder-plugin/marketplace.json"
+      - ".gitattributes"
+      - ".gitignore"
+      - ".github/workflows/subscription-proxy-tests.yml"
+  pull_request:
+    paths:
+      - "qoder-subscription-proxy/**"
+      - ".qoder-plugin/marketplace.json"
+      - ".gitattributes"
+      - ".gitignore"
+      - ".github/workflows/subscription-proxy-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # 仅此步骤联网下载当前 runner 核心；测试默认离线，各 fixture 再复制隔离。
+      - name: Prepare verified current-platform test core
+        shell: bash
+        run: node qoder-subscription-proxy/scripts/prepare-test-core.mjs
+      - name: Test isolated proxy and MCP lifecycle
+        shell: bash
+        run: node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
