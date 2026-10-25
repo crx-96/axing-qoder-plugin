@@ -1,4 +1,4 @@
-# qoder订阅代理 · 0.2.3
+# qoder订阅代理 · 0.2.4
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件，将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理和图片生成 MCP 工具。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.3-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.3-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
+从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.4-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.4-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -54,9 +54,9 @@ ZIP 不带五平台核心二进制，仅保留来源清单、文档和许可证�
 
 ## 自动审批模型兼容
 
-`0.2.3` 在启动代理前为新建和既有配置补充定向规则：原模型为 `gpt-6-astra` 或 `gpt-6.1-sol`，通过 Responses 协议发送、首条 system/developer 消息为单文本块且以 Qoder 自动权限检查提示开头、`reasoning.effort=none` 时，出站请求改用 `gpt-6-luna` 与 `low`。Luna 的能力目录也不支持 `none`；普通对话、子代理、其他模型、其他 `none` 请求和 `xhigh` 不受此规则影响，权限检查内容及审批策略不变。若宿主改变提示格式，规则不会继续误匹配，需要重新核对后适配。
+`0.2.4` 在启动代理前为新建和既有配置补充定向规则：原模型匹配 `gpt-*`、上游为 Codex、入站为 Responses、首条 system/developer 消息为单文本块且以 `You are a security classifier for auto permission mode.` 开头、`reasoning.effort` 为 `none`（快速检查）或 `low`（复核）时，出站请求改用 `codex-auto-review` 与 `low`，不再限定 Astra/Sol。识别的是宿主发出的独立审批检查请求，不读取或修改软件权限设置；普通对话、子代理、非 GPT 模型、非 Codex 上游、Chat Completions、其他 `none` 请求及 `xhigh` 不受影响。审批提示、待检查内容和输出格式原样保留，不替换为 Codex 的审批政策；宿主改变提示格式时需重新核对适配。
 
-此兼容使用核心已有的条件 payload 覆盖，不增加服务端口，沿用原模型选择的账号。部分路由提示与请求模型统计仍显示 Astra/Sol，实际响应模型可能为 Luna；不要仅按请求模型名称推断消耗。所选账号仍需有 Luna 使用权限。原有配置、日志开关和自定义规则保留，重复启动不会重复追加相同规则；ZCode 插件不包含此兼容。
+此兼容使用核心已有的条件 payload 覆盖，不增加服务端口，沿用原模型选择的账号；所选账号必须支持 `codex-auto-review`，模型列表出现该名称不等于请求一定成功。上游失败按原错误返回，不自动改用 Luna，也不默认放行。部分路由提示与请求模型统计仍显示原模型，不应仅据此推断消耗。升级会移除完整匹配 `0.2.3` 内置规则的旧 Luna 路由；用户修改过的规则、其他配置、日志开关及注释保留，新规则按既有覆盖顺序生效，重复启动不会重复追加。
 
 ## Antigravity 与 OAuth 回调
 

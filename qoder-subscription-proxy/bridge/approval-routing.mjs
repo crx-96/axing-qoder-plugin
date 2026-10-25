@@ -1,26 +1,26 @@
 import { parseConfigYaml } from "./config-yaml.mjs";
 
-const sourceModels = ["gpt-6-astra", "gpt-6.1-sol"];
 const classifierPath = 'input.0.content.#(type=="input_text"&&text%"You are a security classifier for auto permission mode.*").type';
 const overridePath = ["requests", "payload", "override"];
 
-export function renderApprovalOverride(indent = 6) {
+export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], targetModel = "codex-auto-review", efforts = ["none", "low"]) {
   const pad = " ".repeat(indent);
-  const models = sourceModels.flatMap((model) => ["developer", "system"].flatMap((role) => [
+  // match 列表是 AND；快速检查与复核必须使用独立的模型选择器。
+  const models = sourceModels.flatMap((model) => ["developer", "system"].flatMap((role) => efforts.flatMap(effort => [
     `${pad}    - name: ${JSON.stringify(model)}`,
     `${pad}      protocol: "codex"`,
     `${pad}      from-protocol: "responses"`,
     `${pad}      match:`,
-    `${pad}        - "reasoning.effort": "none"`,
+    `${pad}        - "reasoning.effort": ${JSON.stringify(effort)}`,
     `${pad}          "input.0.role": ${JSON.stringify(role)}`,
     `${pad}          "input.0.content.#": 1`,
     `${pad}          ${JSON.stringify(classifierPath)}: "input_text"`,
-  ]));
+  ])));
   return [
     `${pad}- models:`,
     ...models,
     `${pad}  params:`,
-    `${pad}    model: "gpt-6-luna"`,
+    `${pad}    model: ${JSON.stringify(targetModel)}`,
     `${pad}    "reasoning.effort": "low"`,
   ].join("\n");
 }
@@ -35,12 +35,28 @@ function ruleSignature(values, prefix) {
 
 const policyValues = parseConfigYaml(`override:\n${renderApprovalOverride(2)}\n`).values;
 const policySignature = ruleSignature(policyValues, ["override", 0]);
+const legacyValues = parseConfigYaml(`override:\n${renderApprovalOverride(2, ["gpt-6-astra", "gpt-6.1-sol"], "gpt-6-luna", ["none"])}\n`).values;
+const legacySignature = ruleSignature(legacyValues, ["override", 0]);
 
 export function ensureApprovalRouting(text) {
   const parsed = parseConfigYaml(text);
   const rules = parsed.values.get(JSON.stringify(overridePath));
-  if (Array.isArray(rules) && rules.some((_, index) =>
-    ruleSignature(parsed.values, [...overridePath, index]) === policySignature)) return text;
+  const signatures = Array.isArray(rules)
+    ? rules.map((_, index) => ruleSignature(parsed.values, [...overridePath, index]))
+    : [];
+  const legacyIndexes = new Set(signatures.flatMap((signature, index) => signature === legacySignature ? [index] : []));
+  if (legacyIndexes.size) {
+    // 只移除完整匹配旧内置规则的语法行，用户修改过的规则、注释及空行保留。
+    const removedLines = new Set();
+    for (const [key, node] of parsed.nodes) {
+      const path = JSON.parse(key);
+      if (overridePath.every((part, index) => path[index] === part) && legacyIndexes.has(path[overridePath.length])) {
+        removedLines.add(node.line);
+      }
+    }
+    return ensureApprovalRouting(parsed.lines.filter((_, index) => !removedLines.has(index)).join(parsed.newline));
+  }
+  if (signatures.includes(policySignature)) return text;
 
   let parent = parsed.nodes.get("[]");
   let depth = 0;
@@ -67,8 +83,10 @@ export function ensureApprovalRouting(text) {
     indent += 2;
   }
   added.push(...renderApprovalOverride(indent).split("\n"));
-  // 只插入目标规则，保留已有配置、顺序、注释和换行风格。
-  lines.splice(parent.end, 0, ...added);
+  // 将同级段之前的注释留在原段前，不插入到注释与其目标之间。
+  let insertion = parent.end;
+  while (insertion > parent.line + 1 && /^\s*(?:#.*)?$/.test(lines[insertion - 1])) insertion--;
+  lines.splice(insertion, 0, ...added);
   const updated = lines.join(parsed.newline);
   return updated.endsWith(parsed.newline) ? updated : updated + parsed.newline;
 }

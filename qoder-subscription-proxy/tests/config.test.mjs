@@ -43,7 +43,7 @@ test("默认数据目录跨安装版本稳定保留授权，隔离旧桥且不�
     import { join } from "node:path";
     import { loadConfig, PLUGIN_VERSION } from ${JSON.stringify(moduleUrl)};
     assert.equal(homedir(), ${JSON.stringify(root)});
-    assert.equal(PLUGIN_VERSION, "0.2.3");
+    assert.equal(PLUGIN_VERSION, "0.2.4");
     const oldDir = join(homedir(), ".zcode", "zcode-subscription-proxy", "data");
     await mkdir(join(oldDir, "auths"), { recursive: true });
     await writeFile(join(oldDir, "launcher-secrets.json"), JSON.stringify({ apiKey: "old-plugin-api", mgmtKey: "old-management" }));
@@ -74,7 +74,7 @@ test("插件、市场和 MCP 对外版本保持一致", async () => {
   const marketplace = JSON.parse(await readFile(join(pluginRoot, "..", ".qoder-plugin", "marketplace.json"), "utf8"));
   const listing = marketplace.plugins.find((plugin) => plugin.name === manifest.name);
   assert.ok(listing);
-  assert.equal(PLUGIN_VERSION, "0.2.3");
+  assert.equal(PLUGIN_VERSION, "0.2.4");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(resolve(pluginRoot, "..", listing.source), pluginRoot);
@@ -96,7 +96,7 @@ test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () =>
 test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对路径", async (t) => {
   const { root, load } = await fixture(t);
   const config = await load();
-  assert.equal(PLUGIN_VERSION, "0.2.3");
+  assert.equal(PLUGIN_VERSION, "0.2.4");
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(DEFAULT_PORT, 19787);

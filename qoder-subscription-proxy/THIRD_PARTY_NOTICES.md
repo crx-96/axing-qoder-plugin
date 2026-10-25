@@ -15,7 +15,7 @@
 | 修改情况 | 仅重命名文件，不修改二进制内容，不隐藏上游身份 |
 | 平台与来源清单 | [`bridge/bin/platforms.json`](bridge/bin/platforms.json)，保留原 `path` 字段标识；实际缓存仅使用其 basename |
 
-插件 `0.2.3` 不分发以下二进制，只保留来源清单、上游文档与许可证。默认缓存为 `dataDir/runtimes/v8.0.42/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台准备核心，watchdog 不下载或自动重试下载；离线可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
+插件 `0.2.4` 不分发以下二进制，只保留来源清单、上游文档与许可证。默认缓存为 `dataDir/runtimes/v8.0.42/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台准备核心，watchdog 不下载或自动重试下载；离线可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
 
 固定二进制的清单标识与 SHA256（上游 `amd64` 对应 Node `x64`，`aarch64` 对应 `arm64`）：
 
