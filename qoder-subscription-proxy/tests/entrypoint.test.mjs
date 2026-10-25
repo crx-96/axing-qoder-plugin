@@ -95,7 +95,7 @@ test("缺失自定义核心只导致后台启动失败，MCP仍可查询状态�
 
 test("已暂停时允许管理MCP连接，不启动或下载核心", { timeout: 10000 }, async (t) => {
   const f = await fixture(t, { paused: true, env: { BRIDGE_BIN: process.execPath } });
-  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "0.2.2");
+  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "0.2.3");
   const status = JSON.parse((await f.request("tools/call", { name: "bridge_status", arguments: {} })).result.content[0].text);
   assert.equal(status.ready, false);
   assert.equal(status.autoRecoveryPaused, true);

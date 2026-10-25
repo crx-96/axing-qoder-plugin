@@ -10,6 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadConfig, renderConfigYaml } from "../bridge/config.mjs";
+import { ensureApprovalRouting } from "../bridge/approval-routing.mjs";
 import { requestLocal } from "../bridge/local-http.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
@@ -335,13 +336,13 @@ test("ensureRunning 不接管只有根签名但无本版本 PID 归属的服务"
   assert.equal((await probeBridge(config)).state, "bridge");
 });
 
-test("ensureDataDir 并发发布完整配置，既有配置保持不变", async (t) => {
+test("ensureDataDir 并发发布完整配置并保留既有内容", async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
   config.apiKey = "synthetic-test-value-".repeat(32768);
   const results = await Promise.allSettled(Array.from({ length: 12 }, () => ensureDataDir(config)));
   const errors = results.filter((entry) => entry.status === "rejected").map((entry) => entry.reason.message);
   assert.equal(errors.length, 0, `并发读取不得观察到空/半份配置：${errors.join("; ")}`);
-  assert.equal(await readFile(config.configPath, "utf8") === renderConfigYaml(config), true);
+  assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(renderConfigYaml(config)));
   const marker = "# user-owned marker\n";
   await writeFile(config.configPath, marker + renderConfigYaml(config));
   await ensureDataDir(config);

@@ -12,6 +12,7 @@ import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
 import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
+import { ensureApprovalRouting } from "./approval-routing.mjs";
 
 const execFileAsync = promisify(execFile);
 const inFlight = new Map();
@@ -102,14 +103,25 @@ export async function ensureDataDir(config) {
   if (await readOptional(config.configPath) === null) {
     const temporary = `${config.configPath}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, renderConfigYaml(config), { flag: "wx", mode: 0o600 });
+      await writeFile(temporary, ensureApprovalRouting(renderConfigYaml(config)), { flag: "wx", mode: 0o600 });
       try { await link(temporary, config.configPath); }
       catch (error) { if (error.code !== "EEXIST") throw error; }
     } finally {
       await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
     }
   }
-  validateExistingConfig(config, await readFile(config.configPath, "utf8"));
+  const original = await readFile(config.configPath, "utf8");
+  validateExistingConfig(config, original);
+  const updated = ensureApprovalRouting(original);
+  if (updated === original) return;
+  validateExistingConfig(config, updated);
+  const temporary = `${config.configPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, updated, { flag: "wx", mode: 0o600 });
+    await rename(temporary, config.configPath);
+  } finally {
+    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  }
 }
 
 /** Windows 创建时间与完整命令行共同防止 PID 回收及同名 exe 误杀。 */

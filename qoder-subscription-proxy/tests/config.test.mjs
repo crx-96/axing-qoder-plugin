@@ -15,6 +15,7 @@ import {
   validateExistingConfig,
 } from "../bridge/config.mjs";
 import { resolveCoreBinaryPath } from "../bridge/core-runtime.mjs";
+import { parseConfigYaml } from "../bridge/config-yaml.mjs";
 
 const execFileAsync = promisify(execFile);
 const moduleUrl = new URL("../bridge/config.mjs", import.meta.url).href;
@@ -42,7 +43,7 @@ test("默认数据目录跨安装版本稳定保留授权，隔离旧桥且不�
     import { join } from "node:path";
     import { loadConfig, PLUGIN_VERSION } from ${JSON.stringify(moduleUrl)};
     assert.equal(homedir(), ${JSON.stringify(root)});
-    assert.equal(PLUGIN_VERSION, "0.2.2");
+    assert.equal(PLUGIN_VERSION, "0.2.3");
     const oldDir = join(homedir(), ".zcode", "zcode-subscription-proxy", "data");
     await mkdir(join(oldDir, "auths"), { recursive: true });
     await writeFile(join(oldDir, "launcher-secrets.json"), JSON.stringify({ apiKey: "old-plugin-api", mgmtKey: "old-management" }));
@@ -73,7 +74,7 @@ test("插件、市场和 MCP 对外版本保持一致", async () => {
   const marketplace = JSON.parse(await readFile(join(pluginRoot, "..", ".qoder-plugin", "marketplace.json"), "utf8"));
   const listing = marketplace.plugins.find((plugin) => plugin.name === manifest.name);
   assert.ok(listing);
-  assert.equal(PLUGIN_VERSION, "0.2.2");
+  assert.equal(PLUGIN_VERSION, "0.2.3");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(resolve(pluginRoot, "..", listing.source), pluginRoot);
@@ -95,7 +96,7 @@ test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () =>
 test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对路径", async (t) => {
   const { root, load } = await fixture(t);
   const config = await load();
-  assert.equal(PLUGIN_VERSION, "0.2.2");
+  assert.equal(PLUGIN_VERSION, "0.2.3");
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(DEFAULT_PORT, 19787);
@@ -129,9 +130,9 @@ test("平台/架构只选择当前平台缓存路径，BRIDGE_BIN 显式禁用�
     ["linux", "arm64", "linux-arm64/qoder-plugin-subscription-proxy"],
   ]) {
     const config = await loadConfig({ pluginRoot, env, platform, arch });
-    assert.equal(config.binPath, join(config.dataDir, "runtimes", "v8.0.38", `${platform}-${arch}`, path.split("/").at(-1)));
+    assert.equal(config.binPath, join(config.dataDir, "runtimes", "v8.0.42", `${platform}-${arch}`, path.split("/").at(-1)));
     assert.equal(config.core.key, `${platform}-${arch}`);
-    assert.equal(config.core.version, "v8.0.38");
+    assert.equal(config.core.version, "v8.0.42");
     for (const bin of [join(root, "自定义 core"), relative(process.cwd(), join(root, "relative core"))]) {
       const custom = await loadConfig({ pluginRoot, env: { ...env, BRIDGE_BIN: bin }, platform, arch });
       assert.equal(custom.binPath, resolve(bin));
@@ -437,6 +438,74 @@ test("不假装支持通用 YAML：拒绝重复键、锚点、合并、标签、
       assert.match(error.message, /结构不受支持/);
       return noSecret(error, [config.apiKey, config.mgmtKey]);
     });
+  }
+});
+
+test("共享 YAML 读取支持引号路径键且按解码后的真实片段隔离", async (t) => {
+  const { load } = await fixture(t);
+  const config = await load();
+  const condition = 'messages.#(role=="system")#.content';
+  const suffix = [
+    "payload:", "  rules:", '    - "params":',
+    `        ${JSON.stringify(condition)}: "keep"`,
+    "        'it''s.a.path': 'single'", "        reasoning.effort: low",
+    '"server.host": "0.0.0.0"',
+    '"server[0].host": "other"',
+    "logging:", "  level: debug", "  file: '/tmp/old.log'", "",
+  ].join("\n");
+  const text = renderConfigYaml(config) + suffix;
+  const { values, lines } = parseConfigYaml(text);
+  assert.equal(values.get(JSON.stringify(["payload", "rules", 0, "params", condition])), "keep");
+  assert.equal(values.get(JSON.stringify(["payload", "rules", 0, "params", "it's.a.path"])), "single");
+  assert.equal(values.get(JSON.stringify(["payload", "rules", 0, "params", "reasoning.effort"])), "low");
+  assert.equal(values.get(JSON.stringify(["server", "host"])), "127.0.0.1");
+  assert.equal(values.get(JSON.stringify(["server.host"])), "0.0.0.0");
+  assert.equal(values.get(JSON.stringify(["logging", "file"])), "/tmp/old.log");
+  assert.equal(lines.join("\n"), text);
+  assert.doesNotThrow(() => validateExistingConfig(config, text));
+  const unsafe = text.replace('  host: "127.0.0.1"', '  host: "0.0.0.0"')
+    .replace('"server.host": "0.0.0.0"', '"server.host": "127.0.0.1"');
+  assert.throws(() => validateExistingConfig(config, unsafe), /server.host/);
+  assert.throws(() => validateExistingConfig(config, text.replace('  host: "127.0.0.1"\n', '') +
+    'extra:\n  - "server":\n      "host": "127.0.0.1"\n'), /server.host/);
+  await writeFile(config.configPath, text);
+  await load();
+  assert.equal(await readFile(config.configPath, "utf8"), text);
+});
+
+test("共享 YAML 读取拒绝解码重复键、控制字符键及合并等扩展", () => {
+  for (const text of [
+    'server: 1\n"server": 2', "server: 1\n'server': 2",
+    '"server": 1\n"\\u0073erver": 2',
+    "extra:\n  - name: one\n    'name': two",
+    ...["\0", "\n", "\t", "\u007f", "\u0085", "\u2028"].map((key) => `${JSON.stringify(key)}: value`),
+    '"<<": {}', "'<<': {}", "<<: *anchor", "extra: &anchor value", "extra: *anchor",
+    "extra: !tag value", "extra: [one]", "extra: {one: two}", "extra: |\n  value",
+  ]) assert.throws(() => parseConfigYaml(text), /结构不受支持/);
+});
+
+test("共享 YAML 节点定位覆盖两/四空格、无额外缩进列表及 CRLF", () => {
+  for (const width of [2, 4]) {
+    for (const extra of [0, width]) {
+      const pad = " ".repeat(width);
+      const listPad = " ".repeat(width + extra);
+      const lines = ["root:", `${pad}items:`, `${listPad}- name: first`, `${listPad}  alias: second`,
+        `${listPad}- scalar`, `${pad}empty:`, "next: true", ""];
+      const { nodes, values, newline, lines: parsedLines } = parseConfigYaml(lines.join("\r\n"));
+      assert.equal(newline, "\r\n");
+      assert.deepEqual(parsedLines, lines);
+      const node = (...path) => nodes.get(JSON.stringify(path));
+      assert.deepEqual(node(), { line: -1, end: 8, indent: -1, childIndent: 0, kind: "map", raw: undefined });
+      assert.deepEqual(node("root"), { line: 0, end: 6, indent: 0, childIndent: width, kind: "map", raw: undefined });
+      assert.deepEqual(node("root", "items"), { line: 1, end: 5, indent: width, childIndent: width + extra, kind: "list", raw: undefined });
+      assert.deepEqual(node("root", "items", 0), { line: 2, end: 4, indent: width + extra, childIndent: width + extra + 2, kind: "map", raw: undefined });
+      assert.deepEqual(node("root", "items", 0, "name"), { line: 2, end: 3, indent: width + extra + 2, childIndent: null, kind: null, raw: "first" });
+      assert.deepEqual(node("root", "items", 1), { line: 4, end: 5, indent: width + extra, childIndent: null, kind: null, raw: "scalar" });
+      assert.deepEqual(node("root", "empty"), { line: 5, end: 6, indent: width, childIndent: null, kind: null, raw: undefined });
+      assert.deepEqual(values.get(JSON.stringify(["root", "items"])), [null, "scalar"]);
+      assert.equal(values.get(JSON.stringify(["root", "items", 1])), "scalar");
+      assert.equal(node("next").end, lines.length);
+    }
   }
 });
 

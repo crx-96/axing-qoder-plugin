@@ -198,7 +198,7 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     return;
   }
   const initialized = await request("中文握手", "initialize", initializeParams);
-  assert.equal(initialized.serverInfo.version, "0.2.2");
+  assert.equal(initialized.serverInfo.version, "0.2.3");
   assert.equal(initialized.protocolVersion, "2025-06-18");
   assert.deepEqual(await request("中文往返-引号\"-反斜杠\\", "ping"), {});
   const tools = await request("工具清单", "tools/list");

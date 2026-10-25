@@ -1,4 +1,4 @@
-# qoder订阅代理 · 0.2.2
+# qoder订阅代理 · 0.2.3
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件，将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理和图片生成 MCP 工具。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.2-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.2-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
+从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.3-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.3-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -14,7 +14,7 @@
 | 内置运行时 | 已实测 Electron `43.1.1` / Node `24.18.0` Node mode；本机独立开发命令 `node` 为 `26.4.0` |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；依赖 PowerShell 5.1、.NET Framework、Job Object；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh`、系统进程工具和可用的 Qoder Node mode 或已有 Node 22+；尚未实机验证，不保证所有发行版及 musl/Alpine 兼容 |
-| 核心 | 固定 CLIProxyAPI `v8.0.38`，仅下载当前平台；下载需系统 `curl` 支持 HTTPS |
+| 核心 | 固定 CLIProxyAPI `v8.0.42`，仅下载当前平台；下载需系统 `curl` 支持 HTTPS |
 | 不支持 | Windows 32 位、原生 Windows ARM64及其他平台/架构；ARM64 上 x64 仿真未验证 |
 
 插件使用 `.qoder-plugin/plugin.json`、`${QODER_PLUGIN_ROOT}` 和 MCP `timeout: 660000`（11 分钟），与 Desktop 自带 `recordAndReplay` 资源契约一致，但不代表真实 ZIP 安装已通过，也不保证宿主实际请求时限。
@@ -44,13 +44,19 @@ API Key 首次随机生成并持久保存，升级不自动轮换或清空授权
 
 ZIP 不带五平台核心二进制，仅保留来源清单、文档和许可证。轻量包用于减少安装体积和网络耗时，**不是 Qoder 已确认禁止大包**；未确认官方 ZIP 大小上限。
 
-- 缺少有效缓存时，从固定官方 HTTPS 发布地址下载当前平台 `v8.0.38` 归档，先校验归档 SHA256，安全解压后再校验二进制 SHA256，成功后发布缓存并启动代理。不自动换版本或下载其他平台。
+- 缺少有效缓存时，从固定官方 HTTPS 发布地址下载当前平台 `v8.0.42` 归档，先校验归档 SHA256，安全解压后再校验二进制 SHA256，成功后发布缓存并启动代理。不自动换版本或下载其他平台。
 - 后台准备独立预算 **10 分钟（600 秒）**，覆盖等待锁、下载、校验和解压；curl 连接最多 60 秒、单次传输最多 540 秒，各阶段受剩余总预算约束，不阻塞 MCP 握手。
 - 下载期间 MCP 仍可用，状态可显示 `ready: false`、`core.state: "downloading"`；图片请求立即返回未就绪。准备失败保留连接，以 `startupError` 或 `core.reason` 报告原因。修复后显式 `bridge_start` 或重连重试，不自动重试；状态查询与 watchdog 不下载核心。
 - `bridge_stop` 取消本会话在途准备并持久暂停，重连仍可握手和查状态，但需显式 `bridge_start` 才恢复下载与启动。EOF、断管和退出信号也会取消准备并清理本次拥有的资源。本地配置错误仍可能导致 MCP 初始化失败。
-- 缓存位于 `dataDir/runtimes/v8.0.38/<platform-arch>/<basename(platforms.json.path)>`。离线准备需通过 `BRIDGE_BIN` 自行提供可信兼容核心，不承诺一键离线包；远程登录及模型服务仍需要网络。
+- 缓存位于 `dataDir/runtimes/v8.0.42/<platform-arch>/<basename(platforms.json.path)>`。离线准备需通过 `BRIDGE_BIN` 自行提供可信兼容核心，不承诺一键离线包；远程登录及模型服务仍需要网络。
 
 管理页固定随包提供上游 `v1.26.7` 资产，校验后生成带 Antigravity 兼容补丁的独立副本，不直接修改原资产。管理页自动更新被禁用，后续更新随插件维护；首次打开无需另行下载页面。
+
+## 自动审批模型兼容
+
+`0.2.3` 在启动代理前为新建和既有配置补充定向规则：原模型为 `gpt-6-astra` 或 `gpt-6.1-sol`，通过 Responses 协议发送、首条 system/developer 消息为单文本块且以 Qoder 自动权限检查提示开头、`reasoning.effort=none` 时，出站请求改用 `gpt-6-luna` 与 `low`。Luna 的能力目录也不支持 `none`；普通对话、子代理、其他模型、其他 `none` 请求和 `xhigh` 不受此规则影响，权限检查内容及审批策略不变。若宿主改变提示格式，规则不会继续误匹配，需要重新核对后适配。
+
+此兼容使用核心已有的条件 payload 覆盖，不增加服务端口，沿用原模型选择的账号。部分路由提示与请求模型统计仍显示 Astra/Sol，实际响应模型可能为 Luna；不要仅按请求模型名称推断消耗。所选账号仍需有 Luna 使用权限。原有配置、日志开关和自定义规则保留，重复启动不会重复追加相同规则；ZCode 插件不包含此兼容。
 
 ## Antigravity 与 OAuth 回调
 

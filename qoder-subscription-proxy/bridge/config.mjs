@@ -5,13 +5,14 @@ import { chmod, link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { getCoreRelease, resolveCoreBinaryPath } from "./core-runtime.mjs";
+import { parseConfigYaml } from "./config-yaml.mjs";
 
 /** 仅支持此回环地址，不接受 localhost、IPv6 或任意网络接口。 */
 export const DEFAULT_HOST = "127.0.0.1";
 /** 默认 HTTP 端口，避开旧桥 8787 与普通 CLIProxyAPI 8317；环境变量仍须为合法十进制端口。 */
 export const DEFAULT_PORT = 19787;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录。 */
-export const PLUGIN_VERSION = "0.2.2";
+export const PLUGIN_VERSION = "0.2.3";
 /** 用户指定的公共管理密码，仅限回环管理接口；不能用作客户端 API 密钥。 */
 const DEFAULT_MGMT_KEY = "123456";
 
@@ -200,35 +201,6 @@ export function renderConfigYaml(config) {
   ].join("\n");
 }
 
-/** 不回显正文的保守语法错误；这是受限 v8 核对器，而非通用 YAML 解析器。 */
-function unsupportedYaml() {
-  return new Error("config.yaml 结构不受支持或存在重复字段；请使用标准 v8 缩进映射、单行标量和块列表，不使用锚点、合并、标签、流式集合或多行标量。");
-}
-
-/** 只解码单行 JSON 双引号、YAML 单引号和无歧义普通标量，不猜测扩展 YAML 语法。 */
-function readYamlScalar(raw) {
-  const quoted = raw.match(/^("(?:[^"\\]|\\.)*")(?:[ ]+#.*)?$/);
-  if (quoted) {
-    try {
-      return JSON.parse(quoted[1]);
-    } catch {
-      throw unsupportedYaml();
-    }
-  }
-  const single = raw.match(/^'((?:[^']|'')*)'(?:[ ]+#.*)?$/);
-  if (single) return single[1].replace(/''/g, "'");
-  const plain = raw.replace(/[ ]+#.*$/, "").trimEnd();
-  if (/^(?:0|[1-9][0-9]*)$/.test(plain)) return Number(plain);
-  if (plain === "true" || plain === "false") return plain === "true";
-  // 空集合仅作为非核心字段的终值，不展开流式语法，也不容许别名或隐式类型歧义。
-  if (plain === "[]" || plain === "{}" || plain === "null" || plain === "~") return null;
-  if (!/^[A-Za-z0-9_/.\\$][A-Za-z0-9_/.\\$:+@%#=\-]*$/.test(plain)) {
-    throw unsupportedYaml();
-  }
-  if (plain.endsWith(":")) throw unsupportedYaml();
-  return plain;
-}
-
 /**
  * 核对现有 YAML 的版本、监听、远程管理禁用、客户端密钥与授权目录；失败仅报告固定字段名。
  * 识别块映射及标量/映射列表（含无额外缩进式列表），以兼容管理页保存的模型别名与供应商配置。
@@ -237,77 +209,24 @@ function readYamlScalar(raw) {
  * @param {string} text 已有 config.yaml 文本，禁止进入日志或异常信息
  */
 export function validateExistingConfig(config, text) {
-  if (typeof text !== "string" || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/.test(text)) {
-    throw unsupportedYaml();
-  }
-  /** 只保存需核对的标量路径，不构造任意 YAML 对象或执行类型扩展。 */
-  const values = new Map();
-  /** 缩进栈记录容器路径、同层缩进、键名和种类，用于拒绝重复/混合结构。 */
-  const stack = [{ indent: -1, path: "", childIndent: 0, kind: "map", keys: new Set() }];
-  for (const original of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
-    const line = original.trimEnd();
-    if (!line.trim() || line.trimStart().startsWith("#")) continue;
-    if (line.includes("\t") || line.includes("\r")) throw unsupportedYaml();
-    let indent = line.length - line.trimStart().length;
-    let content = line.slice(indent);
-    const isList = content.startsWith("- ");
-    // 无额外缩进列表可与所属键同缩进；遇到下一个映射键时再退出该容器。
-    while (stack.length > 1) {
-      const top = stack.at(-1);
-      if (indent > top.indent || (indent === top.indent && isList && top.kind !== "map")) break;
-      stack.pop();
-    }
-    let parent = stack.at(-1);
-    if (parent.childIndent === null) parent.childIndent = indent;
-    if (parent.childIndent !== indent) throw unsupportedYaml();
-    const kind = isList ? "list" : "map";
-    if (parent.kind && parent.kind !== kind) throw unsupportedYaml();
-    parent.kind = kind;
-    if (isList) {
-      if (!values.has(parent.path)) values.set(parent.path, []);
-      const items = values.get(parent.path);
-      const prefixLength = content.match(/^- +/)[0].length;
-      const item = content.slice(prefixLength);
-      if (!/^[a-z][a-z0-9-]*:(?: +.*)?$/.test(item)) {
-        items.push(readYamlScalar(item));
-        continue;
-      }
-      // 列表中的映射有独立路径和重复键集合，不能覆盖顶层安全字段或伪装成 API 密钥。
-      const itemPath = `${parent.path}[${items.length}]`;
-      items.push(null);
-      parent = { indent, path: itemPath, childIndent: indent + prefixLength, kind: "map", keys: new Set() };
-      stack.push(parent);
-      indent += prefixLength;
-      content = item;
-    }
-    const entry = content.match(/^([a-z][a-z0-9-]*):(?: +(.*))?$/);
-    if (!entry || parent.keys.has(entry[1])) throw unsupportedYaml();
-    parent.keys.add(entry[1]);
-    const path = parent.path ? `${parent.path}.${entry[1]}` : entry[1];
-    const raw = entry[2];
-    if (raw === undefined || raw.startsWith("#")) {
-      stack.push({ indent, path, childIndent: null, kind: null, keys: new Set() });
-    } else {
-      values.set(path, readYamlScalar(raw));
-    }
-  }
+  const { values } = parseConfigYaml(text);
   // 仅比较明确解析到的值，缺失字段与不一致字段均阻止启动，绝不回退上游默认监听。
-  if (values.get("config-version") !== 8) throw new Error("config.yaml 必须使用 config-version: 8。");
-  if (values.get("server.host") !== DEFAULT_HOST || config.host !== DEFAULT_HOST) {
+  if (values.get(JSON.stringify(["config-version"])) !== 8) throw new Error("config.yaml 必须使用 config-version: 8。");
+  if (values.get(JSON.stringify(["server", "host"])) !== DEFAULT_HOST || config.host !== DEFAULT_HOST) {
     throw new Error("config.yaml 的 server.host 必须与 BRIDGE_HOST 一致且为 127.0.0.1。");
   }
-  if (values.get("server.port") !== config.port) {
+  if (values.get(JSON.stringify(["server", "port"])) !== config.port) {
     throw new Error("config.yaml 的 server.port 与 BRIDGE_PORT 不一致或缺失；请同步配置后重试。");
   }
   // 固定公共管理密码只能用于本机；缺失或字符串形式的 false 也不能沿用上游默认行为。
-  if (values.get("management.allow-remote") !== false) {
+  if (values.get(JSON.stringify(["management", "allow-remote"])) !== false) {
     throw new Error("config.yaml 的 management.allow-remote 必须明确为 false；禁止远程管理。");
   }
-  const keys = values.get("access.api-keys");
+  const keys = values.get(JSON.stringify(["access", "api-keys"]));
   if (!Array.isArray(keys) || !keys.every((key) => typeof key === "string") || !keys.includes(config.apiKey)) {
     throw new Error("config.yaml 的 access.api-keys 未包含当前 BRIDGE_API_KEY；请同步本地配置后重试。");
   }
-  const authDir = values.get("oauth.auth-dir");
+  const authDir = values.get(JSON.stringify(["oauth", "auth-dir"]));
   if (typeof authDir !== "string" || !isAbsolute(authDir) || resolve(authDir) !== resolve(config.authDir)) {
     throw new Error("config.yaml 的 oauth.auth-dir 与当前数据目录不一致或缺失；禁止隐式复用其他凭据目录。");
   }
