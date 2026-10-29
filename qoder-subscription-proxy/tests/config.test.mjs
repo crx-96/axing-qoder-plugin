@@ -43,7 +43,7 @@ test("默认数据目录跨安装版本稳定保留授权，隔离旧桥且不�
     import { join } from "node:path";
     import { loadConfig, PLUGIN_VERSION } from ${JSON.stringify(moduleUrl)};
     assert.equal(homedir(), ${JSON.stringify(root)});
-    assert.equal(PLUGIN_VERSION, "0.2.4");
+    assert.equal(PLUGIN_VERSION, "0.2.5");
     const oldDir = join(homedir(), ".zcode", "zcode-subscription-proxy", "data");
     await mkdir(join(oldDir, "auths"), { recursive: true });
     await writeFile(join(oldDir, "launcher-secrets.json"), JSON.stringify({ apiKey: "old-plugin-api", mgmtKey: "old-management" }));
@@ -74,7 +74,7 @@ test("插件、市场和 MCP 对外版本保持一致", async () => {
   const marketplace = JSON.parse(await readFile(join(pluginRoot, "..", ".qoder-plugin", "marketplace.json"), "utf8"));
   const listing = marketplace.plugins.find((plugin) => plugin.name === manifest.name);
   assert.ok(listing);
-  assert.equal(PLUGIN_VERSION, "0.2.4");
+  assert.equal(PLUGIN_VERSION, "0.2.5");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(resolve(pluginRoot, "..", listing.source), pluginRoot);
@@ -96,7 +96,7 @@ test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () =>
 test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对路径", async (t) => {
   const { root, load } = await fixture(t);
   const config = await load();
-  assert.equal(PLUGIN_VERSION, "0.2.4");
+  assert.equal(PLUGIN_VERSION, "0.2.5");
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(DEFAULT_PORT, 19787);
@@ -130,9 +130,9 @@ test("平台/架构只选择当前平台缓存路径，BRIDGE_BIN 显式禁用�
     ["linux", "arm64", "linux-arm64/qoder-plugin-subscription-proxy"],
   ]) {
     const config = await loadConfig({ pluginRoot, env, platform, arch });
-    assert.equal(config.binPath, join(config.dataDir, "runtimes", "v8.0.42", `${platform}-${arch}`, path.split("/").at(-1)));
+    assert.equal(config.binPath, join(config.dataDir, "runtimes", "v8.0.47", `${platform}-${arch}`, path.split("/").at(-1)));
     assert.equal(config.core.key, `${platform}-${arch}`);
-    assert.equal(config.core.version, "v8.0.42");
+    assert.equal(config.core.version, "v8.0.47");
     for (const bin of [join(root, "自定义 core"), relative(process.cwd(), join(root, "relative core"))]) {
       const custom = await loadConfig({ pluginRoot, env: { ...env, BRIDGE_BIN: bin }, platform, arch });
       assert.equal(custom.binPath, resolve(bin));

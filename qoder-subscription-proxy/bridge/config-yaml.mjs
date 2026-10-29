@@ -25,9 +25,9 @@ function readYamlScalar(raw) {
   return plain;
 }
 
-/** 键先解码再判重；引号内冒号和 GJSON 条件不是映射分隔符。 */
+/** 核心保存时会去掉 GJSON 键的引号；仍将选择器视为完整键并在解码后判重。 */
 function readEntry(content) {
-  const entry = content.match(/^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[a-z][a-z0-9.-]*):(?: +(.*))?$/);
+  const entry = content.match(/^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[a-z][a-z0-9.-]*(?:#(?:\([^:#]*\)\.[a-z0-9.-]+)?)?):(?: +(.*))?$/);
   if (!entry) return null;
   const key = entry[1].startsWith('"') || entry[1].startsWith("'") ? readYamlScalar(entry[1]) : entry[1];
   if (key === "<<" || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(key)) throw unsupportedYaml();

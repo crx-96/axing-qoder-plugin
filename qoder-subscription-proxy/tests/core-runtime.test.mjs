@@ -156,7 +156,7 @@ test("固定发行清单、五种平台选择和目标文件名一致，状态�
     assert.deepEqual(core, { ...entry, version: manifest.version, key, platform, arch });
     assert.equal(Object.isFrozen(core), true);
     const binPath = resolveCoreBinaryPath({ dataDir: root, platform, arch });
-    assert.equal(binPath, join(root, "runtimes", "v8.0.42", key, basename(entry.path)));
+    assert.equal(binPath, join(root, "runtimes", "v8.0.47", key, basename(entry.path)));
     const config = { core, dataDir: root, binPath };
     assert.deepEqual(await getCoreStatus(config), {
       state: "missing", version: manifest.version, platform: key, reason: "核心尚未下载；首次启动订阅桥时下载当前平台核心。",

@@ -203,6 +203,19 @@ test("initialize 协商已知版本，未知版本不回显，服务版本来自
   assert.equal((await handleMessage(request(1, "initialize", {}), { config })).error.code, -32602);
 });
 
+test("初始化与生图工具共同声明 Codex/GPT 默认优先、用户指定及能力边界", async () => {
+  const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18" }), { config });
+  const listed = await handleMessage(request(2, "tools/list"), { config });
+  const guidance = initialized.result.instructions;
+  assert.equal(typeof guidance, "string");
+  assert.ok(listed.result.tools.find(tool => tool.name === "bridge_generate_image").description.startsWith(guidance));
+  for (const expected of [
+    /当前聊天主模型/, /Codex 订阅/, /GPT/, /未明确指定/, /优先使用本插件的 bridge_generate_image/,
+    /用户明确指定的工具或通道优先/, /非 GPT/, /无法确认/, /仅适用于文生图/, /参考图编辑不受支持/,
+    /不擅自换工具、换模型或重试/, /遵守宿主工具权限/, /不改变聊天主模型/,
+  ]) assert.match(guidance, expected);
+});
+
 test("工具只有 status/start/stop/generate_image，移除 login 并明确单图订阅约束", async () => {
   const response = await handleMessage(request(1, "tools/list"), { config });
   const tools = response.result.tools;

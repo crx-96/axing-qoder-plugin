@@ -22,6 +22,7 @@ const SERVER_INFO = { name: "qoder-subscription-proxy", version: PLUGIN_VERSION 
 const DEFAULT_HANDLERS = { ensureRunning, getStatus, stopBridge, generateImage };
 /** 无参数工具的契约；显式传 null、数组或额外参数均不接受。 */
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
+const IMAGE_TOOL_GUIDANCE = "当前聊天主模型为 GPT（包括通过 Codex 订阅接入），且用户未明确指定生图工具或通道时，优先使用本插件的 bridge_generate_image，不要先调用宿主内置 ImageGen 或其他生图服务。按当前聊天主模型判断，不按待生成的图片模型判断；用户明确指定的工具或通道优先，非 GPT 会话或无法确认当前聊天主模型时不据此改道。仅适用于文生图，参考图编辑不受支持，不把图片路径或 URL 当作已读取的输入。工具不可用、授权/额度/权限受阻或生成失败时如实说明，不擅自换工具、换模型或重试。遵守宿主工具权限，不改变聊天主模型。";
 /** 图片只接受文字与生成选项，不接收文件路径、图片 URL 或输出路径。 */
 const IMAGE_SCHEMA = {
   type: "object",
@@ -55,7 +56,7 @@ const TOOLS = [
   },
   {
     name: "bridge_generate_image",
-    description: "通过已授权订阅生成一张图片。默认模型 gpt-image-2.5，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。",
+    description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。默认模型 gpt-image-2.5，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
     inputSchema: IMAGE_SCHEMA,
   },
 ];
@@ -191,7 +192,7 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
     case "initialize": {
       if (typeof params?.protocolVersion !== "string" || !params.protocolVersion.trim()) return fail(id, -32602, "缺少有效的 protocolVersion。");
       const protocolVersion = PROTOCOL_VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : PROTOCOL_VERSIONS[0];
-      return ok(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
+      return ok(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: SERVER_INFO, instructions: IMAGE_TOOL_GUIDANCE });
     }
     case "ping":
       return ok(id, {});

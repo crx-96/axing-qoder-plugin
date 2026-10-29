@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { ensureApprovalRouting } from "../bridge/approval-routing.mjs";
+import { ensureApprovalRouting, renderApprovalOverride } from "../bridge/approval-routing.mjs";
 import { parseConfigYaml } from "../bridge/config-yaml.mjs";
 import { loadConfig, renderConfigYaml, validateExistingConfig } from "../bridge/config.mjs";
 import { ensureDataDir } from "../bridge/bridge-process.mjs";
@@ -142,6 +142,64 @@ for (const suffix of [
   });
 }
 
+test("核心去掉 GJSON 键引号后可加载、迁移且保持幂等", () => {
+  const currentConfig = ensureApprovalRouting(base);
+  const previousConfig = base + "requests:\n  payload:\n    override:\n" +
+    renderApprovalOverride(6, ["gpt-*"], "codex-auto-review", ["none", "low"], false) + "\n";
+  for (const original of [legacyConfig, previousConfig, currentConfig]) {
+    const saved = original.replace(/^(\s*(?:- )?)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'):/gm, (_match, indent, key) =>
+      `${indent}${key.startsWith('"') ? JSON.parse(key) : key.slice(1, -1).replaceAll("''", "'")}:`);
+    assert.deepEqual(parseConfigYaml(saved).values, parseConfigYaml(original).values);
+    validateExistingConfig(config, saved);
+    const migrated = ensureApprovalRouting(saved);
+    assert.equal(parseConfigYaml(migrated).values.get(overrideKey).length, 1);
+    assert.equal(ensureApprovalRouting(migrated), migrated);
+    if (original === currentConfig) assert.equal(migrated, saved);
+  }
+});
+
+test("GJSON 普通键与引号键仍判重，不接纳伪装映射或注释", () => {
+  for (const key of ["input.0.content.#", 'input.0.content.#(type=="input_text").type']) {
+    assert.throws(() => parseConfigYaml(`rules:\n  ${key}: 1\n  ${JSON.stringify(key)}: 2\n`), /结构不受支持/);
+  }
+  for (const key of ['input.0.content.#(text%"fake: field").type', 'input.0.content.#(text%"fake # comment").type']) {
+    assert.throws(() => parseConfigYaml(`rules:\n  ${key}: 1\n`), /结构不受支持/);
+  }
+});
+
+test("审批补充只追加风险判断说明，保留宿主政策、拒绝记录及不可信输入边界", () => {
+  const { values } = parseConfigYaml(ensureApprovalRouting(base));
+  const params = key => values.get(JSON.stringify(["requests", "payload", "override", 0, "params", key]));
+  assert.equal(params("input.0.content.1.type"), "input_text");
+  const guidance = params("input.0.content.1.text");
+  for (const expected of [
+    /original host policy/, /git status/, /git -C/, /absolute path/, /full command/,
+    /redirections/, /substitutions/, /credentials/, /destructive/, /untrusted/,
+    /host-verified UserAnswer/, /specifically authorized task temporary directory/, /model-authored tool justification alone is not authorization/,
+    /rejected-by-user/, /blocked-by-permissions/, /uncertainty/, /shouldBlock/, /reason/,
+  ]) assert.match(guidance, expected);
+  assert.equal(params("input.0.content.0.text"), undefined);
+  assert.equal(params("instructions"), undefined);
+});
+
+test("迁移 0.2.4 纯模型路由并保留用户修改的路由", () => {
+  const oldRule = renderApprovalOverride(6, ["gpt-*"], "codex-auto-review", ["none", "low"], false) + "\n";
+  for (const old of [oldRule, oldRule + oldRule, oldRule + legacyRule]) {
+    const migrated = ensureApprovalRouting(base + "requests:\n  payload:\n    override:\n" + old);
+    const { values } = parseConfigYaml(migrated);
+    assert.equal(values.get(overrideKey).length, 1);
+    assert.equal(ensureApprovalRouting(migrated), migrated);
+    assert.equal(values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "input.0.content.1.type"])), "input_text");
+  }
+  for (const rule of [oldRule.replace('model: "codex-auto-review"', 'model: "custom-review"'), oldRule + "          temperature:\n"]) {
+    const custom = base + "requests:\n  payload:\n    override:\n" + rule;
+    const updated = ensureApprovalRouting(custom);
+    assert.ok(updated.startsWith(custom));
+    assert.equal(parseConfigYaml(updated).values.get(overrideKey).length, 2);
+    assert.equal(ensureApprovalRouting(updated), updated);
+  }
+});
+
 test("审批规则覆盖 GPT 通配符，使用专用审核模型 low", () => {
   const { values } = parseConfigYaml(ensureApprovalRouting(base));
   const at = (...path) => values.get(JSON.stringify(["requests", "payload", "override", 0, ...path]));
@@ -191,6 +249,8 @@ test("用户改过的旧规则不删除，不改写用户配置内容", () => {
   for (const original of [
     legacyConfig.replace('model: "gpt-6-luna"', 'model: "custom-review"'),
     legacyConfig + "          temperature: 1\n",
+    legacyConfig + "          temperature:\n",
+    legacyConfig + "          temperature: # keep user null\n",
     legacyConfig.replaceAll('"reasoning.effort": "none"', '"reasoning.effort": "low"'),
   ]) {
     const updated = ensureApprovalRouting(original);
@@ -259,7 +319,10 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
       response.end(`data: ${JSON.stringify({ id: "chat_mock", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: { role: "assistant", content: "fixture" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
       return;
     }
-    response.end(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_mock", object: "response", status: "completed", model: body.model, output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`);
+    const fixturePrefix = "Classifier fixture result: ";
+    const fixture = body.input?.flatMap(item => item.content ?? []).find(part => part.text?.startsWith(fixturePrefix));
+    const output = fixture ? [{ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: fixture.text.slice(fixturePrefix.length), annotations: [] }] }] : [];
+    response.end(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_mock", object: "response", status: "completed", model: body.model, output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`);
   });
   let child;
   let exited;
@@ -296,9 +359,9 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     "      models:", "        - name: gpt-compatible", "          alias: gpt-compatible", "",
   ].join("\n");
   const original = renderConfigYaml(current).replace("  disable-control-panel: false", "  disable-control-panel: true") + provider;
-  const text = ensureApprovalRouting(original);
-  validateExistingConfig(current, text);
-  await writeFile(current.configPath, text);
+  const textConfig = ensureApprovalRouting(original);
+  validateExistingConfig(current, textConfig);
+  await writeFile(current.configPath, textConfig);
   const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
   child = spawn(binary, ["-config", current.configPath], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   exited = once(child, "exit");
@@ -348,7 +411,12 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     const sent = captured.at(-1);
     assert.equal(sent.path, "/responses");
     assert.deepEqual({ model: sent.body.model, effort: sent.body.reasoning?.effort }, { model: expectedModel, effort: expectedEffort }, JSON.stringify({ model, effort, role, instruction }));
-    assert.deepEqual(sent.body.input, input.map(item => ({ ...item, role: item.role === "system" ? "developer" : item.role })));
+    const expectedInput = input.map(item => ({ ...item, role: item.role === "system" ? "developer" : item.role }));
+    if (expectedModel === "codex-auto-review" && model.startsWith("gpt-")) {
+      const guidance = parseConfigYaml(textConfig).values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "input.0.content.1.text"]));
+      expectedInput[0] = { ...expectedInput[0], content: [...expectedInput[0].content, { type: "input_text", text: guidance }] };
+    }
+    assert.deepEqual(sent.body.input, expectedInput);
     assert.deepEqual(sent.body.text, text);
   }
   const chatResponse = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -370,6 +438,22 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
   });
   assert.equal(nonstreamResponse.status, 200);
   assert.equal((await nonstreamResponse.json()).model, "codex-auto-review");
+  for (const verdict of [
+    JSON.stringify({ shouldBlock: false, reason: "mock: scoped inspection" }),
+    JSON.stringify({ shouldBlock: true, reason: "mock: unauthorized side effect" }),
+    "malformed reviewer response",
+  ]) {
+    const pending = { role: "user", content: [{ type: "input_text", text: "Classifier fixture result: " + verdict }] };
+    const response = await fetch(`${endpoint}/v1/responses`, {
+      method: "POST", headers, signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({ model: "gpt-6-luna", input: [{ role: "system", content: [{ type: "input_text", text: classifierSystem }] }, pending], stream: false, reasoning: { effort: "low" } }),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.output[0].content[0].text, verdict, "允许、阻止和格式错误均原样交给宿主，不默认放行");
+    assert.deepEqual(captured.at(-1).body.input[1], pending, "不改写不可信待检查内容");
+    assert.equal(captured.at(-1).body.input[0].content[0].text, classifierSystem, "不覆盖宿主原政策");
+  }
   const beforeFailure = captured.length;
   const failureResponse = await fetch(`${endpoint}/v1/responses`, {
     method: "POST", headers, signal: AbortSignal.timeout(10000),
@@ -379,4 +463,25 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
   assert.equal((await failureResponse.json()).error.code, "model_not_found");
   assert.equal(captured.length, beforeFailure + 1);
   assert.equal(captured.at(-1).body.model, "codex-auto-review");
+
+  await t.test("管理页修改日志设置后审批规则仍可加载且不重复追加", async () => {
+    const response = await fetch(`${endpoint}/v8/management/config`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer 123456", "Content-Type": "application/json" },
+      body: JSON.stringify({ observability: { logs: { "request-log": true } } }),
+      signal: AbortSignal.timeout(10000),
+    });
+    assert.equal(response.status, 200, await response.text());
+    const saved = await readFile(current.configPath, "utf8");
+    validateExistingConfig(current, saved);
+    assert.equal(ensureApprovalRouting(saved), saved);
+    const values = parseConfigYaml(saved).values;
+    assert.equal(values.get(JSON.stringify(["observability", "logs", "request-log"])), true);
+    assert.equal(values.get(overrideKey).length, 1);
+    assert.equal(values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "input.0.content.1.text"])),
+      parseConfigYaml(textConfig).values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "input.0.content.1.text"])));
+    await loadConfig({ pluginRoot, env: { BRIDGE_DATA_DIR: root, BRIDGE_PORT: String(port), BRIDGE_API_KEY: "isolated-api" } });
+    await ensureDataDir(current);
+    assert.equal(await readFile(current.configPath, "utf8"), saved);
+  });
 });

@@ -10,7 +10,7 @@
 
 ## 按需下载与离线覆盖
 
-本 Qoder 插件包不携带五平台 CLIProxyAPI 核心，只保留固定版本清单、文档和许可证，并将 MCP 握手与核心准备分离：**宿主启动插件 MCP 进程时会在后台自动准备核心**，无需先有模型、账号或工具调用；缺少有效缓存时通过系统 `curl` 和 HTTPS 下载当前平台的 `v8.0.42`，核验归档及二进制 SHA256 后缓存到 `dataDir/runtimes/v8.0.42/<platform-arch>/<basename(platforms.json.path)>`；默认 `dataDir` 为 `~/.qoder/qoder-subscription-proxy/data`。MCP 完成本地配置加载后即可握手，代理实际就绪由 `bridge_status.ready` 表示。`bridge_stop` 会取消本会话的在途准备并持久暂停，重连也不会自动下载或启动，需显式 `bridge_start` 恢复。没有账号不阻止管理页启动或握手。
+本 Qoder 插件包不携带五平台 CLIProxyAPI 核心，只保留固定版本清单、文档和许可证，并将 MCP 握手与核心准备分离：**宿主启动插件 MCP 进程时会在后台自动准备核心**，无需先有模型、账号或工具调用；缺少有效缓存时通过系统 `curl` 和 HTTPS 下载当前平台的 `v8.0.47`，核验归档及二进制 SHA256 后缓存到 `dataDir/runtimes/v8.0.47/<platform-arch>/<basename(platforms.json.path)>`；默认 `dataDir` 为 `~/.qoder/qoder-subscription-proxy/data`。MCP 完成本地配置加载后即可握手，代理实际就绪由 `bridge_status.ready` 表示。`bridge_stop` 会取消本会话的在途准备并持久暂停，重连也不会自动下载或启动，需显式 `bridge_start` 恢复。没有账号不阻止管理页启动或握手。
 
 后台核心准备保留独立的 **10 分钟（600 秒）**预算，超时或下载失败仍保留 MCP 连接，通过状态和安全 stderr 摘要报告原因；检查原因后可显式 `bridge_start` 或在宿主 MCP 设置中重连重试。本地配置不可用仍会导致初始化失败并非零退出。EOF、断管或退出信号会中止准备并清理。watchdog 不下载或自动重试下载；宿主何时自动连接 MCP 尚需官方证据，不承诺只打开空白 Qoder 就触发。核心下载不依赖扩大握手超时。
 

@@ -6,7 +6,7 @@
     {
       "name": "qoder-subscription-proxy",
       "source": "./qoder-subscription-proxy",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "description": "qoder订阅代理：本机订阅授权、模型 API 与图片生成，随 MCP 生命周期托管。",
       "displayName": "qoder订阅代理",
       "displayName_i18n": { "zh-CN": "qoder订阅代理" },
