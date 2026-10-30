@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { probeBridge } from "./bridge-process.mjs";
+import { DEFAULT_IMAGE_MODEL, GEMINI_IMAGE_MODEL } from "./image-models.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -290,6 +291,15 @@ async function previewImage(filePath, image, signal) {
   }
 }
 
+/**
+ * 用已授权订阅生成一张图片，校验后保存原图并返回本地路径与可选预览。
+ * 按 model 选择上游协议：GEMINI_IMAGE_MODEL 走原生 generateContent，其余走 OpenAI 图片端点。
+ * 不重放 POST、不降级换模型；signal 取消只停止本地等待，不保证上游未消耗额度。
+ * @param {object} config 含 host/port/apiKey/imagesDir 的运行配置
+ * @param {object} args 已通过工具 schema 校验的文字描述与生成选项
+ * @param {{signal?: AbortSignal}} [options] 请求级取消信号
+ * @returns {Promise<{content: Array<object>}>} MCP 内容数组，首项为原图路径说明
+ */
 export async function generateImage(config, args, { signal } = {}) {
   const allowed = ["prompt", "model", "size", "quality", "background", "output_format"];
   if (!args || typeof args !== "object" || Array.isArray(args) ||
@@ -297,7 +307,7 @@ export async function generateImage(config, args, { signal } = {}) {
       typeof args.prompt !== "string" || !args.prompt.trim() || Array.from(args.prompt).length > 32000) {
     throw safeError("请提供非空的图片描述（最多 32000 字符）及受支持的参数", "INVALID_ARGUMENT");
   }
-  const model = args.model ?? "gpt-image-2.5";
+  const model = args.model ?? DEFAULT_IMAGE_MODEL;
   if (typeof model !== "string" || !model.trim() || Array.from(model).length > 200) throw safeError("模型名称无效", "INVALID_ARGUMENT");
   for (const [key, values] of Object.entries({
     size: ["auto", "1024x1024", "1536x1024", "1024x1536"],
@@ -307,7 +317,7 @@ export async function generateImage(config, args, { signal } = {}) {
   })) {
     if (args[key] !== undefined && !values.includes(args[key])) throw safeError(`不支持的 ${key} 参数`, "INVALID_ARGUMENT");
   }
-  const gemini = model === "gemini-3.1-flash-image";
+  const gemini = model === GEMINI_IMAGE_MODEL;
   if (gemini && ((args.quality !== undefined && args.quality !== "auto") ||
       (args.background !== undefined && args.background !== "auto") ||
       (args.output_format !== undefined && args.output_format !== "png"))) {

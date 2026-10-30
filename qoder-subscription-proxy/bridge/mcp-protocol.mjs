@@ -3,6 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import { ensureRunning, getStatus, stopBridge } from "./bridge-process.mjs";
 import { PLUGIN_VERSION } from "./config.mjs";
 import { generateImage } from "./image-generation.mjs";
+import { DEFAULT_IMAGE_MODEL, GEMINI_IMAGE_MODEL } from "./image-models.mjs";
 
 /** 2025-03-26 强制支持批请求，本按行单消息实现不声明支持；其余版本协商到首项。 */
 const PROTOCOL_VERSIONS = ["2025-06-18", "2024-11-05"];
@@ -22,13 +23,18 @@ const SERVER_INFO = { name: "qoder-subscription-proxy", version: PLUGIN_VERSION 
 const DEFAULT_HANDLERS = { ensureRunning, getStatus, stopBridge, generateImage };
 /** 无参数工具的契约；显式传 null、数组或额外参数均不接受。 */
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
-const IMAGE_TOOL_GUIDANCE = "当前聊天主模型为 GPT（包括通过 Codex 订阅接入）或 Gemini，且用户未明确指定生图工具或通道时，优先使用本插件的 bridge_generate_image，不要先调用宿主内置 ImageGen 或其他生图服务。未明确指定图片模型时，GPT 会话显式传入 model=gpt-image-2.5，Gemini 会话显式传入 model=gemini-3.1-flash-image；插件无法从 MCP 请求读取当前聊天主模型，Gemini 会话不能省略 model。按当前聊天主模型判断，不按待生成的图片模型判断；用户明确指定的工具或通道优先，明确指定的图片模型优先于上述默认映射；其他主模型或无法确认当前聊天主模型时不据此改道。仅适用于文生图，参考图编辑不受支持，不把图片路径或 URL 当作已读取的输入。工具不可用、授权/额度/权限受阻或生成失败时如实说明，不擅自换工具、换模型或重试。遵守宿主工具权限，不改变聊天主模型。";
+/**
+ * 生图通道选择指引，同时用于 initialize.instructions 与生图工具描述前缀。
+ * 插件读不到会话主模型，因此明确告知调用方主模型对自身已知、生图前无需预查询，
+ * 避免为核实一件工具无法回答的事而反复调用 bridge_status 或模型列表。
+ */
+const IMAGE_TOOL_GUIDANCE = `当前聊天主模型为 GPT（包括通过 Codex 订阅接入）或 Gemini，且用户未明确指定生图工具或通道时，优先使用本插件的 bridge_generate_image，不要先调用宿主内置 ImageGen 或其他生图服务。未明确指定图片模型时，GPT 会话显式传入 model=${DEFAULT_IMAGE_MODEL}，Gemini 会话显式传入 model=${GEMINI_IMAGE_MODEL}；Gemini 会话不能省略 model，省略会按 ${DEFAULT_IMAGE_MODEL} 处理。你会话的主模型对自身是已知的，生图前不需要调用 bridge_status、查询模型列表或另行核实主模型与图片模型是否可用；直接提交生图调用，由本工具返回结果或失败原因。按当前聊天主模型判断，不按待生成的图片模型判断；用户明确指定的工具或通道优先，明确指定的图片模型优先于上述默认映射；主模型既不是 GPT 也不是 Gemini 时沿用宿主生图工具，不据此改道。仅适用于文生图，参考图编辑不受支持，不把图片路径或 URL 当作已读取的输入。工具不可用、授权/额度/权限受阻或生成失败时如实说明，不擅自换工具、换模型或重试。遵守宿主工具权限，不改变聊天主模型。`;
 /** 图片只接受文字与生成选项，不接收文件路径、图片 URL 或输出路径。 */
 const IMAGE_SCHEMA = {
   type: "object",
   properties: {
     prompt: { type: "string", minLength: 1, maxLength: 32_000, pattern: "\\S", description: "必填的非空图片文字描述；不会读取其中的路径或 URL。" },
-    model: { type: "string", minLength: 1, maxLength: 200, pattern: "\\S", default: "gpt-image-2.5", description: "图片模型：GPT 会话传 gpt-image-2.5，Gemini 会话必须传 gemini-3.1-flash-image；用户指定优先。省略仍为 gpt-image-2.5，不会自动识别聊天主模型。" },
+    model: { type: "string", minLength: 1, maxLength: 200, pattern: "\\S", default: DEFAULT_IMAGE_MODEL, description: `图片模型：GPT 会话传 ${DEFAULT_IMAGE_MODEL}，Gemini 会话必须传 ${GEMINI_IMAGE_MODEL}；用户指定优先。省略仍为 ${DEFAULT_IMAGE_MODEL}，不会自动识别聊天主模型，也不需要先查询模型列表确认。` },
     size: { type: "string", enum: ["auto", "1024x1024", "1536x1024", "1024x1536"], description: "GPT 图片尺寸；Gemini 分别映射为 1K 的 1:1、3:2、2:3 比例，不保证精确像素；auto 或省略由上游决定。" },
     quality: { type: "string", enum: ["auto", "low", "medium", "high"], description: "GPT 图片质量；Gemini 仅允许 auto 或省略。" },
     background: { type: "string", enum: ["auto", "transparent", "opaque"], description: "GPT 背景选项；Gemini 仅允许 auto 或省略。" },
@@ -41,7 +47,7 @@ const IMAGE_SCHEMA = {
 const TOOLS = [
   {
     name: "bridge_status",
-    description: "查看订阅桥运行状态、核心后台下载状态和启动失败原因；MCP 已连接不代表代理已就绪，ready=true 才可使用代理。不会执行登录。",
+    description: "查看订阅桥运行状态、核心后台下载状态和启动失败原因；MCP 已连接不代表代理已就绪，ready=true 才可使用代理。models.imageModels 列出本工具可路由的图片模型（含 Gemini 原生模型）。生图前无需调用本工具确认主模型或图片模型。不会执行登录。",
     inputSchema: EMPTY_SCHEMA,
   },
   {
@@ -56,7 +62,7 @@ const TOOLS = [
   },
   {
     name: "bridge_generate_image",
-    description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。省略 model 时默认 gpt-image-2.5，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
+    description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。省略 model 时默认 ${DEFAULT_IMAGE_MODEL}，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
     inputSchema: IMAGE_SCHEMA,
   },
 ];
@@ -169,7 +175,7 @@ async function callTool(name, args, ctx, handlers, signal) {
       return textResult({ stopped, reason: safeReason(result?.reason, stopped ? "已停止" : "未能停止", config) }, !stopped);
     }
     case "bridge_generate_image": {
-      const result = await handlers.generateImage(config, { model: "gpt-image-2.5", output_format: "png", ...args }, { signal });
+      const result = await handlers.generateImage(config, { model: DEFAULT_IMAGE_MODEL, output_format: "png", ...args }, { signal });
       if (!isObject(result) || !Array.isArray(result.content)) throw new Error("invalid image result");
       return result;
     }

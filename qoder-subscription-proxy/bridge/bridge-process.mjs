@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { renderConfigYaml, validateExistingConfig } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
+import { isRoutableImageModel } from "./image-models.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
 import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
@@ -428,7 +429,8 @@ export async function getStatus(config) {
         throw bridgeError("当前进程尚未加载网页授权修复；请先 bridge_stop，再 bridge_start。");
       }
       const ids = await probeModels(config);
-      modelState = { count: ids.length, sample: ids.slice(0, 40), imageModels: ids.filter((id) => id.startsWith("gpt-image-")) };
+      // imageModels 是本工具可路由的图片模型全集，不受 sample 的 40 条截断影响。
+      modelState = { count: ids.length, sample: ids.slice(0, 40), imageModels: ids.filter(isRoutableImageModel) };
       ready = true;
     } catch (error) { modelState = { count: null, sample: [], note: error.message }; }
   }

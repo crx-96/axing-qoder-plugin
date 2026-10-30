@@ -1,4 +1,4 @@
-# qoder订阅代理 · 0.2.6
+# qoder订阅代理 · 0.2.7
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件，将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理和图片生成 MCP 工具。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.6-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.6-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
+从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.7-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.7-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -93,12 +93,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\antigravity-lo
 
 | 工具 | 用途 |
 | --- | --- |
-| `bridge_status` | 查询就绪、核心准备及失败原因、管理地址、凭据数量和模型，不返回 token 或 API Key |
+| `bridge_status` | 查询就绪、核心准备及失败原因、管理地址、凭据数量和模型，不返回 token 或 API Key；`models.imageModels` 含 GPT 与 Gemini 图片模型，生图前无需调用 |
 | `bridge_start` | 解除暂停，必要时准备核心，启动或复用代理 |
 | `bridge_stop` | 停止可确认归属的代理，取消本会话准备并持久暂停 |
 | `bridge_generate_image` | 使用已授权订阅生成一张图片，可能消耗额度或产生费用 |
 
-`0.2.6` 在 MCP 初始化说明和工具描述中同步声明：按**当前聊天主模型**选择生图方式。用户未指定生图工具或通道时，GPT/Codex 和 Gemini 会话优先使用本插件的 `bridge_generate_image`；未指定图片模型时，GPT/Codex 显式传入 `model=gpt-image-2.5`，Gemini 显式传入 `model=gemini-3.1-flash-image`，而不是先调用内置 ImageGen。用户明确指定的工具、通道或图片模型优先；其他主模型或主模型未知时不按此规则改道，不按图片模型倒推聊天主模型。仅适用于文生图，不支持参考图编辑；工具不可用或生成失败时说明原因，不擅自换通道、换模型或重试。此处是工具选择指引，实际选择仍受宿主指令、工具权限和聊天模型行为影响，不绕过宿主权限边界。
+`0.2.7` 修正 Gemini 会话生图前的多余查询。MCP 初始化说明和工具描述改为明确「会话主模型对自身是已知的，生图前不需要调用 `bridge_status`、查询模型列表或另行核实主模型与图片模型是否可用，直接提交生图调用」，并移除 `0.2.6` 中「无法确认当前聊天主模型」这类引发反复核实的措辞；`bridge_status` 描述也直接说明生图前无需调用它确认模型。同时 `models.imageModels` 改为列出本工具实际可路由的全部图片模型（`gpt-image-*` 同族与 `gemini-3.1-flash-image`），不再只筛 GPT，也不受 `sample` 前 40 条截断影响；模型标识由 `bridge/image-models.mjs` 单一来源提供，状态清单、工具 schema 与请求路由共用，避免再次漂移。
+
+分流规则本身不变：按**当前聊天主模型**选择生图方式。用户未指定生图工具或通道时，GPT/Codex 和 Gemini 会话优先使用本插件的 `bridge_generate_image`；未指定图片模型时，GPT/Codex 显式传入 `model=gpt-image-2.5`，Gemini 显式传入 `model=gemini-3.1-flash-image`，而不是先调用内置 ImageGen。用户明确指定的工具、通道或图片模型优先；主模型既不是 GPT 也不是 Gemini 时沿用宿主生图工具，不按图片模型倒推聊天主模型。仅适用于文生图，不支持参考图编辑；工具不可用或生成失败时说明原因，不擅自换通道、换模型或重试。此处是工具选择指引，实际选择仍受宿主指令、工具权限和聊天模型行为影响，不绕过宿主权限边界。本次改动减少的是调用前的预查询往返，**不改变上游出图耗时**，也未做真实账号的端到端计时验证。
 
 例如：“调用 qoder订阅代理的 `bridge_generate_image`，显式传入 `model=gpt-image-2.5`，生成一张白底绿色三角形。”Gemini 示例：“调用同一工具，显式传入 `model=gemini-3.1-flash-image`，生成一张白底绿色三角形。”
 
@@ -159,4 +161,4 @@ node --test qoder-subscription-proxy/tests/*.test.mjs
 
 验证 Windows 内置运行时还需将 `QODER_TEST_RUNTIME` 设置为实际 `Qoder CN.exe` 或 `Qoder.exe` 的绝对路径；对应测试通过 Node mode 启动隔离 harness，不关闭当前 Qoder App，也不修改其设置。
 
-`0.2.6` 在 Windows 使用 CLIProxyAPI `v8.0.47` 完成全量回归及补充定向验证，合并有效结果为 311 项中 296 项通过、15 项按平台条件跳过，包含实际 Qoder 内置运行时、Gemini 原生请求与图片解析的模拟 HTTP 测试、GPT 回归、原生审批路由、配置迁移及打包校验。缓存失效测试显式推进文件修改时间，避免 Windows 快速等长写入的时间戳碰撞；修改后核心缓存测试已复测通过。**这不等于 Desktop 界面导入、真实账号登录、生图选择与审批误报率改善，或 macOS/Linux 实机验收通过。** 云端 CI 结果以仓库 Actions 页面为准，自动化测试不能替代真实服务端到端验收。
+`0.2.7` 在 Windows 使用 CLIProxyAPI `v8.0.47` 完成全量回归，结果为 314 项中 299 项通过、15 项按平台条件跳过，包含实际 Qoder CN 内置运行时（Electron `43.1.1` Node mode）、原生核心的 Job 回收、Gemini 原生请求与图片解析的模拟 HTTP 测试、GPT 回归、图片模型清单与请求路由的一致性、生图指引免预查询断言、原生审批路由、配置迁移及打包校验。缓存失效测试显式推进文件修改时间，避免 Windows 快速等长写入的时间戳碰撞。**这不等于 Desktop 界面导入、真实账号登录、生图通道选择与出图耗时改善，或 macOS/Linux 实机验收通过。** 云端 CI 结果以仓库 Actions 页面为准，自动化测试不能替代真实服务端到端验收。
