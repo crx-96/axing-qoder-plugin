@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { decodeImage, generateImage } from "../bridge/image-generation.mjs";
+import { handleMessage } from "../bridge/mcp-protocol.mjs";
 
 const execFileAsync = promisify(execFile);
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==", "base64");
@@ -110,6 +111,99 @@ test("generateImage 保留指定模型且请求参数不允许任意服务端选
   await generateImage(config, { prompt: "test", model: "gpt-image-2.5-flare", output_format: "png", quality: "low" });
   assert.equal(requests[1].body.model, "gpt-image-2.5-flare");
   assert.equal(requests[1].body.quality, "low");
+});
+
+test("Gemini MCP 调用保留图片模型并保存原图，失败不回退 GPT 或重试", async (t) => {
+  for (const status of [200, 403, 429, 502]) {
+    await t.test(`HTTP ${status}`, async (t) => {
+      const { config, requests } = await imageFixture(t, (_request, response) => {
+        if (status === 200) response.end(JSON.stringify({ candidates: [{ content: { parts: [
+          { text: "已生成图片" }, { inlineData: { mimeType: "image/png", data: png.toString("base64") } },
+        ] } }] }));
+        else response.writeHead(status).end(JSON.stringify({ error: { message: "UPSTREAM_SECRET" } }));
+      });
+      const args = { prompt: "一只猫", model: "gemini-3.1-flash-image", size: "1536x1024" };
+      const response = await handleMessage({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "bridge_generate_image", arguments: args },
+      }, { config });
+      const posts = requests.filter((entry) => entry.method === "POST");
+      assert.equal(posts.length, 1);
+      assert.equal(posts[0].url, "/v1beta/models/gemini-3.1-flash-image:generateContent");
+      assert.equal(posts[0].headers.authorization, `Bearer ${config.apiKey}`);
+      assert.deepEqual(posts[0].body, {
+        contents: [{ role: "user", parts: [{ text: args.prompt }] }],
+        generationConfig: { candidateCount: 1, responseModalities: ["TEXT", "IMAGE"], imageConfig: { aspectRatio: "3:2", imageSize: "1K" } },
+      });
+      assert.equal(args.output_format, undefined);
+      assert.doesNotMatch(JSON.stringify(response), /UPSTREAM_SECRET|image-test-secret-only/);
+      const files = await savedFiles(config);
+      if (status === 200) {
+        assert.notEqual(response.result.isError, true);
+        assert.equal(files.length, 1);
+        assert.deepEqual(await readFile(join(config.imagesDir, files[0])), png);
+        assert.deepEqual(response.result.content.find((item) => item.type === "image"), {
+          type: "image", data: png.toString("base64"), mimeType: "image/png",
+        });
+      } else {
+        assert.equal(response.result.isError, true);
+        assert.match(response.result.content[0].text, new RegExp(`HTTP ${status}`));
+        assert.deepEqual(files, []);
+      }
+    });
+  }
+});
+
+test("Gemini 映射尺寸并保留上游实际 JPEG，不发送 GPT 专用选项", async (t) => {
+  const { config, requests } = await imageFixture(t, (_request, response) => response.end(JSON.stringify({
+    candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/jpeg", data: jpeg.toString("base64") } }] } }],
+  })));
+  for (const [size, aspectRatio] of [[undefined, undefined], ["auto", undefined], ["1024x1024", "1:1"], ["1536x1024", "3:2"], ["1024x1536", "2:3"]]) {
+    const result = await generateImage(config, { prompt: "猫", model: "gemini-3.1-flash-image", size, quality: "auto", background: "auto", output_format: "png" });
+    const request = requests.at(-1);
+    assert.equal(request.url, "/v1beta/models/gemini-3.1-flash-image:generateContent");
+    assert.deepEqual(request.body.generationConfig.imageConfig, aspectRatio ? { aspectRatio, imageSize: "1K" } : undefined);
+    for (const key of ["model", "size", "quality", "background", "output_format", "response_format", "n", "stream"]) assert.equal(Object.hasOwn(request.body, key), false);
+    assert.equal(result.content.find((item) => item.type === "image").mimeType, "image/jpeg");
+  }
+  const files = await savedFiles(config);
+  assert.equal(files.length, 5);
+  for (const file of files) {
+    assert.match(file, /\.jpg$/);
+    assert.deepEqual(await readFile(join(config.imagesDir, file)), jpeg);
+  }
+});
+
+test("Gemini 不支持的生成选项在网络请求前拒绝", async (t) => {
+  const { config, requests } = await imageFixture(t, () => assert.fail("不应发请求"));
+  for (const options of [{ quality: "low" }, { quality: "medium" }, { quality: "high" }, { background: "transparent" }, { background: "opaque" }, { output_format: "jpeg" }, { output_format: "webp" }]) {
+    await assert.rejects(generateImage(config, { prompt: "猫", model: "gemini-3.1-flash-image", ...options }), { code: "INVALID_ARGUMENT" });
+  }
+  assert.equal(requests.length, 0);
+  assert.deepEqual(await savedFiles(config), []);
+});
+
+test("Gemini 拒绝缺图、多图、损坏图片及 MIME 不一致，不保存或重试", async (t) => {
+  const inlineData = { mimeType: "image/png", data: png.toString("base64") };
+  const content = { parts: [{ inlineData }] };
+  const invalid = [null, {}, { candidates: [] }, { candidates: [{ content }, { content }] },
+    ...[undefined, {}, [], [{ text: "UPSTREAM_SECRET" }], [{ fileData: { fileUri: "https://must-not-fetch.invalid/image.png" } }],
+      [{ inlineData }, { inlineData }], [{ inlineData: { ...inlineData, data: "broken!" } }],
+      [{ inlineData: { ...inlineData, mimeType: "image/jpeg" } }], [{ inlineData: { data: inlineData.data } }],
+    ].map((parts) => ({ candidates: [{ content: { parts } }] })),
+  ];
+  for (const body of invalid) {
+    await t.test(JSON.stringify(body), async (t) => {
+      const { config, requests } = await imageFixture(t, (_request, response) => response.end(JSON.stringify(body)));
+      await assert.rejects(generateImage(config, { prompt: "猫", model: "gemini-3.1-flash-image" }), (error) => {
+        assert.equal(error.code, "IMAGE_GENERATION_FAILED");
+        assert.doesNotMatch(error.safeMessage, /UPSTREAM_SECRET|must-not-fetch/);
+        return true;
+      });
+      assert.equal(requests.filter((entry) => entry.method === "POST").length, 1);
+      assert.deepEqual(await savedFiles(config), []);
+    });
+  }
 });
 
 test("generateImage 按 Unicode 码点校验 prompt 与 model 的长度边界", async (t) => {

@@ -203,17 +203,23 @@ test("initialize 协商已知版本，未知版本不回显，服务版本来自
   assert.equal((await handleMessage(request(1, "initialize", {}), { config })).error.code, -32602);
 });
 
-test("初始化与生图工具共同声明 Codex/GPT 默认优先、用户指定及能力边界", async () => {
+test("初始化与生图工具共同声明 GPT/Gemini 模型映射、用户指定及能力边界", async () => {
   const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18" }), { config });
   const listed = await handleMessage(request(2, "tools/list"), { config });
   const guidance = initialized.result.instructions;
   assert.equal(typeof guidance, "string");
-  assert.ok(listed.result.tools.find(tool => tool.name === "bridge_generate_image").description.startsWith(guidance));
+  const tool = listed.result.tools.find(tool => tool.name === "bridge_generate_image");
+  assert.ok(tool.description.startsWith(guidance));
   for (const expected of [
-    /当前聊天主模型/, /Codex 订阅/, /GPT/, /未明确指定/, /优先使用本插件的 bridge_generate_image/,
-    /用户明确指定的工具或通道优先/, /非 GPT/, /无法确认/, /仅适用于文生图/, /参考图编辑不受支持/,
-    /不擅自换工具、换模型或重试/, /遵守宿主工具权限/, /不改变聊天主模型/,
+    /当前聊天主模型/, /Codex 订阅/, /未明确指定/, /优先使用本插件的 bridge_generate_image/,
+    /GPT 会话显式传入 model=gpt-image-2\.5/, /Gemini 会话显式传入 model=gemini-3\.1-flash-image/,
+    /Gemini 会话不能省略 model/, /用户明确指定的工具或通道优先/, /明确指定的图片模型优先/,
+    /其他主模型或无法确认当前聊天主模型时不据此改道/, /不按待生成的图片模型判断/,
+    /仅适用于文生图/, /参考图编辑不受支持/, /不擅自换工具、换模型或重试/,
+    /遵守宿主工具权限/, /不改变聊天主模型/,
   ]) assert.match(guidance, expected);
+  assert.match(tool.inputSchema.properties.model.description, /Gemini 会话必须传 gemini-3\.1-flash-image/);
+  assert.match(tool.inputSchema.properties.model.description, /省略仍为 gpt-image-2\.5/);
 });
 
 test("工具只有 status/start/stop/generate_image，移除 login 并明确单图订阅约束", async () => {
@@ -272,6 +278,9 @@ test("图片默认值、Unicode 长度边界与全部枚举选项到达同一 ha
   assert.equal(seen[0][2].signal, signal);
   await handleMessage(call(2, "bridge_generate_image", { prompt: "猫", model: "gpt-image-2.5-flare" }), { config }, { handlers: injected });
   assert.equal(seen[1][1].model, "gpt-image-2.5-flare");
+  const gemini = await handleMessage(call(3, "bridge_generate_image", { prompt: "猫", model: "gemini-3.1-flash-image" }), { config }, { handlers: injected });
+  assert.equal(gemini.result, imageResult);
+  assert.deepEqual(seen[2][1], { prompt: "猫", model: "gemini-3.1-flash-image", output_format: "png" });
   const tools = (await handleMessage(request(2, "tools/list"), { config })).result.tools;
   for (const [key, rule] of Object.entries(tools[3].inputSchema.properties)) {
     for (const value of rule.enum ?? []) {

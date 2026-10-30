@@ -307,14 +307,29 @@ export async function generateImage(config, args, { signal } = {}) {
   })) {
     if (args[key] !== undefined && !values.includes(args[key])) throw safeError(`不支持的 ${key} 参数`, "INVALID_ARGUMENT");
   }
+  const gemini = model === "gemini-3.1-flash-image";
+  if (gemini && ((args.quality !== undefined && args.quality !== "auto") ||
+      (args.background !== undefined && args.background !== "auto") ||
+      (args.output_format !== undefined && args.output_format !== "png"))) {
+    throw safeError("Gemini 不支持指定质量、背景或 JPEG/WebP 输出编码；请省略这些选项，原图按上游实际格式保存", "INVALID_ARGUMENT");
+  }
+  // 核心的 OpenAI 图片端点不支持 Gemini；原生接口只接收比例和分辨率档位，不保证精确像素。
+  const aspectRatio = { "1024x1024": "1:1", "1536x1024": "3:2", "1024x1536": "2:3" }[args.size];
+  const requestBody = gemini ? {
+    contents: [{ role: "user", parts: [{ text: args.prompt }] }],
+    generationConfig: {
+      candidateCount: 1, responseModalities: ["TEXT", "IMAGE"],
+      ...(aspectRatio ? { imageConfig: { aspectRatio, imageSize: "1K" } } : {}),
+    },
+  } : { ...args, model, output_format: args.output_format ?? "png", response_format: "b64_json", n: 1, stream: false };
   const probe = await probeBridge(config);
   if (probe.state !== "bridge") throw safeError("本地订阅桥未就绪，请先检查 bridge_status", "BRIDGE_UNAVAILABLE");
   let response;
   try {
     // 生图是有成本操作：本 MCP 层不重放 POST；核心仍可能按配置刷新凭据或重试。
-    response = await requestLocal(config, "/v1/images/generations", {
+    response = await requestLocal(config, gemini ? `/v1beta/models/${model}:generateContent` : "/v1/images/generations", {
       method: "POST", authenticated: true, signal, timeoutMs: 240000, maxBytes: 36 * 1024 * 1024,
-      body: { ...args, model, output_format: args.output_format ?? "png", response_format: "b64_json", n: 1, stream: false },
+      body: requestBody,
     });
   } catch (error) {
     if (signal?.aborted || error.code === "ABORT_ERR") throw safeError("生图请求已取消；上游可能已消耗额度。本 MCP 未自动重试；核心仍可能按配置重试", "ABORT_ERR");
@@ -323,8 +338,18 @@ export async function generateImage(config, args, { signal } = {}) {
   if (response.status !== 200) throw safeError(httpFailure(response.status, "生图").message);
   let body;
   try { body = JSON.parse(response.text); } catch { throw safeError("生图端点返回了非 JSON 内容"); }
-  if (!Array.isArray(body?.data) || body.data.length !== 1) throw safeError("生图端点未返回预期的一张图片");
-  const image = decodeImage(body.data[0]?.b64_json);
+  let image;
+  if (gemini) {
+    const parts = Array.isArray(body?.candidates) && body.candidates.length === 1 ? body.candidates[0]?.content?.parts : null;
+    if (!Array.isArray(parts)) throw safeError("Gemini 未返回预期的一张图片");
+    const images = parts.filter((part) => part?.inlineData).map((part) => part.inlineData);
+    if (images.length !== 1) throw safeError("Gemini 未返回预期的一张图片");
+    image = decodeImage(images[0].data);
+    if (images[0].mimeType !== image.mimeType) throw safeError("Gemini 图片类型与实际编码不一致");
+  } else {
+    if (!Array.isArray(body?.data) || body.data.length !== 1) throw safeError("生图端点未返回预期的一张图片");
+    image = decodeImage(body.data[0]?.b64_json);
+  }
   await mkdir(config.imagesDir, { recursive: true, mode: 0o700 });
   const filePath = join(config.imagesDir, `image-${Date.now()}-${randomUUID()}.${image.extension}`);
   await writeFile(filePath, image.bytes, { flag: "wx", mode: 0o600 });

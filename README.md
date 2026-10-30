@@ -6,18 +6,18 @@
 
 ## 下载与安装
 
-打开 [GitHub Releases 最新版本](https://github.com/crx-96/axing-qoder-plugin/releases/latest)，在 **Assets** 中下载对应系统的安装包；当前版本为 **0.2.5**：
+打开 [GitHub Releases 最新版本](https://github.com/crx-96/axing-qoder-plugin/releases/latest)，在 **Assets** 中下载对应系统的安装包；当前版本为 **0.2.6**：
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v0.2.5-windows.zip` |
-| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v0.2.5-posix.zip` |
+| Windows x64 | `qoder-subscription-proxy-v0.2.6-windows.zip` |
+| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v0.2.6-posix.zip` |
 
 **不要选择 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`**，它们是整个仓库的源码，不是可直接导入的单插件安装包。用户无需克隆仓库或自行打包。
 
 按 [Qoder 插件文档](https://docs.qoder.com/qoder/plugins) 和 [扩展发布文档](https://docs.qoder.com/qoder/extension-publishing)，在 Qoder Desktop 中进入 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择下载的文件；无需先解压。
 
-安装后启用插件并确认 MCP 连接，再按[插件使用说明](qoder-subscription-proxy/README.md)打开管理页、授权和配置模型。Windows ZIP 已完成解包后的隔离启动与退出检查，但尚未完成 Desktop 界面导入验收；macOS/Linux 尚未实机验证。
+安装后启用插件并确认 MCP 连接，再按[插件使用说明](qoder-subscription-proxy/README.md)打开管理页、授权和配置模型。上版 `0.2.5` 的 Windows ZIP 已完成解包后的隔离启动与退出检查，此结果不代表 `0.2.6` 已验证；尚未完成 Desktop 界面导入验收，macOS/Linux 尚未实机验证。
 
 ## 从源码打包
 
@@ -25,8 +25,8 @@
 
 ```sh
 mkdir dist
-node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v0.2.5-windows.zip
-node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v0.2.5-posix.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v0.2.6-windows.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v0.2.6-posix.zip
 ```
 
 若 `dist` 已存在，无需再次创建。目标父目录必须先存在；脚本拒绝覆盖已有 ZIP。发布时文件名中的版本须与插件清单一致，并上传两个 ZIP 到对应的 GitHub Release，而不是提交二进制安装包到源码仓库。

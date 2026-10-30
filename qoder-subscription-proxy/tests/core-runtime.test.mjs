@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, win32 } from "node:path";
@@ -238,7 +238,10 @@ test("解压后的 binary hash 错误不发布", async (t) => {
 test("stat 改变使旧 hash 缓存失效，损坏缓存可原子替换", async (t) => {
   const { runtime, config, calls } = await fixture(t);
   await runtime.ensureCore(config);
+  const before = await lstat(config.binPath);
   await writeFile(config.binPath, Buffer.alloc(binary.length, 65));
+  await utimes(config.binPath, before.atime, new Date(before.mtimeMs + 1000));
+  assert.notEqual((await lstat(config.binPath)).mtimeMs, before.mtimeMs);
   assert.equal((await runtime.getCoreStatus(config)).state, "invalid");
   assert.equal((await runtime.ensureCore(config, { allowDownload: false })).available, false);
   assert.equal(calls(), 1);

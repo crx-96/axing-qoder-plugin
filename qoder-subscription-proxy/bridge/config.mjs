@@ -12,7 +12,7 @@ export const DEFAULT_HOST = "127.0.0.1";
 /** 默认 HTTP 端口，避开旧桥 8787 与普通 CLIProxyAPI 8317；环境变量仍须为合法十进制端口。 */
 export const DEFAULT_PORT = 19787;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录。 */
-export const PLUGIN_VERSION = "0.2.5";
+export const PLUGIN_VERSION = "0.2.6";
 /** 用户指定的公共管理密码，仅限回环管理接口；不能用作客户端 API 密钥。 */
 const DEFAULT_MGMT_KEY = "123456";
 

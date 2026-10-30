@@ -1,4 +1,4 @@
-# qoder订阅代理 · 0.2.5
+# qoder订阅代理 · 0.2.6
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件，将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理和图片生成 MCP 工具。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.5-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.5-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
+从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.6-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.6-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -98,11 +98,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\antigravity-lo
 | `bridge_stop` | 停止可确认归属的代理，取消本会话准备并持久暂停 |
 | `bridge_generate_image` | 使用已授权订阅生成一张图片，可能消耗额度或产生费用 |
 
-`0.2.5` 在 MCP 初始化说明和工具描述中同步声明：当前聊天主模型为 GPT（包括 Codex 订阅），且用户未指定生图工具或通道时，优先使用本插件的 `bridge_generate_image`，而不是先调用内置 ImageGen；用户明确指定的工具优先。非 GPT 会话不按此规则改道，不按图片模型倒推聊天模型；仅适用于文生图，不支持参考图编辑。工具不可用或生成失败时说明原因，不擅自换通道、换模型或重试。此处是工具选择指引，实际选择仍受宿主指令、工具权限和聊天模型行为影响。
+`0.2.6` 在 MCP 初始化说明和工具描述中同步声明：按**当前聊天主模型**选择生图方式。用户未指定生图工具或通道时，GPT/Codex 和 Gemini 会话优先使用本插件的 `bridge_generate_image`；未指定图片模型时，GPT/Codex 显式传入 `model=gpt-image-2.5`，Gemini 显式传入 `model=gemini-3.1-flash-image`，而不是先调用内置 ImageGen。用户明确指定的工具、通道或图片模型优先；其他主模型或主模型未知时不按此规则改道，不按图片模型倒推聊天主模型。仅适用于文生图，不支持参考图编辑；工具不可用或生成失败时说明原因，不擅自换通道、换模型或重试。此处是工具选择指引，实际选择仍受宿主指令、工具权限和聊天模型行为影响，不绕过宿主权限边界。
 
-例如：“调用 qoder订阅代理的 `bridge_generate_image`，用 `gpt-image-2.5` 生成一张白底绿色三角形。”
+例如：“调用 qoder订阅代理的 `bridge_generate_image`，显式传入 `model=gpt-image-2.5`，生成一张白底绿色三角形。”Gemini 示例：“调用同一工具，显式传入 `model=gemini-3.1-flash-image`，生成一张白底绿色三角形。”
 
-支持 `prompt`、`model`、`size`、`quality`、`background`、`output_format`，默认模型 `gpt-image-2.5`，以账号权限为准。仅文生图，每次一张，不接收参考图，不改变聊天主模型。MCP 不自动换模型或重新提交，但**上游核心可能轮换凭据、刷新授权或重试，单次调用不保证只消耗一次额度**。
+支持 `prompt`、`model`、`size`、`quality`、`background`、`output_format`，以账号权限为准。**插件无法从 MCP 请求读取当前聊天主模型，Gemini 调用必须显式传入 `model=gemini-3.1-flash-image`；省略 `model` 时仍默认 GPT 图片模型 `gpt-image-2.5`，以保留旧调用兼容性，不会自动识别并切换为 Gemini。**仅文生图，每次一张，不接收参考图，不改变聊天主模型。MCP 不自动换模型或重新提交，但**上游核心可能轮换凭据、刷新授权或重试，单次调用不保证只消耗一次额度**。
+
+Gemini 使用原生 `/v1beta/models/gemini-3.1-flash-image:generateContent` 接口，不走仅支持 GPT 等模型的 OpenAI 图片端点。`size` 的三个明确尺寸依次映射到 1K 的 `1:1`、`3:2`、`2:3` 比例，不保证精确像素；省略或 `auto` 由上游决定。Gemini 的 `quality`、`background` 仅允许省略或 `auto`；`output_format` 仅允许省略或默认 `png`，不向上游要求编码、不转码，按响应实际 PNG/JPEG/WebP 格式保存。缺图、多图、损坏图片或 MIME 与编码不一致时报告失败，不自动回退 GPT。
 
 原图保存在 `generated/`，不会被压缩替换。小图可预览，Windows 大 PNG/JPEG 可附小预览，POSIX 大图和大 WebP 返回原图本地链接。保存前检查 PNG、常见 Huffman DCT JPEG（含渐进式）及静态 WebP 的结构和尺寸，像素上限 4000 万；不支持动画 WebP，结构检查不等于完整像素解码。上游不一定严格遵守尺寸和质量参数。
 
@@ -157,4 +159,4 @@ node --test qoder-subscription-proxy/tests/*.test.mjs
 
 验证 Windows 内置运行时还需将 `QODER_TEST_RUNTIME` 设置为实际 `Qoder CN.exe` 或 `Qoder.exe` 的绝对路径；对应测试通过 Node mode 启动隔离 harness，不关闭当前 Qoder App，也不修改其设置。
 
-`0.2.5` 在 Windows 使用 CLIProxyAPI `v8.0.47` 完成 290 项测试中的 275 项，15 项按平台条件跳过，0 失败，包含实际 Qoder 内置运行时、原生审批路由、原文/结果/错误透传、配置迁移、管理页保存后重载及打包校验。**这不等于 Desktop 界面导入、真实账号登录、生图选择与审批误报率改善，或 macOS/Linux 实机验收通过。** 云端 CI 结果以仓库 Actions 页面为准，自动化测试不能替代真实服务端到端验收。
+`0.2.6` 在 Windows 使用 CLIProxyAPI `v8.0.47` 完成全量回归及补充定向验证，合并有效结果为 311 项中 296 项通过、15 项按平台条件跳过，包含实际 Qoder 内置运行时、Gemini 原生请求与图片解析的模拟 HTTP 测试、GPT 回归、原生审批路由、配置迁移及打包校验。缓存失效测试显式推进文件修改时间，避免 Windows 快速等长写入的时间戳碰撞；修改后核心缓存测试已复测通过。**这不等于 Desktop 界面导入、真实账号登录、生图选择与审批误报率改善，或 macOS/Linux 实机验收通过。** 云端 CI 结果以仓库 Actions 页面为准，自动化测试不能替代真实服务端到端验收。

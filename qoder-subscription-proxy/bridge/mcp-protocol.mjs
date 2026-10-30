@@ -22,17 +22,17 @@ const SERVER_INFO = { name: "qoder-subscription-proxy", version: PLUGIN_VERSION 
 const DEFAULT_HANDLERS = { ensureRunning, getStatus, stopBridge, generateImage };
 /** 无参数工具的契约；显式传 null、数组或额外参数均不接受。 */
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
-const IMAGE_TOOL_GUIDANCE = "当前聊天主模型为 GPT（包括通过 Codex 订阅接入），且用户未明确指定生图工具或通道时，优先使用本插件的 bridge_generate_image，不要先调用宿主内置 ImageGen 或其他生图服务。按当前聊天主模型判断，不按待生成的图片模型判断；用户明确指定的工具或通道优先，非 GPT 会话或无法确认当前聊天主模型时不据此改道。仅适用于文生图，参考图编辑不受支持，不把图片路径或 URL 当作已读取的输入。工具不可用、授权/额度/权限受阻或生成失败时如实说明，不擅自换工具、换模型或重试。遵守宿主工具权限，不改变聊天主模型。";
+const IMAGE_TOOL_GUIDANCE = "当前聊天主模型为 GPT（包括通过 Codex 订阅接入）或 Gemini，且用户未明确指定生图工具或通道时，优先使用本插件的 bridge_generate_image，不要先调用宿主内置 ImageGen 或其他生图服务。未明确指定图片模型时，GPT 会话显式传入 model=gpt-image-2.5，Gemini 会话显式传入 model=gemini-3.1-flash-image；插件无法从 MCP 请求读取当前聊天主模型，Gemini 会话不能省略 model。按当前聊天主模型判断，不按待生成的图片模型判断；用户明确指定的工具或通道优先，明确指定的图片模型优先于上述默认映射；其他主模型或无法确认当前聊天主模型时不据此改道。仅适用于文生图，参考图编辑不受支持，不把图片路径或 URL 当作已读取的输入。工具不可用、授权/额度/权限受阻或生成失败时如实说明，不擅自换工具、换模型或重试。遵守宿主工具权限，不改变聊天主模型。";
 /** 图片只接受文字与生成选项，不接收文件路径、图片 URL 或输出路径。 */
 const IMAGE_SCHEMA = {
   type: "object",
   properties: {
     prompt: { type: "string", minLength: 1, maxLength: 32_000, pattern: "\\S", description: "必填的非空图片文字描述；不会读取其中的路径或 URL。" },
-    model: { type: "string", minLength: 1, maxLength: 200, pattern: "\\S", default: "gpt-image-2.5", description: "订阅桥支持的图片模型，默认 gpt-image-2.5。" },
-    size: { type: "string", enum: ["auto", "1024x1024", "1536x1024", "1024x1536"], description: "生成图片的尺寸。" },
-    quality: { type: "string", enum: ["auto", "low", "medium", "high"], description: "图片质量选项。" },
-    background: { type: "string", enum: ["auto", "transparent", "opaque"], description: "背景透明度选项。" },
-    output_format: { type: "string", enum: ["png", "jpeg", "webp"], default: "png", description: "返回图片的编码格式，默认 png。" },
+    model: { type: "string", minLength: 1, maxLength: 200, pattern: "\\S", default: "gpt-image-2.5", description: "图片模型：GPT 会话传 gpt-image-2.5，Gemini 会话必须传 gemini-3.1-flash-image；用户指定优先。省略仍为 gpt-image-2.5，不会自动识别聊天主模型。" },
+    size: { type: "string", enum: ["auto", "1024x1024", "1536x1024", "1024x1536"], description: "GPT 图片尺寸；Gemini 分别映射为 1K 的 1:1、3:2、2:3 比例，不保证精确像素；auto 或省略由上游决定。" },
+    quality: { type: "string", enum: ["auto", "low", "medium", "high"], description: "GPT 图片质量；Gemini 仅允许 auto 或省略。" },
+    background: { type: "string", enum: ["auto", "transparent", "opaque"], description: "GPT 背景选项；Gemini 仅允许 auto 或省略。" },
+    output_format: { type: "string", enum: ["png", "jpeg", "webp"], default: "png", description: "GPT 输出编码，默认 png；Gemini 仅允许默认值或省略，按上游实际图片格式保存，不转码或保证 PNG。" },
   },
   required: ["prompt"],
   additionalProperties: false,
@@ -56,7 +56,7 @@ const TOOLS = [
   },
   {
     name: "bridge_generate_image",
-    description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。默认模型 gpt-image-2.5，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
+    description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。省略 model 时默认 gpt-image-2.5，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
     inputSchema: IMAGE_SCHEMA,
   },
 ];
