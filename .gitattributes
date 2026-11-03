@@ -4,3 +4,5 @@
 qoder-subscription-proxy/scripts/prepare-test-core.mjs text eol=lf
 # 此上游资产按原始字节校验 SHA256，Windows 检出时也不得转换换行。
 qoder-subscription-proxy/bridge/panel/management.upstream.html -text
+# POSIX 分发脚本按行读取相对路径。
+qoder-subscription-proxy/scripts/distribution-files.txt text eol=lf

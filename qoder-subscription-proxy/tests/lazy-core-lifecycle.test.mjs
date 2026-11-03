@@ -107,7 +107,7 @@ test("核心下载被阻塞时握手、工具发现、状态和ping均可用；�
   const f = await fixture(t);
   assert.ok((await f.initialize.response).result.serverInfo);
   await f.downloading;
-  assert.equal((await f.request("tools/list").response).result.tools.length, 4);
+  assert.equal((await f.request("tools/list").response).result.tools.length, 5);
   const status = await waitStatus(f, (value) => value.core.state === "downloading");
   assert.equal(status.ready, false);
   assert.equal(status.startupError, undefined);
@@ -131,6 +131,8 @@ test("下载中主动停止会取消后台准备并保持MCP连接，显式启�
   assert.ok((await f.initialize.response).result.serverInfo);
   await f.downloading;
   const stopped = await f.call("bridge_stop").response;
+  assert.notEqual(stopped.result.isError, true);
+  assert.equal(JSON.parse(stopped.result.content[0].text).stopped, true);
   assert.match(stopped.result.content[0].text, /暂停/);
   const status = await waitStatus(f, (value) => value.autoRecoveryPaused && value.core.state !== "downloading");
   assert.equal(status.ready, false);

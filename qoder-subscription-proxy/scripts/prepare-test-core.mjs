@@ -26,7 +26,7 @@ async function main() {
       BRIDGE_DATA_DIR: join(directory, "data"),
       // 固定合成客户端密钥，仅供隔离测试；不是用户凭据。
       BRIDGE_API_KEY: "isolated-ci-core-test-api-key",
-      // 保持插件公共管理密码契约，此脚本不会启动管理接口。
+      // 验证旧环境值仅作为兼容占位；本脚本不启动管理接口。
       BRIDGE_MGMT_KEY: "123456",
     } });
     // 复用生产下载、双 SHA256 校验与缓存逻辑；失败即终止，不在 CI 包装重试。

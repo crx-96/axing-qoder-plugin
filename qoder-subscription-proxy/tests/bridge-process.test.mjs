@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { loadConfig, renderConfigYaml } from "../bridge/config.mjs";
+import { loadConfig, ensureStreamingDefaults, renderConfigYaml } from "../bridge/config.mjs";
 import { ensureApprovalRouting } from "../bridge/approval-routing.mjs";
 import { requestLocal } from "../bridge/local-http.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
@@ -28,7 +28,7 @@ const signature = { message: "CLI Proxy API Server", endpoints: ["GET /v1/models
 function testConfig(directory, port = 1) {
   assert.ok(![8787, 19787].includes(port), "禁止访问旧桥或插件默认端口");
   return {
-    host: "127.0.0.1", port, apiKey: "isolated-client-test-key", mgmtKey: "123456",
+    host: "127.0.0.1", port, apiKey: "isolated-client-test-key", mgmtKey: "a".repeat(64),
     dataDir: directory, configPath: join(directory, "config.yaml"), authDir: join(directory, "auths"),
     binPath: join(directory, "no-binary-should-be-started.exe"), pidPath: join(directory, "bridge.pid"),
     lockPath: join(directory, "bridge.lock"), pausedPath: join(directory, "bridge.paused"),
@@ -319,6 +319,25 @@ test("暂停标记使 automatic ensureRunning 和 watchdog 不恢复进程", { t
   assert.equal((await getStatus(config)).autoRecoveryPaused, true);
 });
 
+test("停止在排队取锁前即能取消本会话启动，已离线时重复暂停均成功", { timeout: 8000 }, async (t) => {
+  const config = testConfig(await directoryFixture(t), await unusedPort());
+  let stopping;
+  try {
+    await withLifecycleLock(config, async () => {
+      const starting = ensureRunning(config);
+      stopping = stopBridge(config);
+      const outcome = await Promise.race([
+        starting.then(() => "started", error => error.name),
+        delay(1500, "lock wait timed out", { ref: false }),
+      ]);
+      assert.equal(outcome, "AbortError", "停止不能等到生命周期锁释放才取消启动");
+    });
+  } finally { if (stopping) await stopping; }
+  assert.equal((await stopping).stopped, true);
+  assert.equal((await stopBridge(config)).stopped, true);
+  assert.equal((await getStatus(config)).autoRecoveryPaused, true);
+});
+
 test("ensureRunning 不接管只有根签名但无本版本 PID 归属的服务", async (t) => {
   const requests = [];
   const server = await localServer(t, (request, response) => {
@@ -342,7 +361,7 @@ test("ensureDataDir 并发发布完整配置并保留既有内容", async (t) =>
   const results = await Promise.allSettled(Array.from({ length: 12 }, () => ensureDataDir(config)));
   const errors = results.filter((entry) => entry.status === "rejected").map((entry) => entry.reason.message);
   assert.equal(errors.length, 0, `并发读取不得观察到空/半份配置：${errors.join("; ")}`);
-  assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(renderConfigYaml(config)));
+  assert.equal(await readFile(config.configPath, "utf8"), ensureStreamingDefaults(ensureApprovalRouting(renderConfigYaml(config))));
   const marker = "# user-owned marker\n";
   await writeFile(config.configPath, marker + renderConfigYaml(config));
   await ensureDataDir(config);
@@ -371,7 +390,8 @@ test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建�
   assert.equal(status.authCount, 0);
   assert.ok(!JSON.stringify(status).includes(config.apiKey));
   assert.equal(Object.hasOwn(status, "mgmtKey"), false);
-  assert.match(status.loginHint, /123456/, "公共管理密码应在用户提示中可见");
+  assert.ok(!JSON.stringify(status).includes(config.mgmtKey));
+  assert.doesNotMatch(status.loginHint, /123456/);
   const { stdout } = await execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid.pid}).StartTime.ToUniversalTime().ToString('o')`], { windowsHide: true, timeout: 5000 });
   t.diagnostic(`CIM creationDate=${identity.creationDate}; Get-Process StartTime=${stdout.trim()}`);
   await writeFile(config.pidPath, JSON.stringify({ ...pid, creationDate: "1970-01-01T00:00:00.0000000Z" }));
@@ -502,9 +522,18 @@ test("owner MCP 退出后另一个活跃 MCP 的 watchdog 自动恢复代理", {
   await assertOwnedProcessesExited(config, recovered.pid);
 });
 
-test("隔离真实 exe 管理 API 接受 123456，拒绝无密码、错误密码及客户端 API key", { skip: windowsOnly, timeout: 60000 }, async (t) => {
+test("隔离核心迁移旧公共密码后只接受当前安装管理密钥", { skip: windowsOnly, timeout: 60000 }, async (t) => {
   const { config } = await realBridgeFixture(t);
-  await ensureRunning(config);
+  await writeFile(config.configPath, renderConfigYaml({ ...config, mgmtKey: "123456" }));
+  const previous = process.env.MANAGEMENT_PASSWORD;
+  const inherited = "test-only-inherited-management-password";
+  try {
+    process.env.MANAGEMENT_PASSWORD = inherited;
+    await ensureRunning(config);
+  } finally {
+    if (previous === undefined) delete process.env.MANAGEMENT_PASSWORD;
+    else process.env.MANAGEMENT_PASSWORD = previous;
+  }
   async function managementRequest(key) {
     return new Promise((resolve, reject) => {
       const request = http.get({
@@ -521,14 +550,14 @@ test("隔离真实 exe 管理 API 接受 123456，拒绝无密码、错误密码
       request.setTimeout(5000, () => request.destroy(new Error("管理接口响应超时")));
     });
   }
-  const accepted = await managementRequest("123456");
+  const accepted = await managementRequest(config.mgmtKey);
   assert.equal(accepted.status, 200);
   assert.deepEqual(JSON.parse(accepted.body).files, []);
-  for (const key of [undefined, "wrong-management-password", config.apiKey]) {
+  for (const key of [undefined, "123456", inherited, config.apiKey]) {
     const rejected = await managementRequest(key);
     assert.ok([401, 403].includes(rejected.status), `无效管理认证应拒绝，实际 HTTP ${rejected.status}`);
   }
-  assert.equal((await managementRequest("123456")).status, 200, "拒绝错误密码后正确密码仍可用");
+  assert.equal((await managementRequest(config.mgmtKey)).status, 200, "拒绝错误密码后正确密码仍可用");
   await stopBridge(config);
 });
 
@@ -541,7 +570,7 @@ test("隔离真实核心提供修复页面，Antigravity 不监听回调端口�
   assert.equal(page.status, 200);
   assert.ok(page.text.includes("r.is_webui=n!==`antigravity`"));
   assert.ok(page.text.includes("当前使用手动回调模式"));
-  const management = { ...config, apiKey: "123456" };
+  const management = { ...config, apiKey: config.mgmtKey };
   const initialized = await requestLocal(management, "/v8/management/oauth/auth-url?provider=antigravity&is_webui=false", { authenticated: true });
   assert.equal(initialized.status, 200);
   const auth = JSON.parse(initialized.text);
@@ -607,4 +636,113 @@ test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再
   await terminateOwnedBridge(config, recovered.pid);
   await delay(2300);
   assert.equal((await probeBridge(config)).state, "offline");
+});
+
+test("升级旧流式默认值保留自定义项、四空格、注释与 CRLF，重复启动可保留显式关闭", async (t) => {
+  const config = testConfig(await directoryFixture(t), await unusedPort());
+  const legacy = "\uFEFF" + renderConfigYaml(config) + [
+    "routing:", "    retry:", "        request-retry: 0 # 旧核心回写",
+    "        max-retry-interval: 30", "requests:", "    proxy-url: direct", "",
+  ].join("\n");
+  await writeFile(config.configPath, legacy.replaceAll("\n", "\r\n"));
+  await ensureDataDir(config);
+  const updated = await readFile(config.configPath, "utf8");
+  assert.ok(updated.startsWith("\uFEFF"));
+  assert.doesNotMatch(updated, /(?<!\r)\n/);
+  for (const line of ["        request-retry: 0 # 旧核心回写", "        max-retry-interval: 30",
+    "    proxy-url: direct", "keepalive-seconds: 15", "bootstrap-retries: 1", "send-keepalive-before-ft: false",
+    "stream-bootstrap-buffering: true", 'stream-bootstrap-timeout: "10s"']) assert.ok(updated.includes(line), line);
+  const custom = updated.replace("keepalive-seconds: 15", "keepalive-seconds: 45");
+  await writeFile(config.configPath, custom);
+  await ensureDataDir(config);
+  assert.equal(await readFile(config.configPath, "utf8"), custom);
+  // 已有的显式禁用冷却、重试轮次与流式心跳由用户管理。
+  const tuned = legacy.replace("    retry:", "    cooldown:\n        transient-error-cooldown-seconds: -1\n    retry:")
+    .replace("    proxy-url: direct", "    streaming:\n        keepalive-seconds: 45\n    proxy-url: direct");
+  const tunedResult = ensureStreamingDefaults(tuned);
+  assert.match(tunedResult, /request-retry: 0 #/);
+  assert.match(tunedResult, /transient-error-cooldown-seconds: -1/);
+  assert.match(tunedResult, /keepalive-seconds: 45/);
+  const timeoutOnly = legacy + 'upstream:\n    codex:\n        stream-bootstrap-timeout: "20s"\n';
+  assert.match(ensureStreamingDefaults(timeoutOnly), /request-retry: 0 #/);
+  const broken = legacy.replace("requests:\n    proxy-url: direct", "upstream: []");
+  await writeFile(config.configPath, broken);
+  await assert.rejects(ensureDataDir(config), /upstream\.codex/);
+  assert.equal(await readFile(config.configPath, "utf8"), broken);
+});
+
+test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断流", { skip: nativeCoreSkip, timeout: 60000 }, async (t) => {
+  const hits = new Map();
+  const upstream = await localServer(t, async (req, res) => {
+    const body = [];
+    for await (const chunk of req) body.push(chunk);
+    const { model } = JSON.parse(Buffer.concat(body));
+    hits.set(model, (hits.get(model) ?? 0) + 1);
+    if (model === "gpt-persistent-overload" || (model === "gpt-http-overload" && hits.get(model) === 1)) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { code: "server_is_overloaded", message: "server is overloaded" } }));
+    }
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    const response = { id: "resp_fixture", object: "response", model, status: "in_progress", output: [] };
+    function emit(type, fields) {
+      res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`);
+    }
+    emit("response.created", { response });
+    emit("response.in_progress", { response });
+    if (model === "gpt-stream-overload" && hits.get(model) === 1) {
+      emit("response.metadata", { metadata: {} });
+      emit("error", { code: "server_is_overloaded", message: "server is overloaded" });
+    } else if (model === "gpt-mid-eof") {
+      emit("response.reasoning_summary_text.delta", { delta: "partial", output_index: 0, summary_index: 0, item_id: "i_1" });
+    } else if (model !== "gpt-early-eof") {
+      emit("response.completed", { response: { ...response, status: "completed" } });
+    }
+    res.end();
+  });
+  const root = await directoryFixture(t);
+  const config = testConfig(root, await unusedPort());
+  const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
+  const scenarios = [
+    ["gpt-ok", 200, 1], ["gpt-early-eof", 408, 1], ["gpt-mid-eof", 200, 1],
+    ["gpt-http-overload", 200, 2], ["gpt-stream-overload", 200, 2], ["gpt-persistent-overload", 503, 2],
+  ];
+  await ensureDataDir(config);
+  const defaults = await readFile(config.configPath, "utf8");
+  await writeFile(config.configPath, defaults.replace("disable-control-panel: false", "disable-control-panel: true") + [
+    "api-keys:", "  codex:", "    - name: fixture", `      base-url: "http://127.0.0.1:${upstream.address().port}"`,
+    "      proxy-url: direct", "      models:", ...scenarios.flatMap(([model]) => [`        - name: ${model}`, `          alias: ${model}`]),
+    "      keys:", "        - api-key: isolated-upstream", "          disable-codex-cloaking: true", "",
+  ].join("\n"));
+  const child = spawn(binary, ["-config", config.configPath], { cwd: root, windowsHide: true, stdio: "ignore" });
+  const exited = once(child, "exit");
+  try {
+    const headers = { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" };
+    await waitUntil(async () => {
+      if (child.exitCode !== null) throw new Error("隔离核心启动失败");
+      try { return (await fetch(config.endpoint + "/models", { headers, signal: AbortSignal.timeout(500) })).ok; }
+      catch { return false; }
+    });
+    for (const [model, status, calls] of scenarios) {
+      await t.test(model, async () => {
+        const res = await fetch(config.endpoint + "/responses", { method: "POST", headers,
+          body: JSON.stringify({ model, stream: true, input: "local test" }), signal: AbortSignal.timeout(15000) });
+        const body = await res.text();
+        assert.equal(res.status, status, body);
+        assert.equal(hits.get(model), calls);
+        if (model.endsWith("eof")) {
+          assert.match(body, /request_timeout/);
+          if (model === "gpt-mid-eof") assert.match(body, /response.reasoning_summary_text.delta/);
+          else assert.doesNotMatch(body, /response.created/);
+        } else if (status === 503) {
+          assert.match(body, /server_is_overloaded/);
+        } else {
+          assert.match(body, /"type":"response.completed"/);
+          assert.doesNotMatch(body, /server_is_overloaded/);
+        }
+      });
+    }
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await exited;
+  }
 });

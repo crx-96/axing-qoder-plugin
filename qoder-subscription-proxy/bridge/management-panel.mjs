@@ -1,3 +1,4 @@
+import { appendConfigBlock, parseConfigYaml, replaceConfigScalar } from "./config-yaml.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 export const PANEL_UPSTREAM_SHA256 = "8c9c6b7d3fb311e6aad5d06e1993e53a2d28389e640448a1bc6304ed20b057b5";
 // 插件版本可保持不变，运行中的页面修订仍必须明确区分。
-export const PANEL_REVISION = "antigravity-manual-v1";
+export const PANEL_REVISION = "antigravity-manual-v2";
 const upstreamPath = fileURLToPath(new URL("./panel/management.upstream.html", import.meta.url));
 
 // 此函数会嵌入浏览器代码，必须自包含；回调地址只能作为数据提交，不能导航或请求它。
@@ -58,26 +59,21 @@ export function patchManagementPanel(bytes) {
   return text;
 }
 
-// 上游自动更新会覆盖兼容补丁；仅改变此单一配置项，不重建用户 YAML 或接触凭据。
+/** 禁用自动更新，确保加载固定的管理页补丁；字段定位沿用启动校验的 YAML 路径。 */
 export function disablePanelAutoUpdate(text) {
-  const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^management:\s*(?:#.*)?$/.test(line));
-  if (start < 0) throw new Error("config.yaml 缺少 management 段，无法固定管理页版本。");
-  let end = start + 1;
-  while (end < lines.length && !/^[a-z][a-z0-9-]*:/.test(lines[end])) end++;
-  const field = lines.findIndex((line, index) => index > start && index < end && /^ +disable-auto-update-panel:/.test(line));
-  if (field >= 0) {
-    if (/^ +disable-auto-update-panel: true(?:\s+#.*)?\s*$/.test(lines[field])) return text;
-    lines[field] = lines[field].replace(/(:)\s*(?:true|false)(\s*(?:#.*)?)$/, "$1 true$2");
-    if (!/^ +disable-auto-update-panel: true(?:\s+#.*)?\s*$/.test(lines[field])) {
-      throw new Error("config.yaml 的 disable-auto-update-panel 不是布尔值；未修改配置。");
-    }
-  } else {
-    const indentation = lines.slice(start + 1, end).find((line) => /^ +[a-z]/.test(line))?.match(/^ +/)[0];
-    if (!indentation) throw new Error("config.yaml 的 management 段结构无效；未修改配置。");
-    lines.splice(start + 1, 0, `${indentation}disable-auto-update-panel: true`);
+  const parsed = parseConfigYaml(text);
+  const section = ["management"];
+  const field = [...section, "disable-auto-update-panel"];
+  if (parsed.nodes.get(JSON.stringify(section))?.kind !== "map") {
+    throw new Error("config.yaml 缺少有效的 management 段，无法固定管理页版本。");
   }
-  return lines.join(text.includes("\r\n") ? "\r\n" : "\n");
+  // 仅插入缺失项，已存在的非布尔值不得当成 false 处理。
+  if (!parsed.nodes.has(JSON.stringify(field))) {
+    return appendConfigBlock(parsed, section, "map", indent => " ".repeat(indent) + "disable-auto-update-panel: true");
+  }
+  const value = parsed.values.get(JSON.stringify(field));
+  if (typeof value !== "boolean") throw new Error("config.yaml 的 disable-auto-update-panel 不是布尔值；未修改配置。");
+  return value ? text : replaceConfigScalar(text, field, true);
 }
 
 // 调用方须持有生命周期锁；完整写入后原子替换，避免核心读到半份配置。

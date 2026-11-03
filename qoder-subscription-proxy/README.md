@@ -1,12 +1,12 @@
-# qoder订阅代理 · 0.2.7
+# qoder订阅代理 · 0.2.9
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件，将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理和图片生成 MCP 工具。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
-> 使用前阅读[免责声明](DISCLAIMER.md)和[第三方软件与许可证](THIRD_PARTY_NOTICES.md)。固定管理密码 **`123456`** 仅适用于可信单机回环服务，不可暴露到局域网或公网。
+> 管理密码和模型 API Key 都保存在本机用户数据目录。请保护该目录，并让代理仅在本机回环地址提供服务。[免责声明](DISCLAIMER.md) · [第三方软件与许可证](THIRD_PARTY_NOTICES.md)
 
 ## 安装与兼容范围
 
-从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases/latest) 的 **Assets** 下载带版本号的安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.7-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.7-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
+从本地构建目录 `dist/` 选择安装包，或从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择已发布的版本，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.9-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.9-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -14,7 +14,7 @@
 | 内置运行时 | 已实测 Electron `43.1.1` / Node `24.18.0` Node mode；本机独立开发命令 `node` 为 `26.4.0` |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；依赖 PowerShell 5.1、.NET Framework、Job Object；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh`、系统进程工具和可用的 Qoder Node mode 或已有 Node 22+；尚未实机验证，不保证所有发行版及 musl/Alpine 兼容 |
-| 核心 | 固定 CLIProxyAPI `v8.0.47`，仅下载当前平台；下载需系统 `curl` 支持 HTTPS |
+| 核心 | 固定 CLIProxyAPI `v8.0.51`，仅下载当前平台；下载需系统 `curl` 支持 HTTPS |
 | 不支持 | Windows 32 位、原生 Windows ARM64及其他平台/架构；ARM64 上 x64 仿真未验证 |
 
 插件使用 `.qoder-plugin/plugin.json`、`${QODER_PLUGIN_ROOT}` 和 MCP `timeout: 660000`（11 分钟），与 Desktop 自带 `recordAndReplay` 资源契约一致，但不代表真实 ZIP 安装已通过，也不保证宿主实际请求时限。
@@ -30,13 +30,15 @@ sh qoder-subscription-proxy/scripts/prepare-posix-marketplace.sh "$HOME/qoder-su
 ## 首次使用
 
 1. 安装、启用并确认宿主已连接插件 MCP。握手只等待本地配置，核心后台准备并自动启动代理，**无需先有聊天模型或调用工具**。尚未确认 Desktop 空白窗口会拉起 MCP，插件不能自行触发宿主连接。
-2. 代理就绪后打开 **<http://127.0.0.1:19787/management.html>**。如要求服务地址，填 `http://127.0.0.1:19787`；管理密码为 **`123456`**。
+2. 代理就绪后，在任务输入框输入 `/`，搜索 `open-management`，选择说明为「授权与账号管理」的插件指令并发送。宿主可能显示插件名前缀。默认浏览器会打开临时回环地址，使用一次性票据进入已登录的账号授权页。票据在 1 分钟后失效，浏览器会话最长 30 分钟。会话过期或插件重连后，重新执行指令即可。
 3. 在管理页 OAuth / 账号授权区域选择服务商，由本人登录并同意授权，再检查授权状态。菜单以实际页面为准。
 4. 在 Qoder 模型/供应商设置中添加 OpenAI 兼容服务，具体入口以当前客户端为准：
    - **Base URL**：`http://127.0.0.1:19787/v1`
-   - **API Key**：数据目录 `launcher-secrets.json` 中的 `apiKey`，不是管理密码。
+   - **API Key**：默认使用数据目录 `launcher-secrets.json` 中的 `apiKey`；显式设置过 `BRIDGE_API_KEY` 时使用配置的值。
    - **协议和模型**：按模型选择 Chat Completions 或 Responses，使用管理页或 `bridge_status` 实际列出的聊天模型，不将 `gpt-image-*` 作为聊天主模型。
 5. 有可用聊天模型后，可让 AI“调用 qoder订阅代理的 `bridge_status`，只查状态，不生成图片”。`ready: true` 仅表示本机代理和模型列表接口可用，不保证订阅权限；未授权时模型列表可以为空。
+
+**手动登录**　首次配置聊天模型或宿主暂时不能执行指令时，也可在确保代理已就绪后打开 <http://127.0.0.1:19787/management.html>，输入本机数据目录 `launcher-secrets.json` 中的 `mgmtKey`。更改过 `BRIDGE_PORT` 或 `BRIDGE_DATA_DIR` 时使用对应端口或目录。只向已确认属于本插件的本机管理页输入凭据。
 
 API Key 首次随机生成并持久保存，升级不自动轮换或清空授权。不要将密钥、账号 token 或授权 URL 发给 AI、公开截图或提交仓库。
 
@@ -44,13 +46,39 @@ API Key 首次随机生成并持久保存，升级不自动轮换或清空授权
 
 ZIP 不带五平台核心二进制，仅保留来源清单、文档和许可证。轻量包用于减少安装体积和网络耗时，**不是 Qoder 已确认禁止大包**；未确认官方 ZIP 大小上限。
 
-- 缺少有效缓存时，从固定官方 HTTPS 发布地址下载当前平台 `v8.0.47` 归档，先校验归档 SHA256，安全解压后再校验二进制 SHA256，成功后发布缓存并启动代理。不自动换版本或下载其他平台。
+- 缺少有效缓存时，从固定官方 HTTPS 发布地址下载当前平台 `v8.0.51` 归档，先校验归档 SHA256，安全解压后再校验二进制 SHA256，成功后发布缓存并启动代理。不自动换版本或下载其他平台。
 - 后台准备独立预算 **10 分钟（600 秒）**，覆盖等待锁、下载、校验和解压；curl 连接最多 60 秒、单次传输最多 540 秒，各阶段受剩余总预算约束，不阻塞 MCP 握手。
 - 下载期间 MCP 仍可用，状态可显示 `ready: false`、`core.state: "downloading"`；图片请求立即返回未就绪。准备失败保留连接，以 `startupError` 或 `core.reason` 报告原因。修复后显式 `bridge_start` 或重连重试，不自动重试；状态查询与 watchdog 不下载核心。
 - `bridge_stop` 取消本会话在途准备并持久暂停，重连仍可握手和查状态，但需显式 `bridge_start` 才恢复下载与启动。EOF、断管和退出信号也会取消准备并清理本次拥有的资源。本地配置错误仍可能导致 MCP 初始化失败。
-- 缓存位于 `dataDir/runtimes/v8.0.47/<platform-arch>/<basename(platforms.json.path)>`。离线准备需通过 `BRIDGE_BIN` 自行提供可信兼容核心，不承诺一键离线包；远程登录及模型服务仍需要网络。
+- 缓存位于 `dataDir/runtimes/v8.0.51/<platform-arch>/<basename(platforms.json.path)>`。离线准备需通过 `BRIDGE_BIN` 自行提供可信兼容核心，不承诺一键离线包；远程登录及模型服务仍需要网络。
 
 管理页固定随包提供上游 `v1.26.7` 资产，校验后生成带 Antigravity 兼容补丁的独立副本，不直接修改原资产。管理页自动更新被禁用，后续更新随插件维护；首次打开无需另行下载页面。
+
+## GPT 流式请求
+
+从 `0.2.8` 起，插件在启动代理时补齐以下 v8 配置。Codex 会暂存启动事件，收到推理、正文或工具事件就释放缓冲。`10s` 上限在收到上游帧时检查。开始转发后，核心每 15 秒可向客户端发送 SSE 心跳。上游在输出中途断开时，客户端仍会收到错误，已发送的内容不会由插件重放。
+
+```yaml
+routing:
+  retry:
+    request-retry: 1
+    max-retry-interval: 5
+  cooldown:
+    transient-error-cooldown-seconds: 3
+requests:
+  streaming:
+    keepalive-seconds: 15
+    bootstrap-retries: 1
+    send-keepalive-before-ft: false
+upstream:
+  codex:
+    stream-bootstrap-buffering: true
+    stream-bootstrap-timeout: "10s"
+```
+
+路由允许额外一轮，首字节前的流处理器允许一次重试。单账号遇到可重试的临时 503 时，3 秒冷却落在 5 秒的轮间等待预算内。路由和 SSE 设置适用于继承全局配置的请求，启动缓冲只作用于 Codex。只收到启动事件就结束的 SSE 请求仍可能返回 HTTP 408，宿主可据此决定是否重试。[上游配置说明](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.51/config.example.yaml) · [Codex 启动帧与过载问题 #6856](https://github.com/router-for-me/CLIProxyAPI/issues/6856)
+
+从 `0.2.9` 起仅补齐缺失字段，保留显式 `request-retry: 0` 及核心仍支持的旧字段值。更新前请等当前请求结束并调用 `bridge_stop`，安装新版、重连 MCP，再调用 `bridge_start`。首次启动新版会为旧安装设置独立管理密码，同时保留模型 API Key 和已有账号授权。
 
 ## 自动审批模型兼容
 
@@ -72,13 +100,13 @@ ZIP 不带五平台核心二进制，仅保留来源清单、文档和许可证�
 4. 回到原授权弹窗粘贴并提交；页面检查固定回调地址与本次 `state`。
 5. 在 5 分钟内完成，等待明确“认证成功”；“回调已提交”不等于成功。不要公开含短期授权码的回调 URL。
 
-Windows 可选用 [Antigravity授权.cmd](Antigravity授权.cmd)：保持代理运行，双击后按提示登录，将完整回调 URL 粘贴到本机隐藏输入处。助手仅向本机提交回调，也不监听 51121。自定义代理端口时，在插件目录执行：
+Windows 可选用 [Antigravity授权.cmd](Antigravity授权.cmd)：保持代理运行，双击后按提示登录，将完整回调 URL 粘贴到本机隐藏输入处。助手通过 Node 运行时核对实际回环连接归属后提交回调，全程无需监听 51121。Windows 备用助手先检查 Windows App Paths 注册位置和默认安装目录中的 Qoder 内置 Node 模式，再尝试 PATH 中的 Node.js 22+。双击时请使用代理运行时相同的 BRIDGE_DATA_DIR、BRIDGE_BIN 及 BRIDGE_API_KEY 覆盖值（如已配置）。自定义代理端口时，在插件目录执行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\antigravity-login.ps1 -Port 你的端口
 ```
 
-各 provider 的 OAuth 回调地址由上游固定，不能随代理 API 端口任意修改。其他供应商仍使用上游临时回调监听，可能绑定 `0.0.0.0`，且与其他实例共享固定端口；**不要并行授权同一 provider**，包括在 Zcode 或其他代理中同时授权。正常代理 API 并行使用不因此冲突。手动回填不绕过网络、地区、账号或订阅权限限制。
+各 provider 的 OAuth 回调地址由上游固定，不能随代理 API 端口任意修改。其他供应商仍使用上游临时回调监听，可能绑定 `0.0.0.0`，且与其他实例共享固定端口；**不要并行授权同一 provider**，包括在 ZCode 或其他代理中同时授权。正常代理 API 并行使用不因此冲突。手动回填不绕过网络、地区、账号或订阅权限限制。
 
 ## 自动启动与退出清理
 
@@ -89,10 +117,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\antigravity-lo
 - 多任务可复用代理，非创建者结束不主动杀共享代理；创建者 MCP 回收可能关闭代理并中断其他任务请求，不自动重放。
 - 启停验证归属，不按进程名批量杀进程。Windows 使用命名管道锁，POSIX 使用数据目录真实路径哈希对应的回环锁端口；冲突时等待并报错，不抢占服务。
 
+插件在发送模型密钥、管理密码或授权回调前，核对当前已建立的回环连接是否由受托管的核心接收。Windows 依赖系统 `netstat.exe`，macOS 依赖 `/usr/sbin/lsof`，Linux 需要可以读取本用户核心对应的 `/proc/net/tcp` 和 `/proc/<pid>/fd`。若工具提示无法确认归属，先检查端口占用和进程权限，再重试。
+
 ## MCP 工具与图片
 
 | 工具 | 用途 |
 | --- | --- |
+| `bridge_open_management` | 在本机浏览器打开授权与账号管理页，自动登录；工具仅向会话报告操作状态 |
 | `bridge_status` | 查询就绪、核心准备及失败原因、管理地址、凭据数量和模型，不返回 token 或 API Key；`models.imageModels` 含 GPT 与 Gemini 图片模型，生图前无需调用 |
 | `bridge_start` | 解除暂停，必要时准备核心，启动或复用代理 |
 | `bridge_stop` | 停止可确认归属的代理，取消本会话准备并持久暂停 |
@@ -116,14 +147,14 @@ Gemini 使用原生 `/v1beta/models/gemini-3.1-flash-image:generateContent` 接�
 
 | 路径 | 内容 |
 | --- | --- |
-| `launcher-secrets.json` | 随机模型 API Key |
+| `launcher-secrets.json` | 随机模型 API Key（`apiKey`）和本安装的管理密码（`mgmtKey`） |
 | `config.yaml`、`auths/` | 运行配置及敏感授权凭据 |
 | `bridge.log` | 日志可能包含上游账号或请求信息，分享前须脱敏 |
 | `bridge.pid`、`bridge.paused` | 归属记录与持久暂停状态；POSIX 控制令牌也是敏感信息，陈旧 PID 文件不代表进程仍存活 |
 | `runtimes/` | 经校验的固定版本、当前平台核心 |
 | `management-panel/`、`generated/` | 生成的管理页与原始图片 |
 
-固定管理密码 `123456` **不能隔离本机其他用户或恶意软件**。服务只允许 `127.0.0.1`，强制 `management.allow-remote: false`；禁止用端口转发、反向代理、共享隧道或容器映射公开。模型 API Key 与管理密码不同。
+管理凭据随数据目录独立生成并持久保存。「授权与账号管理」指令为本机浏览器创建短时一次性登录票据。受控管理入口按同源请求转发，核心原生管理接口的跨域行为由 CLIProxyAPI 决定。保持 `management.allow-remote: false`，仅在可信本机使用。不要通过代理或隧道公开管理服务。
 
 Windows 权限由用户目录 ACL 决定；POSIX 新建私有目录用 `0700`，敏感文件及图片用 `0600`，既有自定义目录需自行保证私密性。不要把数据放入共享盘或仓库。卸载不自动删除授权、密钥、日志和图片，也不等于撤销服务商授权；撤销需在服务商账号安全页面操作，再按需删除本地凭据。
 
@@ -134,8 +165,8 @@ Windows 权限由用户目录 ACL 决定；POSIX 新建私有目录用 `0700`，
 | `BRIDGE_DATA_DIR` | 自定义独立数据目录，不自动迁移数据 |
 | `BRIDGE_PORT` | 十进制 `1–65535`，默认 `19787`；变更需同步既有 YAML 和客户端地址 |
 | `BRIDGE_HOST` | 只允许 `127.0.0.1` |
-| `BRIDGE_API_KEY` | 覆盖运行时 API Key，须与既有 YAML 一致，不能等于管理密码 |
-| `BRIDGE_MGMT_KEY` | 不设置或精确为 `123456`，其他值拒绝 |
+| `BRIDGE_API_KEY` | 覆盖模型客户端密钥，须满足 HTTP 请求头要求并与已有配置一致，与管理密码分开 |
+| `BRIDGE_MGMT_KEY` | 通常留空。旧配置中的 `123456` 仅作兼容占位，实际密码见本地 `mgmtKey`；其他覆盖值会被拒绝 |
 | `BRIDGE_BIN` | 可信兼容的 CLIProxyAPI v8 可执行文件；不下载、替换或改权限，不扩展支持平台范围 |
 | `QODER_HTTP_PROXY` | 核心 HTTPS 下载优先代理，否则沿用 curl 常见代理环境变量；仅设置 `HTTP_PROXY` 不保证用于 HTTPS |
 
@@ -145,7 +176,8 @@ Windows 权限由用户目录 ACL 决定；POSIX 新建私有目录用 `0700`，
 
 - **管理页打不开**：确认 MCP 连接，等待后台准备并检查 `bridge_status`；修复失败原因后重连或 `bridge_start`。主动暂停后必须 `bridge_start`。
 - **端口冲突**：停止已确认不需要的程序，或同步修改代理端口及配置；插件不抢端口、不杀其他代理。OAuth 固定回调端口不能这样任意改动。
-- **密码错误 / API 401**：确认访问 `19787`；管理密码为 `123456`，模型 API 使用 `launcher-secrets.json` 的随机 `apiKey`。
+- **模型 API 401**　核对供应商使用的模型 API Key 和本机配置。
+- **管理页登录失败**　重新执行「授权与账号管理」。手动登录时核对管理页端口和当前数据目录里的 `mgmtKey`。若升级后仍运行旧核心，请先停止旧实例，再启动新版。
 - **403 / 429 / 5xx**：先检查权限、配额、网络和上游异常，不反复重启本机进程。
 - **POSIX 找不到 PowerShell**：装错 Windows 清单，重新生成并上传 POSIX ZIP，不编辑安装缓存。
 - **下载失败**：检查 curl、HTTPS、代理与目录权限，修复后手动重试或重连；哈希不匹配不得跳过校验。
@@ -161,4 +193,8 @@ node --test qoder-subscription-proxy/tests/*.test.mjs
 
 验证 Windows 内置运行时还需将 `QODER_TEST_RUNTIME` 设置为实际 `Qoder CN.exe` 或 `Qoder.exe` 的绝对路径；对应测试通过 Node mode 启动隔离 harness，不关闭当前 Qoder App，也不修改其设置。
 
-`0.2.7` 在 Windows 使用 CLIProxyAPI `v8.0.47` 完成全量回归，结果为 314 项中 299 项通过、15 项按平台条件跳过，包含实际 Qoder CN 内置运行时（Electron `43.1.1` Node mode）、原生核心的 Job 回收、Gemini 原生请求与图片解析的模拟 HTTP 测试、GPT 回归、图片模型清单与请求路由的一致性、生图指引免预查询断言、原生审批路由、配置迁移及打包校验。缓存失效测试显式推进文件修改时间，避免 Windows 快速等长写入的时间戳碰撞。**这不等于 Desktop 界面导入、真实账号登录、生图通道选择与出图耗时改善，或 macOS/Linux 实机验收通过。** 云端 CI 结果以仓库 Actions 页面为准，自动化测试不能替代真实服务端到端验收。
+同时设置 `BRIDGE_TEST_BROWSER` 为受信任的 Chrome 或 Edge 程序绝对路径、`BRIDGE_TEST_BIN` 为经校验的测试核心，即可运行 `tests/management-browser.test.mjs`。该测试启动独立的无头浏览器配置与本机代理，验证票据兑换后实际显示账号授权页，并在刷新后仍能使用。临时数据在结束后清理。
+
+`0.2.9` 在 Windows x64 运行完整回归，共 342 项，327 项通过，15 项受平台条件限制而跳过。测试使用真实 Qoder CN 内置运行时和固定的 CLIProxyAPI `v8.0.51`。Chrome 完成了免密管理页及刷新测试，另用 Edge 的隔离配置验证了一次性票据兑换和真实授权页面挂载。浏览器测试未登录真实服务商账号；macOS/Linux 原生生命周期及桌面安装仍需在对应平台验证。
+
+历史版本 `0.2.8` 在 Windows 使用 CLIProxyAPI `v8.0.51` 运行全量回归，共 322 项，307 项通过，15 项按平台条件跳过。已验证宿主内置 Node 运行时、单账号 503 恢复、输出前和输出后断流、配置迁移及幂等性。流式用例使用本地模拟上游。真实账号的断流频率和 macOS/Linux 实机运行效果仍需在对应环境观察。

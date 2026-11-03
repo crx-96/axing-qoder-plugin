@@ -1,13 +1,16 @@
+import { connectOwned } from "./owned-http.mjs";
+import { parseConfigYaml, appendConfigBlock, replaceConfigScalar } from "./config-yaml.mjs";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, readFile, writeFile, readdir, unlink, rename, link, realpath, access, chmod } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, unlink, rename, link, access, chmod } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "node:net";
-import { randomUUID, createHash } from "node:crypto";
+import { withLifecycleLock } from "./lifecycle-lock.mjs";
+export { withLifecycleLock };
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { renderConfigYaml, validateExistingConfig } from "./config.mjs";
+import { renderConfigYaml, ensureStreamingDefaults, validateExistingConfig } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
 import { isRoutableImageModel } from "./image-models.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
@@ -53,7 +56,7 @@ export async function probeBridge(config) {
 
 /** 每次带密钥请求前确认回环端点类型，且认证/响应错误与离线分开报告。 */
 async function probeModels(config) {
-  const response = await requestLocal(config, "/v1/models", { authenticated: true });
+  const response = await requestOwned(config, "/v1/models", { authenticated: true });
   if (response.status !== 200) throw httpFailure(response.status, "模型查询");
   let body;
   try { body = JSON.parse(response.text); } catch { throw bridgeError("桥返回的模型清单不是 JSON"); }
@@ -63,57 +66,24 @@ async function probeModels(config) {
   return body.data.map((model) => model.id);
 }
 
-// POSIX 用回环端口而不是磁盘 socket 作锁，进程被强杀也不会留下可被误删的锁文件。
-// 哈希碰撞只会保守地等待/报错，不抢占监听者；realpath 合并指向同一数据目录的别名。
-export async function withLifecycleLock(config, action, timeoutMs = 25000, signal) {
-  if (!["win32", "darwin", "linux"].includes(process.platform)) throw bridgeError("不支持此操作系统");
-  await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
-  const directory = await realpath(config.dataDir);
-  const hash = createHash("sha256").update(canonical(directory)).digest("hex").slice(0, 32);
-  const lockPort = 20000 + Number.parseInt(hash.slice(0, 8), 16) % 20000;
-  const address = process.platform === "win32"
-    ? `\\\\.\\pipe\\qoder-subscription-bridge-${hash}`
-    : { host: "127.0.0.1", port: lockPort, exclusive: true };
-  if (process.platform !== "win32" && lockPort === config.port) {
-    throw bridgeError("BRIDGE_PORT 与本数据目录的生命周期锁端口冲突；请使用其他代理端口");
-  }
-  const deadline = Date.now() + timeoutMs;
-  let owner;
-  while (!owner) {
-    signal?.throwIfAborted();
-    const candidate = createServer((socket) => socket.destroy());
-    try {
-      await new Promise((resolve, reject) => {
-        candidate.once("error", reject);
-        candidate.listen(address, resolve);
-      });
-      owner = candidate;
-    } catch (error) {
-      candidate.close();
-      if (error.code !== "EADDRINUSE") throw error;
-      if (Date.now() >= deadline) throw bridgeError("另一会话正在启动或停止订阅桥，请稍后重试");
-      await delay(100, undefined, { signal });
-    }
-  }
-  try { signal?.throwIfAborted(); return await action(); }
-  finally { await new Promise((resolve) => owner.close(resolve)); }
-}
-
+/** 准备授权目录与配置。实际启动持有生命周期锁，首次并发创建使用完整临时文件抢占发布。 */
 export async function ensureDataDir(config) {
+  // 先创建私有授权目录，新安装直接发布已合并默认策略的完整配置。
   await mkdir(config.authDir, { recursive: true, mode: 0o700 });
   if (await readOptional(config.configPath) === null) {
     const temporary = `${config.configPath}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, ensureApprovalRouting(renderConfigYaml(config)), { flag: "wx", mode: 0o600 });
+      await writeFile(temporary, ensureStreamingDefaults(ensureApprovalRouting(renderConfigYaml(config))), { flag: "wx", mode: 0o600 });
       try { await link(temporary, config.configPath); }
       catch (error) { if (error.code !== "EEXIST") throw error; }
     } finally {
       await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
     }
   }
+  // 校验既有安全字段再迁移；仅在内容变化时原子发布并清理临时文件。
   const original = await readFile(config.configPath, "utf8");
   validateExistingConfig(config, original);
-  const updated = ensureApprovalRouting(original);
+  const updated = syncManagementSecret(ensureStreamingDefaults(ensureApprovalRouting(original)), config.mgmtKey);
   if (updated === original) return;
   validateExistingConfig(config, updated);
   const temporary = `${config.configPath}.${randomUUID()}.tmp`;
@@ -161,6 +131,32 @@ async function trackedProcess(config) {
     // 升级会改变安装目录；先按记录自身路径认证旧实例，再单独判定是否属于当前配置。
     : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: record?.configPath });
   return { record, identity, owned: sameProcess(record, identity, config) };
+}
+
+/** 读取并认证同一安装的托管身份，再由操作系统认证实际连接接收者。 */
+export function openCoreConnection(config, signal) {
+  return connectOwned(config, async () => {
+    const tracked = await trackedProcess(config);
+    return tracked?.owned && tracked.record.panelRevision === PANEL_REVISION ? tracked.identity : null;
+  }, signal);
+}
+
+/** 只在认证过的同一条 socket 上发送模型或管理请求，HTTP 层不得重连。 */
+export async function requestOwned(config, path, options = {}) {
+  const socket = await openCoreConnection(config, options.signal);
+  try { return await requestLocal(config, path, { ...options, socket }); }
+  finally { socket.destroy(); }
+}
+
+/** 管理密钥由本机凭据唯一确定；在冷启动锁内替换旧密码或其 bcrypt 哈希。 */
+function syncManagementSecret(text, key) {
+  const path = ["management", "secret-key"];
+  const parsed = parseConfigYaml(text);
+  if (!parsed.nodes.has(JSON.stringify(path))) {
+    return appendConfigBlock(parsed, ["management"], "map", indent =>
+      " ".repeat(indent) + "secret-key: " + JSON.stringify(key));
+  }
+  return parsed.values.get(JSON.stringify(path)) === key ? text : replaceConfigScalar(text, path, key);
 }
 
 async function savePid(config, value) {
@@ -223,7 +219,7 @@ async function launch(config, signal) {
   ], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
     // 只对子进程指定受控页面，不能让宿主环境把管理端指向外部静态资产。
-    env: { ...process.env, MANAGEMENT_STATIC_PATH: panelDirectory },
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
   });
   supervisors.set(config.dataDir, child);
   child.once("exit", () => {
@@ -277,6 +273,7 @@ async function launch(config, signal) {
       const probe = await probeBridge(config);
       if (probe.state === "bridge") {
         await probeModels(config);
+        signal?.throwIfAborted();
         return { started: true, ready: true, reason: "qoder 订阅代理已启动并受进程生命周期托管" };
       }
       if (probe.state === "foreign") throw bridgeError(probe.reason);
@@ -384,13 +381,22 @@ export async function ensureRunning(config, { automatic = false, allowDownload =
   }
 }
 
+/** 取消本会话等待锁、下载或启动的任务，暂停自动恢复并在生命周期锁内确认已停止。 */
 export async function stopBridge(config) {
+  // 启动可能正持有同一把锁等待就绪；先通知它回收资源并释放锁，避免停止在锁外等到超时。
+  startControllers.get(config.dataDir)?.abort();
   return withLifecycleLock(config, async () => {
-    // 先持久暂停，其他会话的 watchdog 才不会在停止后立即拉起。
+    // 在锁内发布暂停，再取消等待期间新登记的启动；其他会话只能在解锁后检查最新标记。
     await writeFile(config.pausedPath, "Stopped by user\n", { mode: 0o600 });
     startControllers.get(config.dataDir)?.abort();
     const tracked = await trackedProcess(config);
-    if (!tracked?.identity) return { stopped: false, reason: "未发现本版本运行的进程；自动恢复已暂停" };
+    if (!tracked?.identity) {
+      // 仅在端口确认离线时报告幂等成功；外部服务或无法确定的端点都不接管或终止。
+      const probe = await probeBridge(config);
+      return probe.state === "offline"
+        ? { stopped: true, reason: "本版本订阅桥已经停止，自动恢复已暂停" }
+        : { stopped: false, reason: "端口上服务的归属无法确认；已暂停自动恢复，未停止其他进程" };
+    }
     if (!tracked.owned) return { stopped: false, reason: "进程归属校验失败；未停止其他版本或外部进程" };
     if (process.platform !== "win32") {
       try {
@@ -444,7 +450,7 @@ export async function getStatus(config) {
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
     authCount, models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
     core: await getCoreStatus(config),
-    loginHint: "管理网页密码固定为 123456；模型 API Key 在本地 launcher-secrets.json 查看。Antigravity 使用网页手动回填：Google 授权后复制 localhost:51121 完整回调地址，返回管理页粘贴并提交；无需监听该端口。",
+    loginHint: "运行插件指令 open-management 打开授权与账号管理。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。",
   };
 }
 

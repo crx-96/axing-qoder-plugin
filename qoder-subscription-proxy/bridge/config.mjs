@@ -1,20 +1,21 @@
 /** 拉起器配置：仅允许 IPv4 回环监听，使用插件专属稳定数据目录，API 密钥仅供本地使用。 */
 
 import { randomBytes } from "node:crypto";
-import { chmod, link, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { withLifecycleLock } from "./lifecycle-lock.mjs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { getCoreRelease, resolveCoreBinaryPath } from "./core-runtime.mjs";
-import { parseConfigYaml } from "./config-yaml.mjs";
+import { appendConfigBlock, parseConfigYaml } from "./config-yaml.mjs";
 
 /** 仅支持此回环地址，不接受 localhost、IPv6 或任意网络接口。 */
 export const DEFAULT_HOST = "127.0.0.1";
 /** 默认 HTTP 端口，避开旧桥 8787 与普通 CLIProxyAPI 8317；环境变量仍须为合法十进制端口。 */
 export const DEFAULT_PORT = 19787;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录。 */
-export const PLUGIN_VERSION = "0.2.7";
-/** 用户指定的公共管理密码，仅限回环管理接口；不能用作客户端 API 密钥。 */
-const DEFAULT_MGMT_KEY = "123456";
+export const PLUGIN_VERSION = "0.2.9";
+/** 旧版公共密码仅用于识别需要升级的文件和兼容环境配置。 */
+const LEGACY_MGMT_KEY = "123456";
 
 /** 校验非空字符串；错误只包含固定字段名，不回显用户值。 */
 function requireString(value, name) {
@@ -38,65 +39,71 @@ function parsePort(raw) {
   return Number(raw);
 }
 
-/** 读取持久默认密钥并收紧文件权限；不传播可能包含密钥的 JSON 解析错误。 */
-async function readSecrets(path) {
-  const text = await readFile(path, "utf-8");
-  let secrets;
-  try {
-    secrets = JSON.parse(text);
-    requireString(secrets?.apiKey, "apiKey");
-    // 持久文件仅保存 API 密钥，拒绝旧桥密钥格式以及复用公共管理密码的值。
-    if (Object.keys(secrets).length !== 1 || secrets.apiKey === DEFAULT_MGMT_KEY) throw new Error();
-  } catch {
-    throw new Error("launcher-secrets.json 格式无效；请检查本地密钥文件，不要直接删除或轮换密钥。");
+/** 校验 HTTP Bearer 值，避免接受核心可以保存但无法发到请求头的字符。 */
+function validClientKey(value) {
+  return typeof value === "string" && /^[!-~]+$/.test(value) && value !== LEGACY_MGMT_KEY;
+}
+
+/** 只接受旧版单密钥或本版本的双密钥结构；错误不暴露文件内容。 */
+async function readSecrets(file) {
+  const secrets = JSON.parse(await readFile(file, "utf8"));
+  if (!validClientKey(secrets?.apiKey) || Object.keys(secrets).some(k => !["mgmtKey", "apiKey"].includes(k)) ||
+      (Object.hasOwn(secrets, "mgmtKey") && secrets.mgmtKey !== LEGACY_MGMT_KEY &&
+       (typeof secrets.mgmtKey !== "string" || !/^[a-f0-9]{64}$/.test(secrets.mgmtKey) || secrets.apiKey === secrets.mgmtKey))) {
+    throw new Error("本地凭据格式无效。");
   }
-  // POSIX 下强制仅所有者读写；Windows 的实际访问权限仍由所在目录 ACL 约束。
-  await chmod(path, 0o600);
+  await chmod(file, 0o600);
   return secrets;
 }
 
-/**
- * 幂等创建默认密钥。先完整写入私有临时文件，再用硬链接原子发布，避免读到半份 JSON。
- * link 的 EEXIST 表示另一个进程胜出，必须读取胜者，绝不能用 rename 覆盖它。
- */
-async function loadSecrets(dataDir) {
-  const path = join(dataDir, "launcher-secrets.json");
+/** 完整写入再原子发布。首次安装只接受一个创建者，旧文件替换仅在生命周期锁内调用。 */
+async function publishSecrets(file, apiKey, upgrade) {
+  const temporary = file + "." + randomBytes(16).toString("hex") + ".tmp";
+  const handle = await open(temporary, "wx", 0o600);
   try {
-    try {
-      return await readSecrets(path);
-    } catch (error) {
+    const mgmtKey = randomBytes(32).toString("hex");
+    await handle.writeFile(JSON.stringify({ apiKey, mgmtKey }) + "\n", "utf8");
+    await handle.sync();
+    await handle.close();
+    if (upgrade) await rename(temporary, file);
+    else {
+      try { await link(temporary, file); }
+      catch (error) { if (error.code !== "EEXIST") throw error; }
+    }
+  } finally {
+    await handle.close();
+    await unlink(temporary).catch(error => { if (error.code !== "ENOENT") throw error; });
+  }
+}
+
+/** 保留旧 API key，首次迁移时生成单独管理密钥；同时升级的多个宿主读取同一份结果。 */
+async function loadSecrets(dataDir, port) {
+  const file = join(dataDir, "launcher-secrets.json");
+  try {
+    let current;
+    try { current = await readSecrets(file); }
+    catch (error) {
       if (error.code !== "ENOENT") throw error;
+      await mkdir(dataDir, { recursive: true, mode: 0o700 });
+      await publishSecrets(file, randomBytes(32).toString("hex"), false);
+      current = await readSecrets(file);
     }
-    await mkdir(dataDir, { recursive: true, mode: 0o700 });
-    const temporaryPath = join(dataDir, `.launcher-secrets-${randomBytes(16).toString("hex")}.tmp`);
-    const handle = await open(temporaryPath, "wx", 0o600);
-    try {
-      // 客户端密钥使用独立随机值；公共管理密码不持久化，环境覆盖也不改写默认密钥。
-      await handle.writeFile(JSON.stringify({
-        apiKey: randomBytes(32).toString("hex"),
-      }) + "\n", "utf-8");
-      await handle.sync();
-      await handle.close();
-      try {
-        await link(temporaryPath, path);
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-      }
-    } finally {
-      await handle.close();
-      await unlink(temporaryPath);
-    }
-    return await readSecrets(path);
+    if (current.mgmtKey && current.mgmtKey !== LEGACY_MGMT_KEY) return current;
+    return await withLifecycleLock({ dataDir, port }, async () => {
+      // 重读胜者；只有仍为历史格式时才替换，不覆盖其他会话生成的管理密钥。
+      const previous = await readSecrets(file);
+      if (!previous.mgmtKey || previous.mgmtKey === LEGACY_MGMT_KEY) await publishSecrets(file, previous.apiKey, true);
+      return readSecrets(file);
+    });
   } catch {
-    // 文件系统错误可能包含输入路径，JSON 错误可能包含密钥，两者均不透传。
-    throw new Error("无法安全加载 launcher-secrets.json；请检查文件格式、权限及文件系统硬链接支持，勿直接删除已有密钥。");
+    throw new Error("无法安全加载 launcher-secrets.json；请检查文件格式、访问权限及文件系统硬链接支持。");
   }
 }
 
 /**
  * 加载配置，不启动进程、不创建 config.yaml，也不复制旧插件账号；本插件升级沿用专属目录。
  * 支持 BRIDGE_BIN / DATA_DIR / HOST / PORT / API_KEY（均带 BRIDGE_ 前缀）。
- * BRIDGE_MGMT_KEY 不可覆盖公共管理密码，仅容许未设置或精确设置为 123456。
+ * BRIDGE_MGMT_KEY 旧管理密码环境值仅作兼容占位，实际管理密钥由本机生成，仅容许未设置或精确设置为 123456。
  * @param {object} options 配置输入
  * @param {string} options.pluginRoot 插件根目录，相对路径会解析为绝对路径
  * @param {NodeJS.ProcessEnv} [options.env=process.env] 环境变量，只接受字符串或 undefined
@@ -118,12 +125,13 @@ export async function loadConfig({ pluginRoot, env = process.env, platform = pro
   const apiKey = envString(env, "BRIDGE_API_KEY");
   const mgmtKey = envString(env, "BRIDGE_MGMT_KEY");
   if (host !== DEFAULT_HOST) throw new Error("BRIDGE_HOST 仅允许 127.0.0.1 回环地址。");
-  if (mgmtKey !== undefined && mgmtKey !== DEFAULT_MGMT_KEY) {
-    throw new Error("BRIDGE_MGMT_KEY 不允许覆盖固定管理密码；请移除此环境变量。");
+  if (mgmtKey !== undefined && mgmtKey !== LEGACY_MGMT_KEY) {
+    throw new Error("BRIDGE_MGMT_KEY 不允许覆盖本机生成的管理密码；请移除此环境变量。");
   }
-  if (apiKey === DEFAULT_MGMT_KEY) throw new Error("BRIDGE_API_KEY 不得复用公共管理密码。");
+  if (apiKey !== undefined && !validClientKey(apiKey)) throw new Error("BRIDGE_API_KEY 必须是可用于 HTTP 的可见 ASCII 字符，不含空格，且不能复用旧公共密码。");
   const dataDir = resolve(data ?? join(homedir(), ".qoder", "qoder-subscription-proxy", "data"));
-  const secrets = await loadSecrets(dataDir);
+  const secrets = await loadSecrets(dataDir, port);
+  if (apiKey === secrets.mgmtKey) throw new Error("BRIDGE_API_KEY 不能与管理密钥相同。");
   const config = {
     /** 默认核心位于稳定缓存；BRIDGE_BIN 只覆盖路径，不隐式下载或替换自定义程序。 */
     binPath: bin ? resolve(bin) : resolveCoreBinaryPath({ dataDir, platform, arch }),
@@ -143,8 +151,8 @@ export async function loadConfig({ pluginRoot, env = process.env, platform = pro
     port,
     /** 客户端密钥，仅内部使用；环境变量优先于持久默认值。 */
     apiKey: apiKey ?? secrets.apiKey,
-    /** 固定公共管理密码，仅供回环接口；上游可在 YAML 内将其哈希化。 */
-    mgmtKey: DEFAULT_MGMT_KEY,
+    /** 按安装持久保存的管理密钥，独立于模型 API Key；核心启动后可在 YAML 中保存其哈希。 */
+    mgmtKey: secrets.mgmtKey,
     /** 不包含密钥的管理面板入口。 */
     managementUrl: `http://${host}:${port}/management.html`,
     /** OpenAI 兼容接口地址。 */
@@ -173,16 +181,52 @@ function yamlString(value) {
     `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
-/** 生成最小 v8 配置，所有字符串均转义；由调用方在跨进程锁内以 wx/0600 创建文件。 */
+/** 插件生成配置的文件头，仅说明来源，不据此覆盖用户设置。 */
+const CONFIG_HEADER = "# 由 qoder-subscription-proxy 插件生成；手工修改核心字段时须同步环境变量。";
+/** 按 v8 段路径声明默认标量。时间间隔以秒计，Codex 缓冲上限按收到上游帧时检查。 */
+const STREAMING_DEFAULTS = [
+  [["routing", "retry"], { "request-retry": 1, "max-retry-interval": 5 }],
+  // 单账号遇到瞬时 5xx 后的冷却须短于 5 秒轮间等待预算，否则没有可用凭据重试。
+  [["routing", "cooldown"], { "transient-error-cooldown-seconds": 3 }],
+  [["requests", "streaming"], { "keepalive-seconds": 15, "bootstrap-retries": 1, "send-keepalive-before-ft": false }],
+  [["upstream", "codex"], { "stream-bootstrap-buffering": true, "stream-bootstrap-timeout": '"10s"' }],
+];
+
+/** 为未配置的流式策略补默认值；显式零值和仍然生效的旧字段保持原样。 */
+export function ensureStreamingDefaults(text) {
+  let parsed = parseConfigYaml(text);
+  for (const [currentPath, fields] of STREAMING_DEFAULTS) {
+    // 核心按整段迁移旧 streaming；在旧段就地补缺，避免新段覆盖已有字段或自定义配置。
+    const hasPath = path => parsed.nodes.has(JSON.stringify(path));
+    let path = currentPath;
+    if (path[1] === "streaming" && !hasPath(path) && hasPath(["streaming"])) path = ["streaming"];
+
+    // 其余写法在 v8 按叶子决定优先级；保留真实旧字段，防止默认值遮蔽用户配置。
+    const missing = Object.entries(fields).filter(([key]) => {
+      if (hasPath([...path, key])) return false;
+      if (path[0] === "routing") return !hasPath([key]);
+      if (path[0] === "upstream") return !hasPath(["codex", key]) && !hasPath(["oauth", "providers", "codex", key]);
+      return true;
+    });
+    if (!missing.length) continue;
+    text = appendConfigBlock(parsed, path, "map", indent =>
+      missing.map(([key, scalar]) => " ".repeat(indent) + key + ": " + scalar).join("\n"));
+    // 插入会改变后续段的行号；重新解析以便下一组仍写入正确位置。
+    parsed = parseConfigYaml(text);
+  }
+  return text;
+}
+
+/** 生成含本机安全字段的 v8 基础配置，启动时再统一应用新装与升级共用的流式默认值。 */
 export function renderConfigYaml(config) {
   return [
-    "# 由 qoder-subscription-proxy 插件生成；手工修改核心字段时须同步环境变量。",
+    CONFIG_HEADER,
     "config-version: 8",
     "server:",
     `  host: ${yamlString(config.host)}`,
     `  port: ${config.port}`,
     "management:",
-    "  # 固定公共密码仅限本机管理，上游启动后可能改写为哈希",
+    "  # 独立管理密钥仅限本机管理，上游启动后可能改写为哈希",
     `  secret-key: ${yamlString(config.mgmtKey)}`,
     "  allow-remote: false",
     "  # 保持内置管理面板可用；字段与随包上游 v8 示例一致",
@@ -218,7 +262,7 @@ export function validateExistingConfig(config, text) {
   if (values.get(JSON.stringify(["server", "port"])) !== config.port) {
     throw new Error("config.yaml 的 server.port 与 BRIDGE_PORT 不一致或缺失；请同步配置后重试。");
   }
-  // 固定公共管理密码只能用于本机；缺失或字符串形式的 false 也不能沿用上游默认行为。
+  // 管理端只能用于本机；缺失或字符串形式的 false 也不能沿用上游默认行为。
   if (values.get(JSON.stringify(["management", "allow-remote"])) !== false) {
     throw new Error("config.yaml 的 management.allow-remote 必须明确为 false；禁止远程管理。");
   }

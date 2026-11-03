@@ -160,7 +160,7 @@ export async function runPosixSupervisor(config, panelDirectory, { spawnChild = 
     }
     if (!closing) {
       child = spawnChild(config.binPath, ["-config", config.configPath], {
-        cwd: config.dataDir, env: { ...process.env, MANAGEMENT_STATIC_PATH: panelDirectory },
+        cwd: config.dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
         stdio: ["ignore", log.fd, log.fd], windowsHide: true,
       });
       childExited = false;

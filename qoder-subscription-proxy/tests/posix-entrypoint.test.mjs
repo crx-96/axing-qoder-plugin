@@ -101,16 +101,19 @@ async function sourceFixture(t) {
   const repository = join(directory, "源仓库 中文 空格");
   const plugin = join(repository, "qoder-subscription-proxy");
   const target = join(directory, "目标市场 中文 空格 '保持字面量'");
-  const catalog = { name: "axing-qoder-plugins", owner: { name: "crx-96" }, plugins: [{ name: "qoder-subscription-proxy", source: "./qoder-subscription-proxy", version: "0.2.7" }] };
+  const catalog = { name: "axing-qoder-plugins", owner: { name: "crx-96" }, plugins: [{ name: "qoder-subscription-proxy", source: "./qoder-subscription-proxy", version: "0.2.9" }] };
   await put(join(repository, ".qoder-plugin", "marketplace.json"), JSON.stringify(catalog, null, 2) + "\n");
   await put(join(repository, "README.md"), "市场安装说明 fixture\n");
   await put(join(repository, "LICENSE"), "市场许可证 fixture\n");
-  await put(join(plugin, ".qoder-plugin", "plugin.json"), JSON.stringify({ name: "qoder-subscription-proxy", version: "0.2.7", mcpServers: "./.mcp.json" }));
+  await put(join(plugin, ".qoder-plugin", "plugin.json"), JSON.stringify({ name: "qoder-subscription-proxy", version: "0.2.9", mcpServers: "./.mcp.json" }));
   await copyFile(join(root, ".mcp.posix.json"), join(plugin, ".mcp.posix.json"));
   await copyFile(join(root, ".mcp.json"), join(plugin, ".mcp.json"));
-  for (const file of ["README.md", "LICENSE", "DISCLAIMER.md", "THIRD_PARTY_NOTICES.md", "Antigravity授权.cmd", "bridge/panel/LICENSE", "bridge/panel/management.upstream.html", "bridge/bin/LICENSE", "bridge/bin/README.md", "bridge/bin/README_CN.md", "bridge/bin/config.example.yaml", "bridge/bin/platforms.json", "bridge/bin/qoder-plugin-subscription-proxy.exe", "bridge/config.mjs", "bridge/core-runtime.mjs", "bridge/posix-supervisor.mjs", "scripts/antigravity-login.ps1", "scripts/image-preview.ps1", "scripts/mcp-server.mjs", "scripts/proxy-supervisor.ps1", "scripts/proxy-supervisor.mjs", "scripts/ProxyJob.cs", "scripts/start-mcp.ps1"]) {
-    await put(join(plugin, file), `fixture: ${file}\n`);
+  const manifest = await readFile(join(root, "scripts/distribution-files.txt"), "utf8");
+  for (const file of manifest.trimEnd().split(/\r?\n/)) {
+    if (file.endsWith("/plugin.json") || file === ".mcp.posix.json") continue;
+    await put(join(plugin, file), file === "scripts/distribution-files.txt" ? manifest : `fixture: ${file}\n`);
   }
+  await put(join(plugin, "bridge/bin/qoder-plugin-subscription-proxy.exe"), "old native core fixture");
   for (const platform of ["darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64"]) {
     const binary = join(plugin, "bridge", "bin", platform, "qoder-plugin-subscription-proxy");
     await put(binary, `#!/bin/sh\n# fake binary ${platform}\nexit 0\n`);
@@ -119,7 +122,7 @@ async function sourceFixture(t) {
   await put(join(plugin, "scripts", "start-mcp.sh"), launcherText);
   const prepare = join(plugin, "scripts", "prepare-posix-marketplace.sh");
   await put(prepare, prepareText);
-  for (const file of ["data/auth.json", "bridge/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "bridge/unknown.tmp", "bridge/bin/unknown.tmp", "bridge/bin/CLIProxyAPI_8.0.47_windows_amd64.zip", "bridge/bin/CLIProxyAPI_8.0.47_linux_amd64.tar.gz", "bridge/bin/linux-x64/unknown.tmp", "bridge/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
+  for (const file of ["data/auth.json", "bridge/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "bridge/unknown.tmp", "bridge/local-debug-only.mjs", "commands/private.md", "bridge/bin/unknown.tmp", "bridge/bin/CLIProxyAPI_8.0.51_windows_amd64.zip", "bridge/bin/CLIProxyAPI_8.0.51_linux_amd64.tar.gz", "bridge/bin/linux-x64/unknown.tmp", "bridge/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
     await put(join(plugin, file), "must-not-copy-private-fixture\n");
   }
   return { directory, repository, plugin, target, prepare, catalog };
@@ -243,6 +246,9 @@ test("prepare：生成独立市场、原样 catalog、POSIX 清单，不复制�
   assert.equal(JSON.parse(await readFile(join(fixture.plugin, ".mcp.json"))).mcpServers["qoder-subscription-proxy"].command, "powershell.exe");
   const copied = await snapshot(copy);
   assert.ok(copied["bridge/posix-supervisor.mjs"]);
+  assert.ok(copied["commands/open-management.md"]);
+  assert.equal(copied["bridge/local-debug-only.mjs"], undefined);
+  assert.equal(copied["commands/private.md"], undefined);
   assert.ok(copied["scripts/proxy-supervisor.mjs"]);
   assert.ok(copied["Antigravity授权.cmd"]);
   assert.ok(copied["scripts/antigravity-login.ps1"]);

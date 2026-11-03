@@ -43,17 +43,19 @@ trap 'exit 1' HUP INT TERM
 mkdir "$target" || fail '无法创建目标目录（可能已被创建）；未覆盖任何已有目标。'
 owned=$target
 copy_root="$target/qoder-subscription-proxy"
-mkdir "$target/.qoder-plugin" "$copy_root" "$copy_root/.qoder-plugin" "$copy_root/bridge" "$copy_root/bridge/bin" "$copy_root/bridge/panel" "$copy_root/scripts"
+mkdir "$target/.qoder-plugin" "$copy_root" "$copy_root/.qoder-plugin" "$copy_root/bridge" "$copy_root/bridge/bin" "$copy_root/bridge/panel" "$copy_root/commands" "$copy_root/scripts"
 
 # 仅复制显式允许的常规文件；拒绝符号链接文件和目录，防止引用外部真实数据。
 # 参数为插件内相对路径，目标同名；目录已由本脚本创建。
 copy_file() {
     relative=$1
+    # 清单只允许插件相对路径，禁止路径穿越和平台路径分隔符。按目录清单检查上层链接。
+    case "/$relative/" in *//*|*/../*|*/./*|*\\*|*:*) fail "无效的分发路径：$relative" ;; esac
     source="$plugin_root/$relative"
     [ -f "$source" ] && [ ! -L "$source" ] || fail "分发文件缺失或是符号链接：$relative"
     cp "$source" "$copy_root/$relative"
 }
-for directory in .qoder-plugin bridge bridge/bin bridge/panel scripts; do
+for directory in .qoder-plugin bridge bridge/bin bridge/panel commands scripts; do
     [ -d "$plugin_root/$directory" ] && [ ! -L "$plugin_root/$directory" ] || fail "分发目录缺失或是符号链接：$directory"
 done
 
@@ -65,25 +67,13 @@ for market_file in README.md LICENSE; do
     [ -f "$market_root/$market_file" ] && [ ! -L "$market_root/$market_file" ] || fail "市场分发文件缺失或是符号链接：$market_file"
     cp "$market_root/$market_file" "$target/$market_file"
 done
-for relative in .qoder-plugin/plugin.json .mcp.posix.json README.md LICENSE DISCLAIMER.md THIRD_PARTY_NOTICES.md Antigravity授权.cmd; do
+# ZIP 与本地市场遵循同一份源码白名单，预先检查清单自身，避免跟随外部链接。
+list="$plugin_root/scripts/distribution-files.txt"
+[ -f "$list" ] && [ ! -L "$list" ] || fail "缺少常规文件 scripts/distribution-files.txt"
+while IFS= read -r relative || [ -n "$relative" ]; do
     copy_file "$relative"
-done
-
-# bridge 根目录只允许 JavaScript 源文件；不递归复制 bridge/data 或其他目录。
-for source_file in "$plugin_root"/bridge/*.mjs; do
-    copy_file "bridge/$(basename "$source_file")"
-done
-# 核心只保留来源清单、原始文档与许可证；即使源码旁仍有旧二进制也不复制。
-# MCP 启动后后台校验并缓存当前平台核心，打包过程不联网。
-for relative in bridge/panel/LICENSE bridge/panel/management.upstream.html bridge/bin/LICENSE bridge/bin/README.md bridge/bin/README_CN.md bridge/bin/config.example.yaml bridge/bin/platforms.json; do
-    copy_file "$relative"
-done
-
-# Windows CLI 授权脚本仍作为原项目可选能力保留，不移植为 Unix CLI 助手。
-# Unix 用户通过现有网页授权；这里只包含明确已知的脚本和托管入口。
-for script in antigravity-login.ps1 image-preview.ps1 mcp-server.mjs proxy-supervisor.ps1 proxy-supervisor.mjs ProxyJob.cs start-mcp.ps1 start-mcp.sh prepare-posix-marketplace.sh; do
-    copy_file "scripts/$script"
-done
+done < "$list"
+# 独立市场使用 POSIX 入口，源码中的默认 Windows 清单不进入此位置。
 cp "$copy_root/.mcp.posix.json" "$copy_root/.mcp.json"
 owned=
 

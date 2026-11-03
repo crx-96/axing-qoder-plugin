@@ -3,7 +3,7 @@ import http from "node:http";
 /** 回环请求使用独立连接，不读取系统代理，也不复用切换网络前的连接。 */
 export function requestLocal(config, path, {
   method = "GET", body, authenticated = false, signal,
-  timeoutMs = 3000, maxBytes = 1024 * 1024,
+  timeoutMs = 3000, maxBytes = 1024 * 1024, socket, management = false, statusOnly = false,
 } = {}) {
   if (config.host !== "127.0.0.1" || !path.startsWith("/") || path.startsWith("//")) {
     return Promise.reject(new Error("仅允许访问订阅桥的本机回环地址"));
@@ -11,7 +11,7 @@ export function requestLocal(config, path, {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     const headers = { Accept: "application/json", Connection: "close" };
-    if (authenticated) headers.Authorization = `Bearer ${config.apiKey}`;
+    if (authenticated || management) headers.Authorization = `Bearer ${management ? config.mgmtKey : config.apiKey}`;
     if (payload) {
       headers["Content-Type"] = "application/json";
       headers["Content-Length"] = payload.length;
@@ -19,7 +19,7 @@ export function requestLocal(config, path, {
     let finished = false;
     let timer;
     const req = http.request({
-      hostname: config.host, port: config.port, path, method, headers, agent: false,
+      hostname: config.host, port: config.port, path, method, headers, ...(socket ? { createConnection: () => socket } : { agent: false }),
     });
     const finish = (error, value) => {
       if (finished) return;
@@ -36,6 +36,12 @@ export function requestLocal(config, path, {
     };
     req.on("error", (error) => finish(error));
     req.on("response", (res) => {
+      // 管理页交接只需确认认证成功，不缓冲可能很大的敏感配置正文。
+      if (statusOnly) {
+        finish(null, { status: res.statusCode });
+        res.destroy();
+        return;
+      }
       const chunks = [];
       let bytes = 0;
       res.on("data", (chunk) => {

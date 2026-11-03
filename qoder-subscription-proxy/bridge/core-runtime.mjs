@@ -10,6 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { gunzip, inflateRaw } from "node:zlib";
+import { crc32 } from "./crc32.mjs";
 
 /** 只从插件固定清单选择版本、官方 URL 与两级 SHA256，不接收环境变量覆盖来源。 */
 const MANIFEST = JSON.parse(await readFile(new URL("./bin/platforms.json", import.meta.url), "utf-8"));
@@ -267,20 +268,6 @@ function checkZipExtra(bytes) {
     offset += 4 + size;
     if (![0x5455, 0x7875, 0x000a].includes(id) || offset > bytes.length) throw coreError("CORE_ARCHIVE");
   }
-}
-
-/** ZIP CRC32 查表仅计算一次；最终安全信任仍来自固定二进制 SHA256。 */
-const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
-  let value = byte;
-  for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
-  return value >>> 0;
-});
-
-/** 校验 ZIP 解压数据与中心目录 CRC 一致，识别截断或结构歧义。 */
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
-  return (crc ^ 0xffffffff) >>> 0;
 }
 
 /** 校验 ZIP 全部目录/本地头，拒绝链接、重叠、重复、加密和 ZIP64，只返回目标普通文件。 */

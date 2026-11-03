@@ -13,7 +13,7 @@ function Stop-AntigravityLogin {
     <# Raise a controlled diagnostic without including URLs, state, codes or response bodies. #>
     param(
         # Only these locally defined reasons may become user-visible messages.
-        [ValidateSet('auth-url', 'callback-url', 'state', 'expired', 'rejected', 'response', 'http', 'transport', 'browser')]
+        [ValidateSet('auth-url', 'callback-url', 'state', 'expired', 'rejected', 'response', 'http', 'transport', 'browser', 'runtime')]
         [string]$Reason,
         # Zero means no HTTP response was available; otherwise report only the status number.
         [ValidateRange(0, 599)][int]$HttpStatus = 0
@@ -29,6 +29,7 @@ function Stop-AntigravityLogin {
         'http' = 'The local management request was rejected.'
         'transport' = 'The local management request failed or timed out; it was not retried.'
         'browser' = 'The default browser could not be opened; no callback was submitted.'
+        'runtime' = 'Start the desktop app or provide Node.js 22 or newer.'
     }
     $message = $messages[$Reason]
     if ($HttpStatus -gt 0) { $message += ' HTTP ' + $HttpStatus + '.' }
@@ -143,73 +144,90 @@ function ConvertFrom-AntigravityCallback {
     return $query['code']
 }
 
+function Get-AntigravityRuntime {
+    <# Resolve the installed desktop runtime or an existing Node executable without installing tools. #>
+    # Explorer has no desktop ancestor. Only consult registered installations and standard install locations.
+    $candidates = @()
+    foreach ($name in @('Qoder CN', 'Qoder')) {
+        foreach ($registry in @('HKCU:', 'HKLM:')) {
+            $registered = Get-Item -LiteralPath "$registry\Software\Microsoft\Windows\CurrentVersion\App Paths\$name.exe" -ErrorAction SilentlyContinue
+            if ($registered) {
+                $location = $registered.GetValue('')
+                if ($location -and [IO.Path]::GetFileName($location) -ieq "$name.exe" -and [IO.Path]::IsPathRooted($location)) {
+                    $candidates += $location
+                }
+            }
+        }
+        foreach ($base in @("$env:LOCALAPPDATA\Programs", $env:ProgramFiles)) {
+            if ($base) { $candidates += Join-Path $base "$name\$name.exe" }
+        }
+    }
+    $node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($node) { $candidates += $node.Source }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and [IO.File]::Exists($candidate)) { return $candidate }
+    }
+    Stop-AntigravityLogin 'runtime'
+}
+
 function Invoke-AntigravityLocalRequest {
-    <# Issue one bounded management request to 127.0.0.1, without proxies, redirects or retries. #>
+    <# Send one operation over private pipes to the same verified bridge transport used by MCP. #>
     param(
-        # Port is the only configurable destination component; no arbitrary URLs or paths are accepted.
+        # Port is checked against the plugin config; no arbitrary origin or URL is accepted.
         [ValidateRange(1, 65535)][int]$Port,
-        # Map each operation to a fixed management endpoint and method.
+        # Only the three built-in Antigravity management operations are recognized.
         [ValidateSet('auth-url', 'callback', 'status')][string]$Operation,
-        # Original validated state; required for callback and status operations.
+        # Upstream state must match the currently authorized session.
         [string]$State,
-        # Authorization code sent only in the callback JSON body.
+        # Validated callback code, delivered only on stdin.
         [string]$Code,
-        # Per-request total deadline, bounded by the remaining OAuth session time.
+        # Total request deadline includes child startup and slow response bodies.
         [ValidateRange(1, 15000)][int]$TimeoutMilliseconds = 15000
     )
     if ($Operation -ne 'auth-url' -and -not (Test-AntigravityState $State)) { Stop-AntigravityLogin 'state' }
     if ($Operation -eq 'callback' -and [string]::IsNullOrWhiteSpace($Code)) { Stop-AntigravityLogin 'callback-url' }
-    # HttpClient buffers responses under one cancellation deadline, including streamed response bodies.
-    Add-Type -AssemblyName System.Net.Http
-    $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.UseProxy = $false
-    $handler.AllowAutoRedirect = $false
-    $handler.UseCookies = $false
-    $client = New-Object System.Net.Http.HttpClient($handler)
-    $client.Timeout = [TimeSpan]::FromMilliseconds($TimeoutMilliseconds)
-    $client.MaxResponseContentBufferSize = 65536
-    $request = $null
-    $response = $null
-    $responseText = $null
-    $body = $null
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $deadline = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + $TimeoutMilliseconds
+    # The child receives no secret on its command line. Decode its UTF-8 response independently of the console code page.
+    $process = New-Object Diagnostics.Process
+    $started = $false
     try {
-        # Construct destinations exclusively from fixed paths and an encoded validated state.
-        $path = '/v8/management/oauth/auth-url?provider=antigravity&is_webui=false'
-        $method = [System.Net.Http.HttpMethod]::Get
-        if ($Operation -eq 'status') {
-            $path = '/v8/management/oauth/status?state=' + [Uri]::EscapeDataString($State)
-        } elseif ($Operation -eq 'callback') {
-            $path = '/v8/management/oauth/callback'
-            $method = [System.Net.Http.HttpMethod]::Post
-        }
-        $request = New-Object System.Net.Http.HttpRequestMessage($method, ('http://127.0.0.1:' + $Port + $path))
-        $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', '123456')
-        $request.Headers.ConnectionClose = $true
-        if ($Operation -eq 'callback') {
-            $body = @{ provider = 'antigravity'; state = $State; code = $Code } | ConvertTo-Json -Compress
-            $request.Content = New-Object System.Net.Http.StringContent($body, [Text.Encoding]::UTF8, 'application/json')
-        }
-        $response = $client.SendAsync($request).GetAwaiter().GetResult()
-        # Do not follow Location or interpret any HTTP failure body, even if it contains JSON.
-        $status = [int]$response.StatusCode
-        if ($status -lt 200 -or $status -ge 300) { Stop-AntigravityLogin 'http' $status }
-        $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        try { $result = ConvertFrom-Json -InputObject $responseText -ErrorAction Stop }
-        catch { Stop-AntigravityLogin 'response' $status }
-        if ($result -isnot [System.Management.Automation.PSCustomObject]) { Stop-AntigravityLogin 'response' $status }
-        return $result
+        $start = $process.StartInfo
+        $start.FileName = Get-AntigravityRuntime
+        $start.Arguments = '"' + (Join-Path $PSScriptRoot 'antigravity-request.mjs') + '"'
+        $start.CreateNoWindow = $true
+        $start.UseShellExecute = $false
+        $start.RedirectStandardInput = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+        $start.EnvironmentVariables['ELECTRON_RUN_AS_NODE'] = '1'
+        $started = $process.Start()
+        if (-not $started) { Stop-AntigravityLogin 'runtime' }
+        # Read output concurrently. The child projects only fixed fields and never relays raw upstream errors.
+        $reading = $process.StandardOutput.ReadToEndAsync()
+        $null = $process.StandardError.ReadToEndAsync()
+        $json = @{ operation=$Operation; port=$Port; state=$State; code=$Code; deadline=$deadline } | ConvertTo-Json -Compress
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+        $inputStream = $process.StandardInput.BaseStream
+        $writing = $inputStream.WriteAsync($bytes, 0, $bytes.Length)
+        if (-not $writing.Wait([int][Math]::Max(0, $TimeoutMilliseconds - $clock.ElapsedMilliseconds))) { Stop-AntigravityLogin 'transport' }
+        $inputStream.Close()
+        if (-not $process.WaitForExit([int][Math]::Max(0, $TimeoutMilliseconds - $clock.ElapsedMilliseconds))) { Stop-AntigravityLogin 'transport' }
+        if ($process.ExitCode -ne 0) { Stop-AntigravityLogin 'transport' }
+        $reply = ConvertFrom-Json -InputObject $reading.GetAwaiter().GetResult() -ErrorAction Stop
+        if ($reply.error -eq 'http') { Stop-AntigravityLogin 'http' ([int]$reply.status) }
+        if ($reply.error -eq 'response') { Stop-AntigravityLogin 'response' ([int]$reply.status) }
+        if ($reply.error -or $reply.result -isnot [Management.Automation.PSCustomObject]) { Stop-AntigravityLogin 'transport' }
+        return $reply.result
     } catch {
-        # Only our own fixed diagnostics can escape; network exceptions may contain sensitive URIs.
         if ($_.Exception.Data['AntigravitySafeError']) { throw }
         Stop-AntigravityLogin 'transport'
     } finally {
-        # Dispose sockets and request content on every path; release plaintext references promptly.
-        if ($null -ne $response) { $response.Dispose() }
-        if ($null -ne $request) { $request.Dispose() }
-        $client.Dispose()
-        $handler.Dispose()
-        $body = $null
-        $responseText = $null
+        # Keep only the bounded operation alive; failures and timeout never spawn a second request.
+        if ($started -and -not $process.HasExited) { try { $process.Kill() } catch {} }
+        $process.Dispose()
+        $clock.Stop()
     }
 }
 

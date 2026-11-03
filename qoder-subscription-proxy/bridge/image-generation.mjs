@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { probeBridge } from "./bridge-process.mjs";
+import { inflateSync } from "node:zlib";
+import { crc32 } from "./crc32.mjs";
+import { requestOwned } from "./bridge-process.mjs";
 import { DEFAULT_IMAGE_MODEL, GEMINI_IMAGE_MODEL } from "./image-models.mjs";
-import { requestLocal, httpFailure } from "./local-http.mjs";
+import { httpFailure } from "./local-http.mjs";
 
 const execFileAsync = promisify(execFile);
 const previewScript = fileURLToPath(new URL("../scripts/image-preview.ps1", import.meta.url));
@@ -230,6 +232,96 @@ function validateWebp(bytes) {
   }
 }
 
+/** 标准 PNG 颜色类型对应的每像素采样数；缺少的类型值为保留值。 */
+const PNG_CHANNELS = [1, 0, 3, 1, 2, 0, 4];
+/** Adam7 各趟的起始列、起始行、列步长和行步长；空趟不占过滤字节。 */
+const PNG_ADAM7 = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+  [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]];
+
+/** 依据 IHDR 的像素布局限制解压上限，校验完整的 zlib 数据、每趟行长度与过滤器。 */
+function validatePngPixels(compressed, width, height, bitsPerPixel, interlaced) {
+  const passes = [];
+  let expectedBytes = 0;
+  // 不足一字节的采样每行单独向上取整，每个非空扫描行都有一个过滤字节。
+  for (const [x, y, dx, dy] of interlaced ? PNG_ADAM7 : [[0, 0, 1, 1]]) {
+    if (x >= width || y >= height) continue;
+    const columns = Math.ceil((width - x) / dx);
+    const rows = Math.ceil((height - y) / dy);
+    const rowBytes = 1 + Math.ceil(columns * bitsPerPixel / 8);
+    passes.push([rows, rowBytes]);
+    expectedBytes += rows * rowBytes;
+  }
+  // 像素数已通过 40MP 校验；损坏校验和、提前结束或超过声明布局的解压内容均拒绝。
+  let pixels;
+  try { pixels = inflateSync(compressed, { maxOutputLength: expectedBytes }); }
+  catch { throw safeError("PNG 压缩数据截断、损坏或超过声明尺寸"); }
+  if (pixels.length !== expectedBytes) throw safeError("PNG 解压数据与声明尺寸不符");
+  let offset = 0;
+  for (const [rows, rowBytes] of passes) {
+    for (let row = 0; row < rows; row++, offset += rowBytes) {
+      if (pixels[offset] > 4) throw safeError("PNG 扫描行过滤方式无效");
+    }
+  }
+}
+
+/** 校验 PNG 关键块、全部块 CRC 与 IDAT 像素流；附加元数据仅校验容器完整性。 */
+function validatePng(bytes) {
+  // 先校验固定格式的文件头及颜色/采样组合，再用保证合法的头部计算像素字节预算。
+  if (bytes.length < 33 || bytes.readUInt32BE(8) !== 13 || bytes.toString("latin1", 12, 16) !== "IHDR") {
+    throw safeError("PNG 缺少有效的 IHDR 头");
+  }
+  const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+  validateDimensions(width, height);
+  const depth = bytes[24], color = bytes[25], interlace = bytes[28];
+  const channels = PNG_CHANNELS[color];
+  if (!channels || ![1, 2, 4, 8, 16].includes(depth) || (depth < 8 && color !== 0 && color !== 3) ||
+      (color === 3 && depth === 16) || bytes[26] || bytes[27] || interlace > 1) {
+    throw safeError("PNG 颜色、采样或编码方式无效");
+  }
+
+  let palette = false;
+  let firstData = -1, dataEnd = -1, compressedSize = 0;
+  // 先核对长度及 CRC，记录连续 IDAT 区域，不按不受信的块数量分配对象。
+  for (let offset = 8; offset + 12 <= bytes.length;) {
+    const size = bytes.readUInt32BE(offset);
+    const end = offset + 8 + size;
+    if (end + 4 > bytes.length) break;
+    const type = bytes.toString("latin1", offset + 4, offset + 8);
+    if (!/^[A-Za-z]{4}$/.test(type) || crc32(bytes.subarray(offset + 4, end)) !== bytes.readUInt32BE(end)) {
+      throw safeError("PNG 块类型或 CRC 校验无效");
+    }
+    if (type === "IHDR") {
+      if (offset !== 8) break;
+    } else if (type === "PLTE") {
+      if (palette || firstData >= 0 || color === 0 || color === 4 || !size || size > 768 || size % 3 ||
+          (color === 3 && size / 3 > 2 ** depth)) break;
+      palette = true;
+    } else if (type === "IDAT") {
+      if ((color === 3 && !palette) || (firstData >= 0 && offset !== dataEnd)) break;
+      if (firstData < 0) firstData = offset;
+      compressedSize += size;
+      dataEnd = end + 4;
+    } else if (type === "IEND") {
+      if (size || end + 4 !== bytes.length || !compressedSize) break;
+      // 多个 IDAT 只是同一 zlib 流的分段；按实际压缩字节一次性分配，再做有界解压。
+      const compressed = Buffer.allocUnsafe(compressedSize);
+      let written = 0;
+      for (let pos = firstData; pos < dataEnd;) {
+        const length = bytes.readUInt32BE(pos);
+        written += bytes.copy(compressed, written, pos + 8, pos + 8 + length);
+        pos += length + 12;
+      }
+      validatePngPixels(compressed, width, height, channels * depth, interlace);
+      return;
+    } else if (type[0] < "a") {
+      // 未知关键块会影响解码语义；未知辅助块已经验证长度和 CRC，可直接略过。
+      break;
+    }
+    offset = end + 4;
+  }
+  throw safeError("PNG 关键块缺失、顺序错误或内容截断");
+}
+
 /** 仅接受内联图像并校验结构与尺寸，不追随 URL，也不声称验证全部压缩像素。 */
 export function decodeImage(value) {
   if (typeof value !== "string" || !value.length || value.length > 32 * 1024 * 1024 ||
@@ -239,21 +331,7 @@ export function decodeImage(value) {
   const bytes = Buffer.from(value, "base64");
   if (bytes.toString("base64") !== value) throw safeError("图片编码损坏");
   if (bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) {
-    const width = bytes.readUInt32BE(16);
-    const height = bytes.readUInt32BE(20);
-    validateDimensions(width, height);
-    let offset = 8;
-    let hasPixels = false;
-    let complete = false;
-    while (offset + 12 <= bytes.length) {
-      const length = bytes.readUInt32BE(offset);
-      const type = bytes.toString("ascii", offset + 4, offset + 8);
-      if (offset + length + 12 > bytes.length || (offset === 8 && (type !== "IHDR" || length !== 13))) break;
-      if (type === "IDAT" && length > 0) hasPixels = true;
-      offset += length + 12;
-      if (type === "IEND" && length === 0) { complete = offset === bytes.length; break; }
-    }
-    if (!complete || !hasPixels) throw safeError("PNG 图片截断或缺少图像数据");
+    validatePng(bytes);
     return { bytes, mimeType: "image/png", extension: "png" };
   }
   if (bytes.length > 4 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) {
@@ -300,7 +378,7 @@ async function previewImage(filePath, image, signal) {
  * @param {{signal?: AbortSignal}} [options] 请求级取消信号
  * @returns {Promise<{content: Array<object>}>} MCP 内容数组，首项为原图路径说明
  */
-export async function generateImage(config, args, { signal } = {}) {
+export async function generateImage(config, args, { signal, request = requestOwned } = {}) {
   const allowed = ["prompt", "model", "size", "quality", "background", "output_format"];
   if (!args || typeof args !== "object" || Array.isArray(args) ||
       Object.keys(args).some((key) => !allowed.includes(key)) ||
@@ -332,16 +410,15 @@ export async function generateImage(config, args, { signal } = {}) {
       ...(aspectRatio ? { imageConfig: { aspectRatio, imageSize: "1K" } } : {}),
     },
   } : { ...args, model, output_format: args.output_format ?? "png", response_format: "b64_json", n: 1, stream: false };
-  const probe = await probeBridge(config);
-  if (probe.state !== "bridge") throw safeError("本地订阅桥未就绪，请先检查 bridge_status", "BRIDGE_UNAVAILABLE");
   let response;
   try {
     // 生图是有成本操作：本 MCP 层不重放 POST；核心仍可能按配置刷新凭据或重试。
-    response = await requestLocal(config, gemini ? `/v1beta/models/${model}:generateContent` : "/v1/images/generations", {
+    response = await request(config, gemini ? `/v1beta/models/${model}:generateContent` : "/v1/images/generations", {
       method: "POST", authenticated: true, signal, timeoutMs: 240000, maxBytes: 36 * 1024 * 1024,
       body: requestBody,
     });
   } catch (error) {
+    if (error.code === "BRIDGE_NOT_READY") throw error;
     if (signal?.aborted || error.code === "ABORT_ERR") throw safeError("生图请求已取消；上游可能已消耗额度。本 MCP 未自动重试；核心仍可能按配置重试", "ABORT_ERR");
     throw safeError("生图连接中断或超时；上游可能已消耗额度。本 MCP 未自动重试；核心仍可能按配置重试。检查代理节点与管理面板后再决定是否手动重试。", "IMAGE_CONNECTION_FAILED");
   }

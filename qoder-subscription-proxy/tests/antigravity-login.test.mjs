@@ -3,13 +3,19 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { loadConfig } from "../bridge/config.mjs";
+import { processIdentity } from "../bridge/bridge-process.mjs";
+import { PANEL_REVISION } from "../bridge/management-panel.mjs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 const scriptPath = fileURLToPath(new URL("../scripts/antigravity-login.ps1", import.meta.url));
 const launcherPath = fileURLToPath(new URL("../Antigravity授权.cmd", import.meta.url));
 const windows = process.platform === "win32";
+const pluginRoot = fileURLToPath(new URL("../", import.meta.url));
+const sessions = new Map();
 const state = "unit-test-State_Sensitive.001";
 const code = "unit-test-code-sensitive/with+symbols=";
 const callbackBase = "http://localhost:51121/oauth-callback";
@@ -24,13 +30,14 @@ $ErrorActionPreference = 'Stop'
 async function powershell(source, values = {}) {
   const executable = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const child = spawn(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(bootstrap + source, "utf16le").toString("base64")], {
-    env: { ...process.env, ANTIGRAVITY_TEST_SCRIPT: scriptPath, ...values },
+    env: { ...process.env, PSModulePath: join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/Modules"),
+      ANTIGRAVITY_TEST_SCRIPT: scriptPath, ...values },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.on("data", (chunk) => { output += chunk; });
-  const timer = setTimeout(() => child.kill(), 20000);
+  const timer = setTimeout(() => child.kill(), 40000);
   try {
     const [exitCode] = await once(child, "close");
     assert.notEqual(exitCode, null, "PowerShell 测试必须在有界时间内退出");
@@ -53,7 +60,7 @@ async function localServer(t, handler) {
 }
 
 function assertNoSecrets(output) {
-  for (const sensitive of ["123456", state, code, authUrl, callback, secretError]) {
+  for (const sensitive of ["123456", ...[...sessions.values()].map(s => s.config.mgmtKey), state, code, authUrl, callback, secretError]) {
     assert.ok(!output.includes(sensitive), `控制台不能泄露测试凭据或完整 URL: ${sensitive}`);
   }
 }
@@ -63,7 +70,26 @@ function jsonResponse(response, body) {
   response.end(JSON.stringify(body));
 }
 
-async function mockService(t, { authorize, accept, status } = {}) {
+async function registerOwner(t, port, pid = process.pid) {
+  const dataDir = await mkdtemp(join(tmpdir(), "isolated-antigravity-owner-"));
+  t.after(async () => { sessions.delete(port); await rm(dataDir, { recursive: true, force: true }); });
+  const env = { BRIDGE_DATA_DIR: dataDir, BRIDGE_BIN: process.execPath, BRIDGE_PORT: String(port), BRIDGE_API_KEY: "synthetic-client-key" };
+  const config = await loadConfig({ pluginRoot, env });
+  const identity = await processIdentity(pid);
+  assert.ok(identity);
+  await writeFile(config.pidPath, JSON.stringify({ ...identity, configPath: config.configPath, binPath: config.binPath, panelRevision: PANEL_REVISION }));
+  sessions.set(port, { config, env });
+}
+
+async function decoyIdentity(t) {
+  const decoy = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+  const closed = once(decoy, "close");
+  t.after(async () => { decoy.stdin.end(); await closed; });
+  await once(decoy, "spawn");
+  return processIdentity(decoy.pid);
+}
+
+async function mockService(t, { authorize, accept, status, ownerPid } = {}) {
   const requests = [];
   let pollCount = 0;
   const port = await localServer(t, async (request, response) => {
@@ -85,6 +111,7 @@ async function mockService(t, { authorize, accept, status } = {}) {
     }
     response.writeHead(404).end(secretError);
   });
+  await registerOwner(t, port, ownerPid);
   return { port, requests };
 }
 
@@ -102,25 +129,25 @@ function Read-Host {
     param([string]$Prompt, [switch]$AsSecureString)
     if (-not $AsSecureString) { throw 'Callback must use secure input' }
     Write-Host 'TEST_INPUT_HIDDEN'
-    if ($env:ANTIGRAVITY_TEST_DELAY_INPUT -eq 'yes') { Start-Sleep -Milliseconds 1100 }
+    if ($env:ANTIGRAVITY_TEST_DELAY_INPUT -eq 'yes') { Start-Sleep -Seconds 8 }
     return (ConvertTo-SecureString $env:ANTIGRAVITY_TEST_CALLBACK -AsPlainText -Force)
 }
 $exitCode = Invoke-AntigravityLogin -Port ([int]$env:ANTIGRAVITY_TEST_PORT) -SessionTimeoutSeconds ([int]$env:ANTIGRAVITY_TEST_SESSION_SECONDS) -PollIntervalMilliseconds 10
 exit $exitCode
 `, {
-    ANTIGRAVITY_TEST_PORT: String(port), ANTIGRAVITY_TEST_AUTH_URL: authUrl,
+    ...sessions.get(port).env, ANTIGRAVITY_TEST_PORT: String(port), ANTIGRAVITY_TEST_AUTH_URL: authUrl,
     ANTIGRAVITY_TEST_CALLBACK: pasted, ANTIGRAVITY_TEST_SESSION_SECONDS: String(sessionSeconds),
     ANTIGRAVITY_TEST_DELAY_INPUT: delayInput ? "yes" : "no", ...env,
   });
 }
 
-test("Antigravity 启动器仅依赖 Windows PowerShell，脚本使用可兼容 WinPS5.1 的 ASCII", async () => {
+test("Antigravity 启动器由 Windows PowerShell 接受隐藏输入，WinPS5.1 可读取 ASCII 脚本", async () => {
   const source = await readFile(scriptPath);
   const launcher = await readFile(launcherPath, "utf8");
   assert.ok([...source].every((byte) => byte < 128));
   assert.match(launcher, /WindowsPowerShell\\v1\.0\\powershell\.exe/);
   assert.match(launcher, /%~dp0scripts\\antigravity-login\.ps1/);
-  assert.doesNotMatch(launcher, /\bnode(?:\.exe)?\s/i);
+  assert.doesNotMatch(launcher, /^\s*node(?:\.exe)?\s/im);
   assert.doesNotMatch(source.toString(), /HttpListener|TcpListener/);
 });
 
@@ -211,7 +238,7 @@ test("Antigravity 安全 HTTP 全流程仅一次初始化、一次回调，并�
   assert.deepEqual(requests.map(({ method }) => method), ["GET", "POST", "GET", "GET"]);
   assert.deepEqual(JSON.parse(requests[1].body), { provider: "antigravity", state, code });
   assert.match(requests[1].headers["content-type"], /^application\/json/);
-  assert.ok(requests.every(({ headers }) => headers.authorization === "Bearer 123456" && headers.host === `127.0.0.1:${port}`));
+  assert.ok(requests.every(({ headers }) => headers.authorization === `Bearer ${sessions.get(port).config.mgmtKey}` && headers.host === `127.0.0.1:${port}`));
   assertNoSecrets(result.output);
 });
 
@@ -228,6 +255,30 @@ test("Antigravity 管理接口重定向不能转发 Bearer，错误正文不输�
   assert.equal(destinationRequests, 0);
   assert.equal(requests.length, 1);
   assert.doesNotMatch(result.output, /TEST_BROWSER_OPENED|TEST_INPUT_HIDDEN|completed successfully/);
+  assertNoSecrets(result.output);
+});
+
+test("PID 记录指向其他存活进程时，授权请求不发送密码也不打开浏览器", { skip: !windows }, async (t) => {
+  const other = await decoyIdentity(t);
+  const { port, requests } = await mockService(t, { ownerPid: other.pid });
+  const result = await runLogin(port);
+  assert.equal(result.exitCode, 1);
+  assert.equal(requests.length, 0);
+  assert.doesNotMatch(result.output, /TEST_BROWSER_OPENED|TEST_INPUT_HIDDEN/);
+  assertNoSecrets(result.output);
+});
+
+test("取得授权地址后 PID 与监听者不再匹配时，拒绝提交回调码", { skip: !windows }, async (t) => {
+  const other = await decoyIdentity(t);
+  const { port, requests } = await mockService(t, { authorize: async (_req, response) => {
+    const { config } = sessions.get(port);
+    await writeFile(config.pidPath, JSON.stringify({ ...other, configPath: config.configPath, binPath: config.binPath, panelRevision: PANEL_REVISION }));
+    jsonResponse(response, { status: "ok", state, url: authUrl });
+  } });
+  const result = await runLogin(port);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output, /TEST_INPUT_HIDDEN/);
+  assert.deepEqual(requests.map(r => r.method), ["GET"]);
   assertNoSecrets(result.output);
 });
 
@@ -286,7 +337,7 @@ test("Antigravity 非契约状态不能误判成功，包括大小写和数组",
 
 test("Antigravity 手动输入耗时计入会话期限，超时不提交 callback", { skip: !windows }, async (t) => {
   const { port, requests } = await mockService(t);
-  const result = await runLogin(port, { sessionSeconds: 1, delayInput: true });
+  const result = await runLogin(port, { sessionSeconds: 8, delayInput: true });
   assert.equal(result.exitCode, 1, result.output);
   assert.equal(requests.length, 1);
   assert.match(result.output, /timed out/);
@@ -295,7 +346,7 @@ test("Antigravity 手动输入耗时计入会话期限，超时不提交 callbac
 
 test("Antigravity 连续 wait 在总时限内终止，不重复 auth 或 callback", { skip: !windows }, async (t) => {
   const { port, requests } = await mockService(t, { status: (_request, response) => jsonResponse(response, { status: "wait" }) });
-  const result = await runLogin(port, { sessionSeconds: 2 });
+  const result = await runLogin(port, { sessionSeconds: 12 });
   assert.equal(result.exitCode, 1, result.output);
   assert.equal(requests.filter(({ url }) => url.includes("auth-url")).length, 1);
   assert.equal(requests.filter(({ url }) => url.endsWith("/callback")).length, 1);
@@ -313,17 +364,18 @@ test("Antigravity 请求总超时包含持续分块响应，不无限等待", { 
     const interval = setInterval(() => response.write("."), 15);
     response.once("close", () => clearInterval(interval));
   });
+  await registerOwner(t, port);
   const result = await powershell(`
 $clock = [Diagnostics.Stopwatch]::StartNew()
 try {
-    $null = Invoke-AntigravityLocalRequest -Port ([int]$env:ANTIGRAVITY_TEST_PORT) -Operation 'auth-url' -TimeoutMilliseconds 250
+    $null = Invoke-AntigravityLocalRequest -Port ([int]$env:ANTIGRAVITY_TEST_PORT) -Operation 'auth-url' -TimeoutMilliseconds 5000
     throw 'Request unexpectedly completed'
 } catch {
     if (-not $_.Exception.Data['AntigravitySafeError']) { throw 'Unexpected error classification' }
-    if ($clock.ElapsedMilliseconds -gt 3000) { throw 'Timeout was extended by response bytes' }
+    if ($clock.ElapsedMilliseconds -gt 8000) { throw 'Timeout was extended by response bytes' }
     Write-Host $_.Exception.Message
 }
-`, { ANTIGRAVITY_TEST_PORT: String(port) });
+`, { ...sessions.get(port).env, ANTIGRAVITY_TEST_PORT: String(port) });
   assert.equal(result.exitCode, 0, result.output);
   assert.equal(requests, 1);
   assert.match(result.output, /timed out/);

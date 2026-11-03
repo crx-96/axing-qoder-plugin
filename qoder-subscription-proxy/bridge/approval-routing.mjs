@@ -1,7 +1,12 @@
-import { parseConfigYaml } from "./config-yaml.mjs";
+import { appendConfigBlock, parseConfigYaml } from "./config-yaml.mjs";
 
+/** GJSON 选择器定位宿主审批提示，以免匹配普通聊天。 */
 const classifierPath = 'input.0.content.#(type=="input_text"&&text%"You are a security classifier for auto permission mode.*").type';
+/** 标准 v8 与兼容布局分别在对应 payload 段中保存规则。 */
 const overridePath = ["requests", "payload", "override"];
+/** 核心按整段兼容旧 payload。 */
+const legacyOverridePath = ["payload", "override"];
+/** 附加给审批模型的宿主政策边界与终端判定说明。 */
 const terminalGuidance = [
   "Terminal assessment guidance: apply the original host policy and output schema unchanged. This guidance clarifies risk assessment; it does not grant authorization or relax any block rule.",
   "Assess the full command and its actual effects, working directory, resolved target paths, arguments, scripts, pipelines, redirections, substitutions, and every chained operation. Tool names, shell usage, or an absolute path alone do not establish danger or safety.",
@@ -12,6 +17,7 @@ const terminalGuidance = [
   "If authorization, scope, or effects remain uncertain, block and state the concrete uncertainty. Otherwise do not invent a hazard merely because a terminal is used. Return only the original JSON object with boolean shouldBlock and string reason; give a concise reason tied to the actual action and policy.",
 ].join("\n\n");
 
+/** 按目标缩进生成当前内置规则，也可重建历史规则以识别可安全迁移的配置。 */
 export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], targetModel = "codex-auto-review", efforts = ["none", "low"], includeGuidance = true) {
   const pad = " ".repeat(indent);
   // match 列表是 AND；快速检查与复核必须使用独立的模型选择器。
@@ -38,70 +44,62 @@ export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], tar
   ].join("\n");
 }
 
-function ruleSignature({ values, nodes }, prefix) {
-  // values 不记录无值字段，必须比较语法节点，避免把用户添加的 YAML null 当作不存在。
-  return JSON.stringify([...nodes].flatMap(([key, node]) => {
-    const path = JSON.parse(key);
-    if (path.length < prefix.length || !prefix.every((part, index) => path[index] === part)) return [];
-    return [[JSON.stringify(path.slice(prefix.length)), node.kind, values.get(key) ?? null]];
-  }).sort(([left], [right]) => left.localeCompare(right)));
+/** 一次扫描按列表项收集相对路径、类型和值；各项内排序使字段顺序不影响内置规则识别。 */
+function ruleSignatures({ values, nodes }, path) {
+  const items = values.get(JSON.stringify(path));
+  if (!Array.isArray(items)) return [];
+  const groups = items.map(() => []);
+  for (const [key, node] of nodes) {
+    const parts = JSON.parse(key);
+    const index = parts[path.length];
+    if (!Number.isInteger(index) || !path.every((part, i) => part === parts[i])) continue;
+    // 包含空值节点，避免用户添入 null 后仍被误当作旧内置项删除。
+    const relative = parts.slice(path.length + 1);
+    // v0 管理 API 保存模型筛选器时会显式写出四个空容器，等价于对应条件缺省。
+    // 只忽略准确路径和容器类型；手工 null、非空条件及任何其他配置仍参与签名。
+    if (relative.length === 3 && relative[0] === "models" && Number.isInteger(relative[1])) {
+      const empty = node.raw?.replace(/ +#.*$/, "");
+      if ((relative[2] === "headers" && empty === "{}") ||
+          (["not-match", "exist", "not-exist"].includes(relative[2]) && empty === "[]")) continue;
+    }
+    groups[index].push([JSON.stringify(relative), node.kind, values.get(key) ?? null]);
+  }
+  return groups.map(entries => JSON.stringify(entries.sort(([left], [right]) => left.localeCompare(right))));
 }
 
-const policySignature = ruleSignature(parseConfigYaml(`override:\n${renderApprovalOverride(2)}\n`), ["override", 0]);
+/** 与实际配置用同一种解析方式计算内置单条规则的签名。 */
+function renderedSignature(rule) {
+  return ruleSignatures(parseConfigYaml("override:\n" + rule + "\n"), ["override"])[0];
+}
+
+/** 当前规则签名用于幂等检测；仅以下两版完整历史签名有自动替换资格。 */
+const policySignature = renderedSignature(renderApprovalOverride(2));
+/** 已分发的两版旧规则签名。 */
 const legacySignatures = new Set([
   renderApprovalOverride(2, ["gpt-6-astra", "gpt-6.1-sol"], "gpt-6-luna", ["none"], false),
   renderApprovalOverride(2, ["gpt-*"], "codex-auto-review", ["none", "low"], false),
-].map(rule => ruleSignature(parseConfigYaml(`override:\n${rule}\n`), ["override", 0])));
+].map(renderedSignature));
 
+/** 保留用户自定义规则，仅迁移完整匹配的旧版审批规则并补入当前规则。 */
 export function ensureApprovalRouting(text) {
   const parsed = parseConfigYaml(text);
-  const rules = parsed.values.get(JSON.stringify(overridePath));
-  const signatures = Array.isArray(rules)
-    ? rules.map((_, index) => ruleSignature(parsed, [...overridePath, index]))
-    : [];
+  // 旧 payload 生效时必须原地补规则；新建 requests.payload 会让核心忽略整段旧配置。
+  const activePath = !parsed.nodes.has('["requests","payload"]') && parsed.nodes.has('["payload"]')
+    ? legacyOverridePath : overridePath;
+  const signatures = ruleSignatures(parsed, activePath);
   const legacyIndexes = new Set(signatures.flatMap((signature, index) => legacySignatures.has(signature) ? [index] : []));
   if (legacyIndexes.size) {
     // 只移除完整匹配旧内置规则的语法行，用户修改过的规则、注释及空行保留。
     const removedLines = new Set();
     for (const [key, node] of parsed.nodes) {
       const path = JSON.parse(key);
-      if (overridePath.every((part, index) => path[index] === part) && legacyIndexes.has(path[overridePath.length])) {
-        removedLines.add(node.line);
+      if (activePath.every((part, index) => path[index] === part) && legacyIndexes.has(path[activePath.length])) {
+        for (let i = node.line; i < (node.literalEnd ?? node.line + 1); i++) removedLines.add(i);
       }
     }
     return ensureApprovalRouting(parsed.lines.filter((_, index) => !removedLines.has(index)).join(parsed.newline));
   }
   if (signatures.includes(policySignature)) return text;
 
-  let parent = parsed.nodes.get("[]");
-  let depth = 0;
-  for (; depth < overridePath.length; depth++) {
-    const node = parsed.nodes.get(JSON.stringify(overridePath.slice(0, depth + 1)));
-    if (!node) break;
-    const expectedKind = depth === 2 ? "list" : "map";
-    const empty = node.raw?.replace(/\s+#.*$/, "").trim();
-    const allowedEmpty = [undefined, "null", "~", expectedKind === "list" ? "[]" : "{}"];
-    if (node.kind !== expectedKind && !(node.kind === null && allowedEmpty.includes(empty))) {
-      throw new Error("config.yaml 的 requests.payload.override 必须为标准映射及规则列表；未修改审批模型配置。");
-    }
-    parent = node;
-  }
-
-  const lines = [...parsed.lines];
-  if (parent.raw !== undefined && !parent.raw.startsWith("#")) {
-    lines[parent.line] = lines[parent.line].replace(/(?:\{\}|\[\]|null|~)(\s*(?:#.*)?)$/, "$1").trimEnd();
-  }
-  let indent = parent.childIndent ?? (parent.indent < 0 ? 0 : parent.indent + 2);
-  const added = [];
-  for (; depth < overridePath.length; depth++) {
-    added.push(`${" ".repeat(indent)}${overridePath[depth]}:`);
-    indent += 2;
-  }
-  added.push(...renderApprovalOverride(indent).split("\n"));
-  // 将同级段之前的注释留在原段前，不插入到注释与其目标之间。
-  let insertion = parent.end;
-  while (insertion > parent.line + 1 && /^\s*(?:#.*)?$/.test(lines[insertion - 1])) insertion--;
-  lines.splice(insertion, 0, ...added);
-  const updated = lines.join(parsed.newline);
-  return updated.endsWith(parsed.newline) ? updated : updated + parsed.newline;
+  return appendConfigBlock(parsed, activePath, "list", renderApprovalOverride);
 }

@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { ensureApprovalRouting, renderApprovalOverride } from "../bridge/approval-routing.mjs";
-import { parseConfigYaml } from "../bridge/config-yaml.mjs";
-import { loadConfig, renderConfigYaml, validateExistingConfig } from "../bridge/config.mjs";
+import { parseConfigYaml, replaceConfigScalar } from "../bridge/config-yaml.mjs";
+import { loadConfig, ensureStreamingDefaults, renderConfigYaml, validateExistingConfig } from "../bridge/config.mjs";
 import { ensureDataDir } from "../bridge/bridge-process.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
@@ -156,6 +156,16 @@ test("核心去掉 GJSON 键引号后可加载、迁移且保持幂等", () => {
     assert.equal(ensureApprovalRouting(migrated), migrated);
     if (original === currentConfig) assert.equal(migrated, saved);
   }
+});
+
+test("整段旧 payload 仍生效时在原地补规则，不遮蔽用户路由", () => {
+  const original = base + "payload:\n  override:\n    - params:\n        model: custom\n";
+  const updated = ensureApprovalRouting(original);
+  const { nodes, values } = parseConfigYaml(updated);
+  assert.equal(nodes.has('["requests","payload"]'), false);
+  assert.equal(values.get('["payload","override",0,"params","model"]'), "custom");
+  assert.equal(values.get('["payload","override",1,"params","model"]'), "codex-auto-review");
+  assert.equal(ensureApprovalRouting(updated), updated);
 });
 
 test("GJSON 普通键与引号键仍判重，不接纳伪装映射或注释", () => {
@@ -359,11 +369,11 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     "      models:", "        - name: gpt-compatible", "          alias: gpt-compatible", "",
   ].join("\n");
   const original = renderConfigYaml(current).replace("  disable-control-panel: false", "  disable-control-panel: true") + provider;
-  const textConfig = ensureApprovalRouting(original);
+  const textConfig = ensureStreamingDefaults(ensureApprovalRouting(original));
   validateExistingConfig(current, textConfig);
   await writeFile(current.configPath, textConfig);
   const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
-  child = spawn(binary, ["-config", current.configPath], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn(binary, ["-local-model", "-config", current.configPath], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   exited = once(child, "exit");
   child.stdout.on("data", data => { output = (output + data).slice(-12000); });
   child.stderr.on("data", data => { output = (output + data).slice(-12000); });
@@ -467,21 +477,58 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
   await t.test("管理页修改日志设置后审批规则仍可加载且不重复追加", async () => {
     const response = await fetch(`${endpoint}/v8/management/config`, {
       method: "PATCH",
-      headers: { Authorization: "Bearer 123456", "Content-Type": "application/json" },
+      headers: { Authorization: "Bearer " + current.mgmtKey, "Content-Type": "application/json" },
       body: JSON.stringify({ observability: { logs: { "request-log": true } } }),
       signal: AbortSignal.timeout(10000),
     });
     assert.equal(response.status, 200, await response.text());
     const saved = await readFile(current.configPath, "utf8");
     validateExistingConfig(current, saved);
-    assert.equal(ensureApprovalRouting(saved), saved);
+    assert.ok(ensureApprovalRouting(saved) === saved, "核心回写后应复用现有规则");
     const values = parseConfigYaml(saved).values;
     assert.equal(values.get(JSON.stringify(["observability", "logs", "request-log"])), true);
     assert.equal(values.get(overrideKey).length, 1);
     assert.equal(values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "input.0.content.1.text"])),
       parseConfigYaml(textConfig).values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "input.0.content.1.text"])));
     await loadConfig({ pluginRoot, env: { BRIDGE_DATA_DIR: root, BRIDGE_PORT: String(port), BRIDGE_API_KEY: "isolated-api" } });
-    await ensureDataDir(current);
-    assert.equal(await readFile(current.configPath, "utf8"), saved);
+  });
+  await t.test("兼容管理 API 全量回写后可重新初始化且不重复审批规则", async () => {
+    const response = await fetch(endpoint + "/v0/management/request-retry", {
+      method: "PUT", headers: { Authorization: "Bearer " + current.mgmtKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 0 }), signal: AbortSignal.timeout(10000),
+    });
+    assert.equal(response.status, 200, await response.text());
+    const saved = await readFile(current.configPath, "utf8");
+    assert.ok(/name: gpt-\*/.test(saved));
+    assert.ok(/input\.0\.content\.1\.text: \|-/.test(saved));
+    validateExistingConfig(current, saved);
+    assert.ok(ensureApprovalRouting(saved) === saved, "核心回写后应复用现有规则");
+    const upgraded = ensureStreamingDefaults(saved);
+    assert.equal(parseConfigYaml(upgraded).values.get(JSON.stringify(["routing", "retry", "request-retry"])), 0);
+    assert.ok(ensureStreamingDefaults(upgraded) === upgraded, "补齐核心省略的默认字段后再启动必须幂等");
+
+    child.kill();
+    await exited;
+    const env = { BRIDGE_DATA_DIR: root, BRIDGE_PORT: String(port), BRIDGE_API_KEY: "isolated-api" };
+    const reloaded = await loadConfig({ pluginRoot, env });
+    await ensureDataDir(reloaded);
+    const readyYaml = await readFile(reloaded.configPath, "utf8");
+    assert.ok(readyYaml === replaceConfigScalar(upgraded, ["management", "secret-key"], reloaded.mgmtKey),
+      "冷启动只允许补缺省字段并恢复托管密钥");
+
+    child = spawn(binary, ["-local-model", "-config", reloaded.configPath], { cwd: root, windowsHide: true, stdio: "ignore" });
+    exited = once(child, "exit");
+    let status;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && child.exitCode === null) {
+      try {
+        status = await fetch(endpoint + "/v0/management/request-retry", {
+          headers: { Authorization: "Bearer " + reloaded.mgmtKey }, signal: AbortSignal.timeout(500),
+        });
+        break;
+      } catch { await delay(50); }
+    }
+    assert.equal(status?.status, 200, "管理 API 应接受冷启动后同一持久密钥");
+    assert.equal((await status.json())["request-retry"], 0);
   });
 });

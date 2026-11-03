@@ -1,3 +1,4 @@
+import { createManagementLogin } from "../bridge/management-login.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadConfig } from "../bridge/config.mjs";
@@ -16,6 +17,8 @@ const ctx = {
 };
 /** 健康检查的停止函数；只注册一次，下载失败时不启用自动恢复。 */
 let stopWatchdog;
+/** 本会话按需创建的管理登录入口，关闭时撤销票据和会话。 */
+let managementLogin;
 /** MCP 会话的取消信号，防止退出收尾期间重新注册健康检查。 */
 let sessionSignal;
 /** 后台核心准备及代理启动任务；退出前等待取消清理完成。 */
@@ -81,6 +84,11 @@ async function prepare(signal) {
 
 /** 工具共用同一配置和生命周期；下载期间状态、暂停及工具发现仍可使用。 */
 const handlers = {
+  /** 用户明确调用授权指令时才打开本机浏览器。 */
+  async openManagement(config, { signal }) {
+    managementLogin ??= createManagementLogin(config);
+    await managementLogin.open(signal);
+  },
   /** 查询实际代理与核心状态；MCP 已连接不代表 ready 为 true。 */
   async getStatus() {
     const status = await getStatus(ctx.config);
@@ -97,13 +105,14 @@ const handlers = {
     return result;
   },
   /** 持久暂停并取消本会话的在途下载/启动；只停止可确认归属的代理。 */
-  async stopBridge() { return stopBridge(ctx.config); },
+  async stopBridge() {
+    managementLogin?.close();
+    managementLogin = undefined;
+    return stopBridge(ctx.config);
+  },
   /** 只有代理实际就绪才发送图片请求；核心下载中或失败时立即返回工具错误。 */
   async generateImage(_config, args, options) {
-    const status = await getStatus(ctx.config);
-    if (!status.ready) throw Object.assign(new Error("代理未就绪"), {
-      code: "BRIDGE_NOT_READY", safeMessage: "本插件代理未就绪，未发送图片请求；请先检查 bridge_status。",
-    });
+    // 生图请求自身在同一连接上认证核心身份，无需读取模型目录。
     return generateImage(ctx.config, args, options);
   },
 };
@@ -115,6 +124,7 @@ process.once("SIGTERM", stopInput);
 try { await runMcp(ctx, { handlers, prepare }); }
 finally {
   // 先拒绝新启动并取消在途任务，再等待后台下载清理及本会话拥有的代理回收。
+  managementLogin?.close();
   const shutdown = shutdownOwnedBridges();
   if (stopWatchdog) await stopWatchdog();
   await backgroundPreparation;

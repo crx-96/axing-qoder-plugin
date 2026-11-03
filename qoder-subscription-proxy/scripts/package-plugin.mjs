@@ -1,8 +1,9 @@
-import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 
+/** 从文件到根目录逐层拒绝符号链接，防止产物读写越过指定路径。 */
 function assertNoLinks(filename) {
   for (let current = path.resolve(filename); ; current = path.dirname(current)) {
     if (lstatSync(current).isSymbolicLink()) throw new Error(`拒绝符号链接：${current}`);
@@ -10,19 +11,12 @@ function assertNoLinks(filename) {
   }
 }
 
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function packagePlugin(platform, requested) {
+/** 按源码白名单生成指定平台的安装 ZIP。仅向已存在的目录发布全新的文件。 */
+async function packagePlugin(platform, requested) {
   if (!['windows', 'posix'].includes(platform) || !requested?.trim() || !requested.toLowerCase().endsWith('.zip')) {
     throw new Error('用法：node package-plugin.mjs windows|posix <新.zip 路径>（父目录须存在）');
   }
+  // 校验入口、源目录与目标父目录，拒绝安装包覆盖插件源码或既有文件。
   assertNoLinks(process.argv[1]);
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   assertNoLinks(root);
@@ -40,22 +34,23 @@ function packagePlugin(platform, requested) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  const files = [
-    '.qoder-plugin/plugin.json', '.mcp.json', '.mcp.posix.json',
-    'README.md', 'LICENSE', 'DISCLAIMER.md', 'THIRD_PARTY_NOTICES.md', 'Antigravity授权.cmd',
-    'bridge/bin/LICENSE', 'bridge/bin/README.md', 'bridge/bin/README_CN.md',
-    'bridge/bin/config.example.yaml', 'bridge/bin/platforms.json',
-    'bridge/panel/LICENSE', 'bridge/panel/management.upstream.html',
-    ...['antigravity-login.ps1', 'image-preview.ps1', 'mcp-server.mjs', 'proxy-supervisor.ps1',
-      'proxy-supervisor.mjs', 'ProxyJob.cs', 'start-mcp.ps1', 'start-mcp.sh',
-      'prepare-posix-marketplace.sh'].map(name => `scripts/${name}`),
-  ];
-  assertNoLinks(path.join(root, 'bridge'));
-  for (const name of readdirSync(path.join(root, 'bridge'))) {
-    if (name.endsWith('.mjs')) files.push(`bridge/${name}`);
+  // 两种平台共享发布清单。默认 MCP 入口另行选择，POSIX 包使用 .mcp.posix.json 的内容。
+  const manifest = path.join(root, 'scripts/distribution-files.txt');
+  assertNoLinks(manifest);
+  if (!lstatSync(manifest).isFile()) throw new Error('分发清单必须是常规文件');
+  const files = ['.mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/)];
+  if (new Set(files).size !== files.length) throw new Error('分发清单包含重复路径');
+  for (const name of files) {
+    if (/[\\:\r\n]/.test(name) || name.split('/').some(part => !part || part === '.' || part === '..')) {
+      throw new Error('分发清单仅允许插件内相对路径');
+    }
   }
+  // 先验证共享 CRC 源文件与父目录，禁止通过符号链接导入构建时运行的代码。
+  assertNoLinks(path.join(root, 'bridge/crc32.mjs'));
+  const { crc32 } = await import('../bridge/crc32.mjs');
   files.sort();
   if (files.length >= 0xffff) throw new Error('文件数超出 ZIP32 限制');
+  // 按稳定顺序写局部记录和中央目录，记录压缩尺寸、校验和与 POSIX 执行位。
   const locals = [];
   const central = [];
   let offset = 0;
@@ -95,6 +90,7 @@ function packagePlugin(platform, requested) {
     centralSize += entry.length + encoded.length;
     if (offset + centralSize >= 0xffffffff) throw new Error('产物超出 ZIP32 限制');
   }
+  // 所有源文件及 ZIP32 边界均已核对，最后写入结束记录并排他创建目标。
   const end = Buffer.alloc(22);
   end.writeUInt32LE(0x06054b50, 0);
   end.writeUInt16LE(files.length, 8);
@@ -112,6 +108,7 @@ function packagePlugin(platform, requested) {
     descriptor = undefined;
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor);
+    // 失败时只清理本次排他创建且仍指向同一文件的目标。
     if (owned) {
       try {
         const current = lstatSync(target);
@@ -127,7 +124,7 @@ function packagePlugin(platform, requested) {
 
 try {
   if (process.argv.length !== 4) throw new Error('用法：node package-plugin.mjs windows|posix <新.zip 路径>');
-  console.log(`已生成插件 ZIP：${packagePlugin(process.argv[2], process.argv[3])}`);
+  console.log(`已生成插件 ZIP：${await packagePlugin(process.argv[2], process.argv[3])}`);
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

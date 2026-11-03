@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -43,7 +44,7 @@ test("默认数据目录跨安装版本稳定保留授权，隔离旧桥且不�
     import { join } from "node:path";
     import { loadConfig, PLUGIN_VERSION } from ${JSON.stringify(moduleUrl)};
     assert.equal(homedir(), ${JSON.stringify(root)});
-    assert.equal(PLUGIN_VERSION, "0.2.7");
+    assert.equal(PLUGIN_VERSION, "0.2.9");
     const oldDir = join(homedir(), ".zcode", "zcode-subscription-proxy", "data");
     await mkdir(join(oldDir, "auths"), { recursive: true });
     await writeFile(join(oldDir, "launcher-secrets.json"), JSON.stringify({ apiKey: "old-plugin-api", mgmtKey: "old-management" }));
@@ -74,10 +75,14 @@ test("插件、市场和 MCP 对外版本保持一致", async () => {
   const marketplace = JSON.parse(await readFile(join(pluginRoot, "..", ".qoder-plugin", "marketplace.json"), "utf8"));
   const listing = marketplace.plugins.find((plugin) => plugin.name === manifest.name);
   assert.ok(listing);
-  assert.equal(PLUGIN_VERSION, "0.2.7");
+  assert.equal(PLUGIN_VERSION, "0.2.9");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(resolve(pluginRoot, "..", listing.source), pluginRoot);
+  assert.equal(manifest.commands, "./commands");
+  const command = await readFile(join(pluginRoot, manifest.commands, "open-management.md"), "utf8");
+  assert.match(command, /^---\r?\ndescription: 授权与账号管理/);
+  assert.ok(command.includes("`bridge_open_management`"));
 });
 
 test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () => {
@@ -96,7 +101,7 @@ test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () =>
 test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对路径", async (t) => {
   const { root, load } = await fixture(t);
   const config = await load();
-  assert.equal(PLUGIN_VERSION, "0.2.7");
+  assert.equal(PLUGIN_VERSION, "0.2.9");
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(DEFAULT_PORT, 19787);
@@ -130,9 +135,9 @@ test("平台/架构只选择当前平台缓存路径，BRIDGE_BIN 显式禁用�
     ["linux", "arm64", "linux-arm64/qoder-plugin-subscription-proxy"],
   ]) {
     const config = await loadConfig({ pluginRoot, env, platform, arch });
-    assert.equal(config.binPath, join(config.dataDir, "runtimes", "v8.0.47", `${platform}-${arch}`, path.split("/").at(-1)));
+    assert.equal(config.binPath, join(config.dataDir, "runtimes", "v8.0.51", `${platform}-${arch}`, path.split("/").at(-1)));
     assert.equal(config.core.key, `${platform}-${arch}`);
-    assert.equal(config.core.version, "v8.0.47");
+    assert.equal(config.core.version, "v8.0.51");
     for (const bin of [join(root, "自定义 core"), relative(process.cwd(), join(root, "relative core"))]) {
       const custom = await loadConfig({ pluginRoot, env: { ...env, BRIDGE_BIN: bin }, platform, arch });
       assert.equal(custom.binPath, resolve(bin));
@@ -216,26 +221,26 @@ test("环境变量类型与空字符串均严格校验，不拼接原始输入",
   await assert.rejects(stat(env.BRIDGE_DATA_DIR), { code: "ENOENT" });
 });
 
-test("仅持久化随机 API 密钥，固定管理密码独立且环境覆盖不轮换默认密钥", async (t) => {
+test("两项独立随机密钥按安装持久化，旧环境占位值不会成为管理密码", async (t) => {
   const { root, load } = await fixture(t);
   const first = await load();
   assert.match(first.apiKey, /^[0-9a-f]{64}$/);
-  assert.equal(first.mgmtKey, "123456");
+  assert.match(first.mgmtKey, /^[0-9a-f]{64}$/);
   assert.notEqual(first.apiKey, first.mgmtKey);
   const secretsPath = join(first.dataDir, "launcher-secrets.json");
   const before = await readFile(secretsPath, "utf-8");
-  assert.deepEqual(JSON.parse(before), { apiKey: first.apiKey });
+  assert.deepEqual(JSON.parse(before), { apiKey: first.apiKey, mgmtKey: first.mgmtKey });
   if (process.platform !== "win32") assert.equal((await stat(secretsPath)).mode & 0o777, 0o600);
   const repeated = await load();
   assert.equal(repeated.apiKey, first.apiKey);
   assert.equal(repeated.mgmtKey, first.mgmtKey);
   const overridden = await load({ BRIDGE_API_KEY: "explicit-api", BRIDGE_MGMT_KEY: "123456" });
   assert.equal(overridden.apiKey, "explicit-api");
-  assert.equal(overridden.mgmtKey, "123456");
+  assert.equal(overridden.mgmtKey, first.mgmtKey);
   assert.equal(await readFile(secretsPath, "utf-8"), before);
   const other = await load({ BRIDGE_DATA_DIR: join(root, "other") });
   assert.notEqual(other.apiKey, first.apiKey);
-  assert.equal(other.mgmtKey, first.mgmtKey);
+  assert.notEqual(other.mgmtKey, first.mgmtKey);
 });
 
 test("管理密码不可覆盖，API 密钥不可复用公共密码，拒绝时不写文件或回显输入", async (t) => {
@@ -252,7 +257,12 @@ test("管理密码不可覆盖，API 密钥不可复用公共密码，拒绝时�
   const secretsPath = join(config.dataDir, "launcher-secrets.json");
   const before = await readFile(secretsPath, "utf-8");
   await assert.rejects(load({ BRIDGE_MGMT_KEY: "PRIVATE-MGMT-OVERRIDE" }), /BRIDGE_MGMT_KEY/);
-  await assert.rejects(load({ BRIDGE_API_KEY: "123456" }), /BRIDGE_API_KEY/);
+  for (const value of ["123456", config.mgmtKey, "trailing ", "two words", "PRIVATE\nkey", "PRIVATE\rkey", "PRIVATE\tkey", "PRIVATE\x7fkey", "PRIVATE密钥"]) {
+    await assert.rejects(load({ BRIDGE_API_KEY: value }), (error) => {
+      assert.match(error.message, /BRIDGE_API_KEY/);
+      return noSecret(error, [value]);
+    });
+  }
   assert.equal(await readFile(secretsPath, "utf-8"), before);
 });
 
@@ -260,10 +270,10 @@ test("YAML 字符串使用安全转义，换行/引号/反斜杠/Unicode 不注�
   const { load } = await fixture(t);
   const apiKey = 'api-"\\\nserver:\n  host: 0.0.0.0\t#quote\u0085\u2028\u2029';
   const mgmtKey = "mgmt-'\"\\\r\n: secret\t#escaped";
-  const config = await load({ BRIDGE_API_KEY: apiKey });
-  const rendered = renderConfigYaml({ ...config, mgmtKey });
+  const config = await load();
+  const rendered = renderConfigYaml({ ...config, apiKey, mgmtKey });
   const defaults = renderConfigYaml(config);
-  assert.match(defaults, /  secret-key: "123456"\n/);
+  assert.ok(defaults.includes('  secret-key: "' + config.mgmtKey + '"\n'));
   assert.match(defaults, /  allow-remote: false\n/);
   assert.match(defaults, /  disable-control-panel: false\n/);
   assert.match(rendered, /multimedia:\n(?:  #[^\n]*\n)?  disable-image-generation: "passthrough"\n/);
@@ -275,7 +285,7 @@ test("YAML 字符串使用安全转义，换行/引号/反斜杠/Unicode 不注�
   assert.equal(JSON.parse(mgmtLine.slice(14)), mgmtKey);
   assert.equal(JSON.parse(authLine.slice(12)), config.authDir);
   assert.doesNotMatch(rendered, /[\u0085\u2028\u2029]/);
-  assert.doesNotThrow(() => validateExistingConfig(config, rendered));
+  assert.doesNotThrow(() => validateExistingConfig(config, defaults));
   const synthetic = { ...config, authDir: config.authDir + '-"\n\t#injected' };
   assert.doesNotThrow(() => validateExistingConfig(synthetic, renderConfigYaml(synthetic)));
 });
@@ -285,13 +295,13 @@ test("已存在 YAML 允许 API key 列表包含当前密钥与上游管理哈�
   const config = await load({ BRIDGE_API_KEY: "test-api" });
   const text = renderConfigYaml(config)
     .replace('  host: "127.0.0.1"', "  host: 127.0.0.1 # loopback")
-    .replace('  secret-key: "123456"', '  secret-key: "$2a$10$already-hashed"')
+    .replace(JSON.stringify(config.mgmtKey), () => '"$2a$10$already-hashed"')
     .replace('    - "test-api"', "    - 'other-key'\n    - 'test-api' # current")
     .replace(JSON.stringify(config.authDir), JSON.stringify(config.authDir.replace(/\\/g, "/")));
   assert.doesNotThrow(() => validateExistingConfig(config, text));
   assert.doesNotThrow(() => validateExistingConfig(config, text.replace(/    - /g, "  - ")));
   await writeFile(config.configPath, text, { flag: "wx", mode: 0o600 });
-  assert.equal((await load({ BRIDGE_API_KEY: "test-api" })).mgmtKey, "123456");
+  assert.equal((await load({ BRIDGE_API_KEY: "test-api" })).mgmtKey, config.mgmtKey);
   assert.equal(await readFile(config.configPath, "utf-8"), text);
 });
 
@@ -366,8 +376,8 @@ test("列表内映射不能冒充核心安全字段，错误缩进和标量后�
 test("已有 YAML 核心字段不一致/缺失必须拒绝，不泄露输入正文或密钥", async (t) => {
   const { root, load } = await fixture(t);
   const apiKey = "PRIVATE-API-MARKER";
-  const mgmtKey = "123456";
   const config = await load({ BRIDGE_API_KEY: apiKey });
+  const { mgmtKey } = config;
   const original = renderConfigYaml(config);
   for (const text of [
     original.replace('  host: "127.0.0.1"', '  host: "0.0.0.0"'),
@@ -517,7 +527,11 @@ test("损坏的 secrets 不重新生成且异常不回显敏感内容", async (t
     '{"apiKey":"PRIVATE-JSON-SECRET", malformed',
     JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET", mgmtKey: "PRIVATE-JSON-SECRET" }),
     JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET", mgmtKey: false }),
-    JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET", mgmtKey: "123456" }),
+    JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET", mgmtKey: "abc" }),
+    JSON.stringify({ apiKey: "a".repeat(64), mgmtKey: "a".repeat(64) }),
+    JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET", extra: true }),
+    JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET\r\nextra: injected" }),
+    JSON.stringify({ apiKey: "PRIVATE-JSON-SECRET 空格" }),
     JSON.stringify({ apiKey: "123456" }),
     JSON.stringify({ apiKey: false }),
     JSON.stringify({ apiKey: "" }),
@@ -540,29 +554,42 @@ test("首次同进程并发加载只发布一组完整密钥并清理临时文�
   assert.deepEqual(await readdir(configs[0].dataDir), ["launcher-secrets.json"]);
 });
 
-test("首次跨进程并发加载原子发布密钥，无半份文件或互相覆盖", { timeout: 20_000 }, async (t) => {
-  const { root, env, load } = await fixture(t);
-  const startAt = Date.now() + 1000;
-  const script = `
-    import { createHash } from "node:crypto";
-    import { loadConfig } from ${JSON.stringify(moduleUrl)};
-    await new Promise(resolve => setTimeout(resolve, Math.max(0, ${startAt} - Date.now())));
-    const config = await loadConfig({ pluginRoot: ${JSON.stringify(pluginRoot)}, env: ${JSON.stringify(env)} });
-    process.stdout.write(createHash("sha256").update(config.apiKey + ":" + config.mgmtKey).digest("hex"));
-  `;
-  const results = await Promise.all(Array.from({ length: 8 }, () => execFileAsync(
-    process.execPath, ["--input-type=module", "-e", script], { cwd: root, timeout: 15_000 },
-  )));
-  assert.equal(new Set(results.map((result) => result.stdout)).size, 1);
-  for (const result of results) {
-    assert.match(result.stdout, /^[0-9a-f]{64}$/);
-    assert.equal(result.stderr, "");
-  }
-  const config = await load();
-  const secrets = JSON.parse(await readFile(join(config.dataDir, "launcher-secrets.json"), "utf-8"));
-  assert.equal(config.apiKey, secrets.apiKey);
-  assert.equal(config.mgmtKey, "123456");
-  assert.deepEqual(Object.keys(secrets), ["apiKey"]);
-  assert.notEqual(config.apiKey, config.mgmtKey);
-  assert.deepEqual(await readdir(config.dataDir), ["launcher-secrets.json"]);
-});
+for (const [label, legacy] of [
+  ["新装", null],
+  ["旧版单密钥", { apiKey: "existing-client-key" }],
+  ["旧版公共密码", { apiKey: "existing-client-key", mgmtKey: "123456" }],
+]) {
+  test(label + "跨进程并发加载仅发布一组密钥并保留已有 API key", { timeout: 20_000 }, async (t) => {
+    const { root, env, load } = await fixture(t);
+    if (legacy) {
+      await mkdir(env.BRIDGE_DATA_DIR);
+      await writeFile(join(env.BRIDGE_DATA_DIR, "launcher-secrets.json"), JSON.stringify(legacy), { mode: 0o600 });
+    }
+    const startAt = Date.now() + 1000;
+    const script = `
+      import { createHash } from "node:crypto";
+      import { loadConfig } from ${JSON.stringify(moduleUrl)};
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, ${startAt} - Date.now())));
+      const config = await loadConfig({ pluginRoot: ${JSON.stringify(pluginRoot)}, env: ${JSON.stringify(env)} });
+      process.stdout.write(createHash("sha256").update(config.apiKey + ":" + config.mgmtKey).digest("hex"));
+    `;
+    const results = await Promise.all(Array.from({ length: 8 }, () => execFileAsync(
+      process.execPath, ["--input-type=module", "-e", script], { cwd: root, timeout: 15_000 },
+    )));
+    assert.equal(new Set(results.map((result) => result.stdout)).size, 1);
+    for (const result of results) {
+      assert.match(result.stdout, /^[0-9a-f]{64}$/);
+      assert.equal(result.stderr, "");
+    }
+    const config = await load();
+    const secrets = JSON.parse(await readFile(join(config.dataDir, "launcher-secrets.json"), "utf-8"));
+    const persisted = createHash("sha256").update(secrets.apiKey + ":" + secrets.mgmtKey).digest("hex");
+    assert.equal(results[0].stdout, persisted, "子进程拿到的凭据必须与最终落盘的凭据一致");
+    assert.equal(config.apiKey, secrets.apiKey);
+    if (legacy) assert.equal(config.apiKey, legacy.apiKey);
+    assert.match(config.mgmtKey, /^[0-9a-f]{64}$/);
+    assert.deepEqual(secrets, { apiKey: config.apiKey, mgmtKey: config.mgmtKey });
+    assert.notEqual(config.apiKey, config.mgmtKey);
+    assert.deepEqual(await readdir(config.dataDir), ["launcher-secrets.json"]);
+  });
+}

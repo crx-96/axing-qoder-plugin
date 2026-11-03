@@ -7,7 +7,7 @@ import { DEFAULT_IMAGE_MODEL, GEMINI_IMAGE_MODEL } from "./image-models.mjs";
 
 /** 2025-03-26 强制支持批请求，本按行单消息实现不声明支持；其余版本协商到首项。 */
 const PROTOCOL_VERSIONS = ["2025-06-18", "2024-11-05"];
-/** 单会话最多同时执行的工具数，取消但尚未结束的实现仍占用名额。 */
+/** 常规并发额度；饱和时仍允许各一个状态查询及停止请求。 */
 const MAX_TOOLS = 8;
 /** 请求仍在执行时的进度心跳间隔，单位毫秒。 */
 const PROGRESS_MS = 10_000;
@@ -64,6 +64,11 @@ const TOOLS = [
     name: "bridge_generate_image",
     description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。省略 model 时默认 ${DEFAULT_IMAGE_MODEL}，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
     inputSchema: IMAGE_SCHEMA,
+  },
+  {
+    name: "bridge_open_management",
+    description: "经用户要求在系统浏览器打开本插件已登录的管理页，供用户本人授权与管理账号。",
+    inputSchema: EMPTY_SCHEMA,
   },
 ];
 /** 只允许稳定错误标识出现在异常响应中，不转发异常 message、stack 或响应正文。 */
@@ -173,6 +178,11 @@ async function callTool(name, args, ctx, handlers, signal) {
       const result = await handlers.stopBridge(config);
       const stopped = result?.stopped === true;
       return textResult({ stopped, reason: safeReason(result?.reason, stopped ? "已停止" : "未能停止", config) }, !stopped);
+    }
+    case "bridge_open_management": {
+      // 由本机入口直接唤起浏览器；即使实现返回了内部票据，协议响应也只包含固定结果。
+      await handlers.openManagement(config, { signal });
+      return textResult("已请求系统浏览器打开授权与账号管理页。");
     }
     case "bridge_generate_image": {
       const result = await handlers.generateImage(config, { model: DEFAULT_IMAGE_MODEL, output_format: "png", ...args }, { signal });
@@ -351,8 +361,15 @@ export async function runMcp(ctx, { input = process.stdin, output = process.stdo
       return send(fail(message.id, -32600, "请求 ID 已在使用。"));
     }
     if (isTool || isInitialize) {
-      if (requests.size >= MAX_TOOLS) return send(ok(message.id, textResult("同时执行的工具已达 8 个；未执行本次调用，请等待已有调用结束。", true)));
-      request = { controller: new AbortController(), timer: null, initializing: isInitialize };
+      const toolName = isTool ? message.params?.name : undefined;
+      // 检查和停止各有一个饱和时可用的名额，重复控制调用仍受限，避免诊断被生图等长任务堵住。
+      if (requests.size >= MAX_TOOLS) {
+        const reserved = toolName === "bridge_status" || toolName === "bridge_stop";
+        if (!reserved || [...requests.values()].some((active) => active.toolName === toolName)) {
+          return send(ok(message.id, textResult("此工具的并发名额已用尽；本次未执行，请等待已有调用结束。", true)));
+        }
+      }
+      request = { controller: new AbortController(), timer: null, initializing: isInitialize, toolName };
       requests.set(message.id, request);
       if (isInitialize) request.controller.signal.addEventListener("abort", stopReading, { once: true });
       const token = message.params?._meta?.progressToken;

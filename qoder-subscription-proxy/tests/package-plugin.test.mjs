@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -8,14 +8,7 @@ import { inflateRawSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const script = path.join(root, 'scripts/package-plugin.mjs');
-const scripts = ['ProxyJob.cs', 'antigravity-login.ps1', 'image-preview.ps1', 'mcp-server.mjs',
-  'prepare-posix-marketplace.sh', 'proxy-supervisor.mjs', 'proxy-supervisor.ps1', 'start-mcp.ps1', 'start-mcp.sh'];
-const expected = ['.qoder-plugin/plugin.json', '.mcp.json', '.mcp.posix.json', 'README.md', 'LICENSE',
-  'DISCLAIMER.md', 'THIRD_PARTY_NOTICES.md', 'Antigravity授权.cmd', 'bridge/bin/LICENSE',
-  'bridge/bin/README.md', 'bridge/bin/README_CN.md', 'bridge/bin/config.example.yaml',
-  'bridge/bin/platforms.json', 'bridge/panel/LICENSE', 'bridge/panel/management.upstream.html',
-  ...scripts.map(name => `scripts/${name}`),
-  ...readdirSync(path.join(root, 'bridge')).filter(name => name.endsWith('.mjs')).map(name => `bridge/${name}`)].sort();
+const expected = ['.mcp.json', ...readFileSync(path.join(root, 'scripts/distribution-files.txt'), 'utf8').trimEnd().split(/\r?\n/)].sort();
 
 function temporary(t) {
   const directory = mkdtempSync(path.join(path.resolve(root, '..'), '.插件 打包测试 '));
@@ -102,6 +95,15 @@ for (const platform of ['windows', 'posix']) {
       const source = name === '.mcp.json' && platform === 'posix' ? '.mcp.posix.json' : name;
       assert.deepEqual(data, readFileSync(path.join(root, source)), name);
     }
+    const manifest = JSON.parse(entries.get('.qoder-plugin/plugin.json'));
+    assert.match(entries.get(path.posix.join(manifest.commands, 'open-management.md')).toString(), /bridge_open_management/);
+    // 每个随包运行模块的本地导入都必须同时在 ZIP 内。
+    for (const [name, bytes] of entries) {
+      if (!name.endsWith('.mjs')) continue;
+      for (const match of bytes.toString().matchAll(/\bfrom\s+["'](\.[^"']+)["']/g)) {
+        assert.ok(entries.has(path.posix.join(path.posix.dirname(name), match[1])), name + ': ' + match[1]);
+      }
+    }
     const config = JSON.parse(entries.get('.mcp.json')).mcpServers['qoder-subscription-proxy'];
     assert.equal(config.command, platform === 'posix' ? '/bin/sh' : 'powershell.exe');
     assert(config.args.some(arg => arg.endsWith(platform === 'posix' ? '/scripts/start-mcp.sh' : '/scripts/start-mcp.ps1')));
@@ -116,7 +118,7 @@ test('白名单排除测试、数据、凭据、日志、核心及未知脚本',
   const source = fixture(directory);
   for (const name of ['tests/private.test.mjs', 'bridge/data/token.json', 'bridge/bin/core.exe',
     'bridge/bin/core.tar.gz', 'bridge/panel/secret.json', 'bridge/debug.log', '.env',
-    'scripts/prepare-test-core.mjs', 'scripts/unknown.mjs']) {
+    'scripts/prepare-test-core.mjs', 'scripts/unknown.mjs', 'bridge/local-debug-only.mjs', 'commands/private.md']) {
     const filename = path.join(source, name);
     mkdirSync(path.dirname(filename), { recursive: true });
     writeFileSync(filename, 'must not be packaged');
@@ -172,7 +174,10 @@ test('拒绝源祖先链接、白名单目录链接和已有输出链接', t => 
   mkdirSync(moved);
   rmSync(bridge, { recursive: true });
   symlinkSync(moved, bridge, process.platform === 'win32' ? 'junction' : 'dir');
-  assert.notEqual(run(['windows', target], directory, path.join(source, 'scripts/package-plugin.mjs')).status, 0);
+  writeFileSync(path.join(moved, 'crc32.mjs'), "throw new Error('unexpected external import')");
+  const badSource = run(['windows', target], directory, path.join(source, 'scripts/package-plugin.mjs'));
+  assert.notEqual(badSource.status, 0);
+  assert.match(badSource.stderr, /拒绝符号链接/);
   assert(!existsSync(target));
   symlinkSync(source, target, process.platform === 'win32' ? 'junction' : 'dir');
   assert.notEqual(run(['windows', target], directory).status, 0);

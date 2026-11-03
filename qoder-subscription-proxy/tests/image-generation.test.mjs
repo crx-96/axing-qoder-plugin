@@ -7,8 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { deflateSync } from "node:zlib";
+import { crc32 } from "../bridge/crc32.mjs";
 import { setTimeout as delay } from "node:timers/promises";
-import { decodeImage, generateImage } from "../bridge/image-generation.mjs";
+import { decodeImage, generateImage as generateProductionImage } from "../bridge/image-generation.mjs";
+import { requestLocal } from "../bridge/local-http.mjs";
 import { handleMessage } from "../bridge/mcp-protocol.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -22,9 +25,11 @@ const vp8lWebp = Buffer.from("UklGRjAAAABXRUJQVlA4TCQAAAAvB8ABALkKRPQ/dkWoQPQ/DG
 const vp8xWebp = Buffer.from("UklGRrYAAABXRUJQVlA4WAoAAAAIAAAABwAABwAAVlA4IIIAAABQAwCdASoIAAgAAUAmJbACdLoA4ACyAP0A9ADpgAbAdKw12AD+82dP1jbo+foybt3gPfNbRZ9sU6Jk5/9wj5cKX5hd7UT5Wgy0hQpp7xnMEyU/bIbGTk98jNve87NnO7PNL0qufry+v9sB+/Gsz9ONTXNpE/git5UO6/+Du0alIAAARVhJRg4AAABJSSoACAAAAAAAAAAAAA==", "base64");
 const alphaWebp = Buffer.from("UklGRsgAAABXRUJQVlA4WAoAAAAQAAAABwAABwAAQUxQSBgAAAABuYzof0BNAAKMFUT/nD4FIiZgAjB23QBWUDggigAAAFADAJ0BKggACAABQCYlsAJ0ugCTAP0A9AD2AP1VBcGeNjQYAP7vrc5oikmYIzQp+p0AzL8b7pLfmtos/JnergcP/cI99ndyYXe1E+VoMHgwCsnMSxrlh35/7v+P+Mq8zDgnjvedmznbper4lM/Ry1P/2/334/ZuwetBaSR/4IreVDuv/g7tGpSAAA==", "base64");
 const alphaLosslessWebp = Buffer.from("UklGRmYAAABXRUJQVlA4WAoAAAAYAAAABwAABwAAVlA4TDEAAAAvB8ABELmM6H/sIqL/AcJsowmMZP6G9zsBgUCKUxhisWCK98cUgQBlqjDEBID+dvUbAEVYSUYOAAAASUkqAAgAAAAAAAAAAAA=", "base64");
-const bridgeSignature = { message: "CLI Proxy API Server", endpoints: ["GET /v1/models"] };
+function generateImage(config, args, { signal } = {}) {
+  return generateProductionImage(config, args, { signal, request: requestLocal });
+}
 
-async function imageFixture(t, handler, rootBody = bridgeSignature) {
+async function imageFixture(t, handler) {
   const directory = await mkdtemp(join(tmpdir(), "subscription-bridge-image-test-"));
   const requests = [];
   const server = http.createServer(async (request, response) => {
@@ -33,11 +38,6 @@ async function imageFixture(t, handler, rootBody = bridgeSignature) {
     for await (const chunk of request) text += chunk;
     const entry = { url: request.url, method: request.method, headers: request.headers, body: text ? JSON.parse(text) : null };
     requests.push(entry);
-    if (request.url === "/") {
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify(rootBody));
-      return;
-    }
     handler(entry, response);
   });
   server.listen(0, "127.0.0.1");
@@ -51,7 +51,8 @@ async function imageFixture(t, handler, rootBody = bridgeSignature) {
   });
   return {
     directory, requests, server,
-    config: { host: "127.0.0.1", port, apiKey: "image-test-secret-only", imagesDir: join(directory, "images") },
+    config: { host: "127.0.0.1", port, apiKey: "image-test-secret-only", imagesDir: join(directory, "images"),
+      pidPath: join(directory, "absent-bridge.pid") },
   };
 }
 
@@ -86,12 +87,11 @@ test("generateImage 保存 PNG 原图并返回 MCP image 和可定位文件文�
   const { config, requests } = await imageFixture(t, (_request, response) => imageResponse(response));
   const args = { prompt: "一只猫", size: "1024x1024", quality: "high", background: "transparent" };
   const result = await generateImage(config, args);
-  assert.equal(requests.length, 2);
-  assert.equal(requests[0].headers.authorization, undefined);
-  assert.equal(requests[1].url, "/v1/images/generations");
-  assert.equal(requests[1].method, "POST");
-  assert.equal(requests[1].headers.authorization, `Bearer ${config.apiKey}`);
-  assert.deepEqual(requests[1].body, {
+  assert.equal(requests.length, 1, "只提交一次生成，无需模型列表和首页探测");
+  assert.equal(requests[0].url, "/v1/images/generations");
+  assert.equal(requests[0].method, "POST");
+  assert.equal(requests[0].headers.authorization, `Bearer ${config.apiKey}`);
+  assert.deepEqual(requests[0].body, {
     ...args, model: "gpt-image-2.5", output_format: "png", response_format: "b64_json", n: 1, stream: false,
   });
   assert.equal(args.model, undefined, "不能修改调用方参数");
@@ -109,8 +109,8 @@ test("generateImage 保存 PNG 原图并返回 MCP image 和可定位文件文�
 test("generateImage 保留指定模型且请求参数不允许任意服务端选项", async (t) => {
   const { config, requests } = await imageFixture(t, (_request, response) => imageResponse(response));
   await generateImage(config, { prompt: "test", model: "gpt-image-2.5-flare", output_format: "png", quality: "low" });
-  assert.equal(requests[1].body.model, "gpt-image-2.5-flare");
-  assert.equal(requests[1].body.quality, "low");
+  assert.equal(requests[0].body.model, "gpt-image-2.5-flare");
+  assert.equal(requests[0].body.quality, "low");
 });
 
 test("Gemini MCP 调用保留图片模型并保存原图，失败不回退 GPT 或重试", async (t) => {
@@ -126,7 +126,7 @@ test("Gemini MCP 调用保留图片模型并保存原图，失败不回退 GPT �
       const response = await handleMessage({
         jsonrpc: "2.0", id: 1, method: "tools/call",
         params: { name: "bridge_generate_image", arguments: args },
-      }, { config });
+      }, { config }, { handlers: { generateImage } });
       const posts = requests.filter((entry) => entry.method === "POST");
       assert.equal(posts.length, 1);
       assert.equal(posts[0].url, "/v1beta/models/gemini-3.1-flash-image:generateContent");
@@ -212,18 +212,18 @@ test("generateImage 按 Unicode 码点校验 prompt 与 model 的长度边界", 
   const prompt = supplementaryCharacter.repeat(32000);
   const model = supplementaryCharacter.repeat(200);
   await generateImage(config, { prompt, model });
-  assert.ok(requests[1].body.prompt === prompt, "多字节 prompt 必须完整传输");
-  assert.ok(requests[1].body.model === model, "多字节 model 必须完整传输");
+  assert.ok(requests[0].body.prompt === prompt, "多字节 prompt 必须完整传输");
+  assert.ok(requests[0].body.model === model, "多字节 model 必须完整传输");
   await assert.rejects(generateImage(config, { prompt: prompt + supplementaryCharacter }), { code: "INVALID_ARGUMENT" });
   await assert.rejects(generateImage(config, { prompt: "test", model: model + supplementaryCharacter }), { code: "INVALID_ARGUMENT" });
-  assert.equal(requests.length, 2, "超限参数不能发起网络请求");
+  assert.equal(requests.length, 1, "超限参数不能发起网络请求");
 });
 
-test("generateImage 不向伪造或非桥根端点发送认证与生图请求", async (t) => {
-  const { config, requests } = await imageFixture(t, (_request, response) => imageResponse(response), { message: "unrelated service" });
-  await assert.rejects(generateImage(config, { prompt: "test" }), { code: "BRIDGE_UNAVAILABLE" });
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].headers.authorization, undefined);
+test("generateImage 生产传输遇到无有效身份的监听者不会发送凭据或生图请求", async (t) => {
+  const { config, requests } = await imageFixture(t, (_request, response) => imageResponse(response));
+  await assert.rejects(generateProductionImage(config, { prompt: "test" }), { code: "BRIDGE_NOT_READY" });
+  assert.equal(requests.length, 0);
+  assert.deepEqual(await savedFiles(config), []);
 });
 
 test("generateImage HTTP 失败仅传播诊断，不透传密钥或上游正文", async (t) => {
@@ -297,6 +297,8 @@ test("generateImage 拒绝格式错误、外部 URL 和多图响应", async (t) 
     ["多图", JSON.stringify({ data: [{ b64_json: png.toString("base64") }, { b64_json: png.toString("base64") }] })],
     ["URL 图片", '{"data":[{"url":"https://must-not-fetch.invalid/image.png"}]}'],
     ["无效 base64", '{"data":[{"b64_json":"not-base64!"}]}'],
+    ["IDAT 的 CRC 正确但像素流损坏", JSON.stringify({ data: [{ b64_json: pngFixture(png.subarray(16, 29),
+      [pngChunk("IDAT", Buffer.from("invalid deflate"))]).toString("base64") }] })],
     ["非图片内容", JSON.stringify({ data: [{ b64_json: Buffer.from("UPSTREAM_SECRET").toString("base64") }] })],
   ];
   for (const [name, body] of cases) {
@@ -308,7 +310,7 @@ test("generateImage 拒绝格式错误、外部 URL 和多图响应", async (t) 
         assert.ok(!error.safeMessage.includes("UPSTREAM_SECRET"));
         return true;
       });
-      assert.equal(requests.length, 2);
+      assert.equal(requests.length, 1);
       assert.deepEqual(await savedFiles(config), []);
     });
   }
@@ -331,6 +333,60 @@ test("decodeImage 拒绝损坏编码、不支持的类型和过大尺寸", () =>
 test("decodeImage 不把只有 PNG 签名和尺寸的截断文件视为有效图像", () => {
   const truncated = png.subarray(0, 24);
   assert.throws(() => decodeImage(truncated.toString("base64")), { code: "IMAGE_GENERATION_FAILED" });
+});
+
+function pngChunk(type, payload) {
+  const chunk = Buffer.alloc(payload.length + 12);
+  chunk.writeUInt32BE(payload.length);
+  chunk.write(type, 4, "latin1");
+  payload.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)), chunk.length - 4);
+  return chunk;
+}
+
+function pngFixture(header, chunks) {
+  return Buffer.concat([png.subarray(0, 8), pngChunk("IHDR", header), ...chunks, pngChunk("IEND", Buffer.alloc(0))]);
+}
+
+test("PNG 接受同一压缩流拆成多个 IDAT、亚字节采样和 Adam7 各趟", () => {
+  const header = Buffer.from(png.subarray(16, 29));
+  header.writeUInt32BE(9);
+  header.writeUInt32BE(9, 4);
+  header[8] = 1;
+  header[9] = 0;
+  header[12] = 1;
+  const compressed = deflateSync(Buffer.alloc(42));
+  const split = [compressed.subarray(0, 1), Buffer.alloc(0), compressed.subarray(1)].map(data => pngChunk("IDAT", data));
+  const input = pngFixture(header, split);
+  assert.deepEqual(decodeImage(input.toString("base64")).bytes, input);
+  for (const length of [41, 43]) {
+    const malformed = pngFixture(header, [pngChunk("IDAT", deflateSync(Buffer.alloc(length)))]);
+    assert.throws(() => decodeImage(malformed.toString("base64")), { code: "IMAGE_GENERATION_FAILED" });
+  }
+});
+
+test("PNG 检查全部块 CRC、压缩校验和、解压预算、过滤字节与关键块顺序", () => {
+  const header = png.subarray(16, 29);
+  const filtered = Buffer.from([5, 0, 0, 0, 0]);
+  const badZlib = Buffer.from(png.subarray(41, 54));
+  badZlib[badZlib.length - 1] ^= 1;
+  const damagedMetadata = pngChunk("tEXt", Buffer.from("about\0fixture"));
+  damagedMetadata[8] ^= 1;
+  const idat = png.subarray(33, -12);
+  for (const chunks of [
+    [damagedMetadata, idat], [pngChunk("IDAT", badZlib)], [pngChunk("IDAT", deflateSync(filtered))],
+    [pngChunk("IDAT", deflateSync(Buffer.alloc(1 << 20)))], [pngChunk("IDAT", deflateSync(Buffer.alloc(4)))],
+    [idat, pngChunk("tEXt", Buffer.from("about\0fixture")), pngChunk("IDAT", Buffer.alloc(0))],
+    [pngChunk("IHDR", header), idat], [pngChunk("UNKN", Buffer.alloc(0)), idat],
+  ]) {
+    assert.throws(() => decodeImage(pngFixture(header, chunks).toString("base64")), { code: "IMAGE_GENERATION_FAILED" });
+  }
+  const indexed = Buffer.from(header);
+  indexed[8] = 1;
+  indexed[9] = 3;
+  const indexedData = pngChunk("IDAT", deflateSync(Buffer.alloc(2)));
+  assert.doesNotThrow(() => decodeImage(pngFixture(indexed, [pngChunk("PLTE", Buffer.alloc(6)), indexedData]).toString("base64")));
+  assert.throws(() => decodeImage(pngFixture(indexed, [indexedData]).toString("base64")), { code: "IMAGE_GENERATION_FAILED" });
 });
 
 function webpChunk(type, payload) {
@@ -496,16 +552,7 @@ test("POSIX 大图仅返回原图链接，不调用 Windows 预览且不重试�
   skip: process.platform === "win32" ? "POSIX 原图链接降级" : false,
 }, async (t) => {
   const payload = Buffer.from("Comment\0" + "large-image-metadata".repeat(12000));
-  const chunk = Buffer.alloc(payload.length + 12);
-  chunk.writeUInt32BE(payload.length);
-  chunk.write("tEXt", 4);
-  payload.copy(chunk, 8);
-  let crc = 0xffffffff;
-  for (const byte of chunk.subarray(4, -4)) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-  }
-  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, chunk.length - 4);
+  const chunk = pngChunk("tEXt", payload);
   const original = Buffer.concat([png.subarray(0, 33), chunk, png.subarray(33)]);
   assert.ok(original.toString("base64").length > 190 * 1024);
   const { config, requests } = await imageFixture(t, (_request, response) => imageResponse(response, original));

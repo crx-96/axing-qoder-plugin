@@ -146,7 +146,7 @@ test("本地配置准备完成后initialize成功，之前拒绝工具且不重�
   ready.resolve();
   assert.ok((await h.response(1)).result.serverInfo);
   h.send(request(5, "tools/list"));
-  assert.equal((await h.response(5)).result.tools.length, 4);
+  assert.equal((await h.response(5)).result.tools.length, 5);
   assert.equal(prepared, 1);
 });
 
@@ -231,10 +231,10 @@ test("初始化与生图工具共同声明 GPT/Gemini 模型映射、免预查�
   assert.match(status.description, /生图前无需调用本工具确认主模型或图片模型/);
 });
 
-test("工具只有 status/start/stop/generate_image，移除 login 并明确单图订阅约束", async () => {
+test("列出五个工具，管理入口无参数且生图仍遵守单图订阅约束", async () => {
   const response = await handleMessage(request(1, "tools/list"), { config });
   const tools = response.result.tools;
-  assert.deepEqual(tools.map((tool) => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_generate_image"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_generate_image", "bridge_open_management"]);
   for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false);
   const image = tools[3];
   assert.deepEqual(image.inputSchema.required, ["prompt"]);
@@ -268,7 +268,7 @@ test("全部工具参数在调用依赖前严格校验，不接受未知参数�
     assert.equal(response.error?.code, -32602, JSON.stringify(args).slice(0, 80));
   }
   assert.equal(invoked, 0);
-  for (const name of ["bridge_status", "bridge_start", "bridge_stop"]) {
+  for (const name of ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management"]) {
     for (const args of [null, [], { force: true }]) {
       const response = await handleMessage(call(2, name, args), { config }, { handlers: injected });
       assert.equal(response.error.code, -32602);
@@ -319,8 +319,23 @@ test("start 传递取消信号，start/stop 投影结果并标识未就绪", asy
   }
 });
 
-test("start/stop 抛错统一标 isError，图片失败不自动重试或切换模型", async () => {
-  for (const [name, handlerName] of [["bridge_start", "ensureRunning"], ["bridge_stop", "stopBridge"], ["bridge_generate_image", "generateImage"]]) {
+test("管理入口只在用户调用时执行一次，原始票据不进入返回值", async () => {
+  const signal = new AbortController().signal;
+  let calls = 0;
+  const injected = handlers({ openManagement: async (actual, options) => {
+    assert.equal(actual, config);
+    assert.equal(options.signal, signal);
+    calls++;
+    return "http://127.0.0.1/management.html#sensitive-test-ticket";
+  } });
+  const result = await handleMessage(call(1, "bridge_open_management", {}), { config }, { handlers: injected, signal });
+  assert.equal(calls, 1);
+  assert.equal(resultText(result), "已请求系统浏览器打开授权与账号管理页。");
+  assert.doesNotMatch(JSON.stringify(result), /127\.0\.0\.1|sensitive-test-ticket/);
+});
+
+test("管理与启停工具抛错标 isError，图片失败不自动重试或切换模型", async () => {
+  for (const [name, handlerName] of [["bridge_start", "ensureRunning"], ["bridge_stop", "stopBridge"], ["bridge_open_management", "openManagement"], ["bridge_generate_image", "generateImage"]]) {
     let count = 0;
     const injected = handlers({ [handlerName]: async (_config, args) => {
       count++;
@@ -491,10 +506,12 @@ test("无 id 的通知不执行工具、不回包，非法 progressToken 被拒�
   assert.equal(h.messages.length, 2);
 });
 
-test("同时工具执行上限为 8，拒绝额外调用但 ping 可用，结束后释放名额", async (t) => {
+test("八个常规任务满载时仍可查状态并停止，控制通道也限制重复调用", async (t) => {
   const entered = deferred();
   const releases = [];
-  const h = harness(t, { generateImage: async () => {
+  const status = deferred();
+  const stop = deferred();
+  const h = harness(t, { getStatus: () => status.promise, stopBridge: () => stop.promise, generateImage: async () => {
     const release = deferred();
     releases.push(release);
     if (releases.length === 8) entered.resolve();
@@ -507,6 +524,16 @@ test("同时工具执行上限为 8，拒绝额外调用但 ping 可用，结束
   assert.equal((await h.response(9)).result.isError, true);
   assert.equal(releases.length, 8);
   await h.response(10);
+  h.send(call(12, "bridge_status", {}));
+  h.send(call(13, "bridge_stop", {}));
+  h.send(call(14, "bridge_status", {}));
+  h.send(call(15, "bridge_stop", {}));
+  assert.equal((await h.response(14)).result.isError, true);
+  assert.equal((await h.response(15)).result.isError, true);
+  status.resolve({ ready: true });
+  stop.resolve({ stopped: true });
+  assert.equal(JSON.parse(resultText(await h.response(12))).ready, true);
+  assert.equal(JSON.parse(resultText(await h.response(13))).stopped, true);
   releases[0].resolve(imageResult);
   await h.response(1);
   await nextTurn();
