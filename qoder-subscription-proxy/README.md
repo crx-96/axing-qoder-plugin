@@ -1,4 +1,4 @@
-# qoder订阅代理 · 0.2.9
+# qoder订阅代理 · 0.2.10
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件，将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理和图片生成 MCP 工具。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 选择安装包，或从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择已发布的版本，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.9-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.9-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
+从本地构建目录 `dist/` 选择安装包，或从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择已发布的版本，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入，无需自行打包或解压。当前 Windows 包为 `qoder-subscription-proxy-v0.2.10-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v0.2.10-posix.zip`；不要下载自动生成的源码归档作为安装包。POSIX ZIP 已替换为对应 `.mcp.json`，源码默认 Windows 清单不能直接用于 POSIX。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -56,12 +56,12 @@ ZIP 不带五平台核心二进制，仅保留来源清单、文档和许可证�
 
 ## GPT 流式请求
 
-从 `0.2.8` 起，插件在启动代理时补齐以下 v8 配置。Codex 会暂存启动事件，收到推理、正文或工具事件就释放缓冲。`10s` 上限在收到上游帧时检查。开始转发后，核心每 15 秒可向客户端发送 SSE 心跳。上游在输出中途断开时，客户端仍会收到错误，已发送的内容不会由插件重放。
+从 `0.2.8` 起，插件在启动代理时补齐流式配置。以下 YAML 列出当前源码在字段缺失时写入的值。Codex 会暂存启动事件，收到推理、正文或工具事件就释放缓冲。`10s` 上限在收到上游帧时检查。开始转发后，核心每 15 秒可向客户端发送 SSE 心跳。上游在输出中途断开时，客户端仍会收到错误，已发送的内容不会由插件重放。
 
 ```yaml
 routing:
   retry:
-    request-retry: 1
+    request-retry: 3
     max-retry-interval: 5
   cooldown:
     transient-error-cooldown-seconds: 3
@@ -76,9 +76,9 @@ upstream:
     stream-bootstrap-timeout: "10s"
 ```
 
-路由允许额外一轮，首字节前的流处理器允许一次重试。单账号遇到可重试的临时 503 时，3 秒冷却落在 5 秒的轮间等待预算内。路由和 SSE 设置适用于继承全局配置的请求，启动缓冲只作用于 Codex。只收到启动事件就结束的 SSE 请求仍可能返回 HTTP 408，宿主可据此决定是否重试。[上游配置说明](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.51/config.example.yaml) · [Codex 启动帧与过载问题 #6856](https://github.com/router-for-me/CLIProxyAPI/issues/6856)
+当前源码对可重试错误允许最多三轮额外重试，首字节前的流处理器另允许一次重试。单账号遇到可重试的临时 503 时，3 秒冷却落在 5 秒的轮间等待预算内。路由和 SSE 设置适用于继承全局配置的请求，启动缓冲只作用于 Codex。只收到启动事件就结束的 SSE 请求仍可能返回 HTTP 408，宿主可据此决定是否重试。[上游配置说明](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.51/config.example.yaml) · [Codex 启动帧与过载问题 #6856](https://github.com/router-for-me/CLIProxyAPI/issues/6856)
 
-从 `0.2.9` 起仅补齐缺失字段，保留显式 `request-retry: 0` 及核心仍支持的旧字段值。更新前请等当前请求结束并调用 `bridge_stop`，安装新版、重连 MCP，再调用 `bridge_start`。首次启动新版会为旧安装设置独立管理密码，同时保留模型 API Key 和已有账号授权。
+从 `0.2.10` 起，每次升级后首次连接 MCP，插件会将已有配置中的四项全局重试策略同步为该版本的值：`request-retry`、`max-retry-interval`、`transient-error-cooldown-seconds` 和 `bootstrap-retries`。旧版 YAML 中仍生效的字段在原位置更新。即使核心已在运行或已暂停，已有配置也会同步。同一版本内可在管理页调整这些值，下一次升级时再同步。账号授权、密钥、账号级覆盖、心跳和缓冲参数均不属于这次迁移。
 
 ## 自动审批模型兼容
 
@@ -149,6 +149,7 @@ Gemini 使用原生 `/v1beta/models/gemini-3.1-flash-image:generateContent` 接�
 | --- | --- |
 | `launcher-secrets.json` | 随机模型 API Key（`apiKey`）和本安装的管理密码（`mgmtKey`） |
 | `config.yaml`、`auths/` | 运行配置及敏感授权凭据 |
+| `retry-policy-version` | 已同步全局重试参数的最高插件版本，供同版本重启和多会话共用 |
 | `bridge.log` | 日志可能包含上游账号或请求信息，分享前须脱敏 |
 | `bridge.pid`、`bridge.paused` | 归属记录与持久暂停状态；POSIX 控制令牌也是敏感信息，陈旧 PID 文件不代表进程仍存活 |
 | `runtimes/` | 经校验的固定版本、当前平台核心 |

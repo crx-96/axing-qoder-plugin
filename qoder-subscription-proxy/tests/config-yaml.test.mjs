@@ -53,3 +53,16 @@ test("v8 旧路径的显式重试、冷却、流式整段和 Codex 配置保留�
   const mixed = ensureStreamingDefaults(original + "requests:\n  streaming:\n    keepalive-seconds: 30\n");
   assert.equal(parseConfigYaml(mixed).values.get('["requests","streaming","bootstrap-retries"]'), 1);
 });
+
+test("升级只改生效的重试字段，补齐缺失值，并保留空整数的行末注释", () => {
+  const original = [
+    "request-retry: 7 # legacy shadowed", "routing:", "  retry:", "    request-retry:   # keep",
+    "    max-retry-interval: ~ # keep", "streaming:", "  bootstrap-retries: 8 # shadowed",
+    "requests:", "  streaming:", "    bootstrap-retries: null", "    keepalive-seconds: 33", "",
+  ].join("\r\n");
+  const expected = original.replace("retry:   #", "retry: 3   #").replace("interval: ~", "interval: 5")
+    .replace("\r\nstreaming:", "\r\n  cooldown:\r\n    transient-error-cooldown-seconds: 3\r\nstreaming:")
+    .replace("retries: null", "retries: 1");
+  assert.equal(ensureStreamingDefaults(original, { retryUpgrade: true }), expected);
+  assert.equal(ensureStreamingDefaults(expected, { retryUpgrade: true }), expected);
+});

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { loadConfig, ensureStreamingDefaults, renderConfigYaml } from "../bridge/config.mjs";
+import { PLUGIN_VERSION, loadConfig, ensureStreamingDefaults, renderConfigYaml } from "../bridge/config.mjs";
 import { ensureApprovalRouting } from "../bridge/approval-routing.mjs";
 import { requestLocal } from "../bridge/local-http.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
@@ -384,6 +384,19 @@ test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建�
   const pid = await readPid(config);
   const identity = await processIdentity(pid.pid);
   assert.equal(sameProcess(pid, identity, config), true);
+  const marker = join(config.dataDir, "retry-policy-version");
+  assert.equal((await readFile(marker, "utf8")).trim(), PLUGIN_VERSION);
+  const retryEndpoint = "/v0/management/request-retry";
+  const edited = await requestLocal(config, retryEndpoint, { management: true, method: "PUT", body: { value: 0 } });
+  assert.equal(edited.status, 200);
+  await writeFile(marker, "0.2.9\n");
+  const reused = await ensureRunning(config);
+  assert.equal(reused.started, false);
+  assert.equal((await readPid(config)).pid, pid.pid);
+  await waitUntil(async () => {
+    const result = await requestLocal(config, retryEndpoint, { management: true });
+    return result.status === 200 && JSON.parse(result.text)["request-retry"] === 3;
+  });
   const status = await getStatus(config);
   assert.equal(status.alive, true);
   assert.equal(status.ready, true);
@@ -638,7 +651,7 @@ test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再
   assert.equal((await probeBridge(config)).state, "offline");
 });
 
-test("升级旧流式默认值保留自定义项、四空格、注释与 CRLF，重复启动可保留显式关闭", async (t) => {
+test("补齐缺失的流式字段保留自定义项、四空格、注释与 CRLF", async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
   const legacy = "\uFEFF" + renderConfigYaml(config) + [
     "routing:", "    retry:", "        request-retry: 0 # 旧核心回写",
@@ -671,6 +684,49 @@ test("升级旧流式默认值保留自定义项、四空格、注释与 CRLF，
   assert.equal(await readFile(config.configPath, "utf8"), broken);
 });
 
+test("升级仅覆盖四项重试策略；同版重启、旧版会话和迁移失败都保护本地配置", async (t) => {
+  const config = testConfig(await directoryFixture(t), await unusedPort());
+  const marker = join(config.dataDir, "retry-policy-version");
+  await writeFile(config.pausedPath, "paused");
+  const original = ("\uFEFF" + renderConfigYaml(config) + [
+    "routing:", "  retry:", "    request-retry: 0 # original", "    max-retry-interval: 30",
+    "    max-retry-credentials: 2", "transient-error-cooldown-seconds: -1",
+    "streaming:", "  keepalive-seconds: 42", "  bootstrap-retries: 8", "  send-keepalive-before-ft: true",
+    "upstream:", "  codex:", '    stream-bootstrap-timeout: "42s"',
+    "api-keys:", "  codex:", "    - name: local", "      request-retry: 7", "",
+  ].join("\n")).replaceAll("\n", "\r\n");
+  const expected = original.replace("0 # original", "3 # original").replace("interval: 30", "interval: 5")
+    .replace("seconds: -1", "seconds: 3").replace("retries: 8", "retries: 1");
+  await writeFile(config.configPath, original);
+  await mkdir(config.authDir);
+  const authFile = join(config.authDir, "account.json");
+  const secrets = join(config.dataDir, "launcher-secrets.json");
+  await writeFile(authFile, "untouched account");
+  await writeFile(secrets, "untouched local keys");
+  const start = () => ensureRunning(config, { automatic: true });
+  assert.equal((await start()).ready, false);
+  assert.equal(await readFile(config.configPath, "utf8"), expected);
+  assert.equal((await readFile(marker, "utf8")).trim(), PLUGIN_VERSION);
+  await writeFile(config.configPath, original);
+  await start();
+  assert.equal(await readFile(config.configPath, "utf8"), original);
+  await writeFile(marker, "10.0.0\n");
+  await start();
+  assert.equal(await readFile(config.configPath, "utf8"), original);
+  assert.equal(await readFile(marker, "utf8"), "10.0.0\n");
+  await writeFile(marker, "0.2.9\n");
+  const invalid = original.replace("request-retry: 0 # original", "request-retry: []");
+  await writeFile(config.configPath, invalid);
+  await assert.rejects(start(), /结构不受支持/);
+  assert.equal(await readFile(config.configPath, "utf8"), invalid);
+  assert.equal(await readFile(marker, "utf8"), "0.2.9\n");
+  await writeFile(config.configPath, original);
+  await start();
+  assert.equal(await readFile(config.configPath, "utf8"), expected);
+  assert.equal(await readFile(authFile, "utf8"), "untouched account");
+  assert.equal(await readFile(secrets, "utf8"), "untouched local keys");
+});
+
 test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断流", { skip: nativeCoreSkip, timeout: 60000 }, async (t) => {
   const hits = new Map();
   const upstream = await localServer(t, async (req, res) => {
@@ -678,7 +734,7 @@ test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断�
     for await (const chunk of req) body.push(chunk);
     const { model } = JSON.parse(Buffer.concat(body));
     hits.set(model, (hits.get(model) ?? 0) + 1);
-    if (model === "gpt-persistent-overload" || (model === "gpt-http-overload" && hits.get(model) === 1)) {
+    if (model === "gpt-persistent-overload" || (model === "gpt-http-overload" && hits.get(model) <= 3)) {
       res.writeHead(503, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: { code: "server_is_overloaded", message: "server is overloaded" } }));
     }
@@ -704,7 +760,7 @@ test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断�
   const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
   const scenarios = [
     ["gpt-ok", 200, 1], ["gpt-early-eof", 408, 1], ["gpt-mid-eof", 200, 1],
-    ["gpt-http-overload", 200, 2], ["gpt-stream-overload", 200, 2], ["gpt-persistent-overload", 503, 2],
+    ["gpt-http-overload", 200, 4], ["gpt-stream-overload", 200, 2], ["gpt-persistent-overload", 503, 4],
   ];
   await ensureDataDir(config);
   const defaults = await readFile(config.configPath, "utf8");

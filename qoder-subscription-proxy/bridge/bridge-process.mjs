@@ -10,7 +10,7 @@ export { withLifecycleLock };
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { renderConfigYaml, ensureStreamingDefaults, validateExistingConfig } from "./config.mjs";
+import { PLUGIN_VERSION, renderConfigYaml, ensureStreamingDefaults, validateExistingConfig } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
 import { isRoutableImageModel } from "./image-models.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
@@ -28,10 +28,12 @@ const supervisorScript = fileURLToPath(new URL("../scripts/proxy-supervisor.ps1"
 let closing = false;
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 
+/** 构造可向宿主报告的本机代理诊断，不携带配置或凭据。 */
 function bridgeError(message) {
   return Object.assign(new Error(message), { code: "BRIDGE_NOT_READY", safeMessage: message });
 }
 
+/** 读取本地状态；文件不存在时返回 null，其余错误交给调用方。 */
 async function readOptional(path) {
   try { return await readFile(path, "utf8"); }
   catch (error) { if (error.code === "ENOENT") return null; throw error; }
@@ -66,6 +68,41 @@ async function probeModels(config) {
   return body.data.map((model) => model.id);
 }
 
+/** 在同目录发布完整的私有状态。基于旧内容迁移时，在替换前复核，避免覆盖并行保存的配置。 */
+async function replacePrivateFile(path, text, original) {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, text, { flag: "wx", mode: 0o600 });
+    if (original !== undefined && await readOptional(path) !== original) {
+      throw bridgeError("本地配置已变化，请重试配置同步。");
+    }
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  }
+}
+
+/** 在生命周期锁内应用本插件版本的全局重试策略。只迁移已有配置，调用方在新建配置后再登记。 */
+export async function syncRetryPolicy(config) {
+  // 独立记录已同步的最高正式版本，管理页重写 YAML 或另一旧版会话启动时都不会重置用户调整。
+  const marker = join(config.dataDir, "retry-policy-version");
+  const applied = (await readOptional(marker))?.trim();
+  if (applied !== undefined) {
+    if (!/^\d+\.\d+\.\d+$/.test(applied)) throw bridgeError("重试策略版本记录无效，未覆盖本地配置。");
+    if (PLUGIN_VERSION.localeCompare(applied, "en", { numeric: true }) <= 0) return;
+  }
+  const original = await readOptional(config.configPath);
+  if (original === null) return;
+  // 先核对配置归属；迁移仅修改白名单字段。两次写入间中断时，下次可幂等地重试。
+  validateExistingConfig(config, original);
+  const updated = ensureStreamingDefaults(original, { retryUpgrade: true });
+  if (updated !== original) {
+    validateExistingConfig(config, updated);
+    await replacePrivateFile(config.configPath, updated, original);
+  }
+  await replacePrivateFile(marker, PLUGIN_VERSION + "\n");
+}
+
 /** 准备授权目录与配置。实际启动持有生命周期锁，首次并发创建使用完整临时文件抢占发布。 */
 export async function ensureDataDir(config) {
   // 先创建私有授权目录，新安装直接发布已合并默认策略的完整配置。
@@ -86,13 +123,7 @@ export async function ensureDataDir(config) {
   const updated = syncManagementSecret(ensureStreamingDefaults(ensureApprovalRouting(original)), config.mgmtKey);
   if (updated === original) return;
   validateExistingConfig(config, updated);
-  const temporary = `${config.configPath}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, updated, { flag: "wx", mode: 0o600 });
-    await rename(temporary, config.configPath);
-  } finally {
-    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
-  }
+  await replacePrivateFile(config.configPath, updated, original);
 }
 
 /** Windows 创建时间与完整命令行共同防止 PID 回收及同名 exe 误杀。 */
@@ -159,14 +190,9 @@ function syncManagementSecret(text, key) {
   return parsed.values.get(JSON.stringify(path)) === key ? text : replaceConfigScalar(text, path, key);
 }
 
+/** 原子发布本次启动的进程归属记录，避免并发会话读取到部分 PID 数据。 */
 async function savePid(config, value) {
-  const temporary = `${config.pidPath}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 });
-    await rename(temporary, config.pidPath);
-  } finally {
-    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
-  }
+  await replacePrivateFile(config.pidPath, JSON.stringify(value, null, 2));
 }
 
 async function closeSupervisor(child) {
@@ -201,6 +227,7 @@ async function prepareExecutable(config) {
   }
 }
 
+/** 在已持有生命周期锁时启动本机代理；新装在首次发布配置后登记重试策略版本。 */
 async function launch(config, signal) {
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
@@ -208,6 +235,7 @@ async function launch(config, signal) {
   if (previous) await closeSupervisor(previous);
   await prepareExecutable(config);
   await ensureDataDir(config);
+  await syncRetryPolicy(config);
   const panelDirectory = await prepareManagementPanel(config);
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
@@ -348,6 +376,8 @@ export async function ensureRunning(config, { automatic = false, allowDownload =
   const work = (async () => {
     // 先在锁内检查持久暂停和既有代理；只有显式启动才清除暂停标记。
     const existing = await withLifecycleLock(config, async () => {
+      // 热复用、暂停或核心尚未下载时也同步已有配置；这一步不会启动或重启代理。
+      await syncRetryPolicy(config);
       if (automatic && await readOptional(config.pausedPath) !== null) {
         return { started: false, ready: false, reason: "用户已停止桥，自动恢复已暂停" };
       }

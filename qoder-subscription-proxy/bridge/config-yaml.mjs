@@ -183,14 +183,26 @@ export function appendConfigBlock(parsed, path, kind, render) {
   return updated.endsWith(parsed.newline) ? updated : updated + parsed.newline;
 }
 
-/** 定点替换已有的单行字符串或布尔值，仅改写标量本身；缺失、集合和多行值均拒绝写入。 */
+/** 定点替换单行标量，接受字符串、布尔值及安全整数；缺失、集合和多行值均拒绝写入。 */
 export function replaceConfigScalar(text, path, value) {
   const parsed = parseConfigYaml(text);
   const key = JSON.stringify(path);
   const node = parsed.nodes.get(key);
   const before = parsed.values.get(key);
+  // YAML 允许把可选整数留空。沿用原键、缩进和尾注释，只在冒号后补上升级后的整数。
+  if (node?.kind === null && node.raw === undefined && Number.isSafeInteger(value)) {
+    const row = parsed.lines[node.line];
+    const trimmed = row.trimEnd();
+    const comment = readEntry(trimmed.trimStart())?.raw;
+    const end = (comment ? trimmed.slice(0, -comment.length).trimEnd() : trimmed).length;
+    parsed.lines[node.line] = row.slice(0, end) + " " + value + row.slice(end);
+    return parsed.lines.join(parsed.newline);
+  }
+  // 显式 null 和 ~ 也可迁移为整数，空列表或映射仍按结构错误处理。
+  const nullableInteger = Number.isSafeInteger(value) && /^(?:null|~)(?: +#.*)?$/.test(node?.raw ?? "");
   if (!node?.raw || node.kind !== null || node.raw.startsWith("|") ||
-      !["string", "number", "boolean"].includes(typeof before) || !["string", "boolean"].includes(typeof value)) throw unsupportedYaml();
+      (!nullableInteger && !["string", "number", "boolean"].includes(typeof before)) ||
+      !(["string", "boolean"].includes(typeof value) || Number.isSafeInteger(value))) throw unsupportedYaml();
 
   // 解析过的原始值仍含行末注释；只截取第一个完整标量，允许引号中的空格和 #。
   if (before === value) return text;
