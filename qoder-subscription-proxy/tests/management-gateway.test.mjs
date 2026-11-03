@@ -6,9 +6,9 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../bridge/config.mjs";
-import { ensureRunning, shutdownOwnedBridges } from "../bridge/bridge-process.mjs";
-import { createManagementLogin } from "../bridge/management-login.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { ensureRunning, shutdownOwnedBridges } from "../server/supervisor.mjs";
+import { createManagementLogin } from "../server/management-gateway.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
 async function unusedPort() {
@@ -38,7 +38,9 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
   const ready = await ensureRunning(config);
   assert.equal(ready.ready, true);
   let launch;
-  login = createManagementLogin(config, { launchBrowser: async raw => { launch = new URL(raw); } });
+  const port = await unusedPort();
+  const createLogin = () => createManagementLogin(config, { port, launchBrowser: async raw => { launch = new URL(raw); } });
+  login = createLogin();
   const open = async () => {
     launch = undefined;
     assert.ok(await login.open() === undefined, "入口只应向操作系统交付票据");
@@ -47,7 +49,16 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
     assert.ok(!launch.href.includes(config.mgmtKey) && !launch.href.includes(config.apiKey));
     return launch.hash.slice(1);
   };
+  // 冲突时不签发票据、不更换端口；占用解除后同一入口可恢复。
+  const occupied = createServer();
+  occupied.listen(port, "127.0.0.1");
+  await once(occupied, "listening");
+  try {
+    await assert.rejects(login.open(), error => error.safeMessage?.includes(String(port)));
+    assert.equal(launch, undefined);
+  } finally { await new Promise(resolve => occupied.close(resolve)); }
   const ticket = await open();
+  assert.equal(launch.port, String(port));
   const { origin } = launch;
   const request = (path, options = {}) => fetch(origin + path, { redirect: "manual", signal: AbortSignal.timeout(10_000), ...options });
   const exchange = (key, headers = {}) => request("/exchange", {
@@ -113,4 +124,61 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
   assert.equal((await request(route, { headers })).status, 200, "其他标签页的独立会话仍然有效");
   login.close();
   await assert.rejects(request(route, { headers }), TypeError);
+  login = createLogin();
+  await open();
+  assert.equal(launch.origin, origin);
+  assert.equal((await request(route, { headers })).status, 401);
+});
+
+test("连接器授权元数据端点使按钮常驻并指向免密管理页", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-connector-oauth-"));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const config = await loadConfig({
+    pluginRoot: dirname(dirname(fileURLToPath(import.meta.url))),
+    env: { BRIDGE_DATA_DIR: join(root, "data"), BRIDGE_PORT: String(await unusedPort()) },
+  });
+  const port = await unusedPort();
+  const login = createManagementLogin(config, { port, launchBrowser: async () => {} });
+  t.after(() => login.close());
+  await login.listen();
+  const origin = `http://127.0.0.1:${port}`;
+  // 宿主探测收到 401 与受保护资源元数据，连接器进入待授权，按钮常驻。
+  const probe = await fetch(origin + "/mcp", { method: "POST" });
+  assert.equal(probe.status, 401);
+  assert.match(probe.headers.get("www-authenticate"), /resource_metadata="[^"]+oauth-protected-resource"$/);
+  const resource = await (await fetch(origin + "/.well-known/oauth-protected-resource")).json();
+  assert.equal(resource.resource, origin + "/mcp");
+  assert.deepEqual(resource.authorization_servers, [origin]);
+  // 宿主按 RFC 9728 以资源路径后缀构造元数据地址，后缀拼法必须同答。
+  const suffixed = await fetch(origin + "/.well-known/oauth-protected-resource/mcp");
+  assert.equal(suffixed.status, 200);
+  assert.equal((await suffixed.json()).resource, origin + "/mcp");
+  const serverMeta = await (await fetch(origin + "/.well-known/oauth-authorization-server")).json();
+  assert.equal(serverMeta.authorization_endpoint, origin + "/oauth/authorize");
+  assert.equal(serverMeta.token_endpoint, origin + "/oauth/token");
+  // 授权端点只重定向到免密落地页，不在浏览器内完成回调。
+  const redirect = new URL(origin + "/callback");
+  redirect.port = String(await unusedPort());
+  const authorize = await fetch(serverMeta.authorization_endpoint + `?redirect_uri=${encodeURIComponent(redirect)}&state=abc`, { redirect: "manual" });
+  assert.equal(authorize.status, 302);
+  const location = new URL(authorize.headers.get("location"));
+  assert.equal(location.origin, origin);
+  assert.equal(location.pathname, "/open");
+  assert.match(location.hash, /^#[a-f0-9]{64}$/);
+  // 外部重定向地址被拒绝，防止票据落地页被导向外部站点。
+  const external = await fetch(serverMeta.authorization_endpoint + "?redirect_uri=https://example.com/cb", { redirect: "manual" });
+  assert.equal(external.status, 400);
+  // 令牌端点按无效授权统一拒绝，连接器维持待授权。
+  const token = await fetch(serverMeta.token_endpoint, { method: "POST", body: "grant_type=authorization_code" });
+  assert.equal(token.status, 400);
+  assert.equal((await token.json()).error, "invalid_grant");
+  // 动态注册响应回显 redirect_uris，宿主 SDK 据此完成客户端登记。
+  const registered = await fetch(serverMeta.registration_endpoint, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ redirect_uris: [redirect.href], token_endpoint_auth_method: "none" }),
+  });
+  assert.equal(registered.status, 201);
+  const client = await registered.json();
+  assert.match(client.client_id, /^qoder-connector-[a-f0-9]{16}$/);
+  assert.deepEqual(client.redirect_uris, [redirect.href]);
 });

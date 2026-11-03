@@ -5,9 +5,9 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { loadConfig } from "../bridge/config.mjs";
-import { processIdentity } from "../bridge/bridge-process.mjs";
-import { PANEL_REVISION } from "../bridge/management-panel.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { processIdentity } from "../server/supervisor.mjs";
+import { PANEL_REVISION } from "../server/management-panel.mjs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 

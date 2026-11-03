@@ -9,11 +9,11 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../bridge/config.mjs";
-import { resolveCoreBinaryPath } from "../bridge/core-runtime.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { resolveCoreBinaryPath } from "../server/core-runtime.mjs";
 import { copyTestCore, nativeCoreSkip, testCorePath } from "./helpers/native-core.mjs";
-import { ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../bridge/bridge-process.mjs";
-import { queryPosixSupervisor } from "../bridge/posix-supervisor.mjs";
+import { ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../server/supervisor.mjs";
+import { queryPosixSupervisor } from "../server/posix-supervisor.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const native = {
@@ -78,10 +78,10 @@ function assertContained(directory, path) {
 
 // 只复制本次运行需要的源码及静态资源；不复制正式数据、其他平台核心或整个仓库。
 async function copyRuntime(root) {
-  const modules = (await readdir(join(pluginRoot, "bridge")))
-    .filter((name) => name.endsWith(".mjs")).map((name) => join("bridge", name));
-  for (const path of [...modules, "scripts/mcp-server.mjs", "scripts/proxy-supervisor.mjs",
-    "bridge/bin/platforms.json", "bridge/panel/management.upstream.html"]) {
+  const modules = (await readdir(join(pluginRoot, "server")))
+    .filter((name) => name.endsWith(".mjs")).map((name) => join("server", name));
+  for (const path of [...modules, "scripts/proxy-supervisor.mjs",
+    "server/bin/platforms.json", "server/panel/management.upstream.html"]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await copyFile(join(pluginRoot, path), join(root, path));
   }
@@ -127,7 +127,7 @@ async function fixture(t, { cached = false } = {}) {
 }
 
 async function mcpClient(fixture) {
-  const child = spawn(process.execPath, [join(fixture.root, "scripts", "mcp-server.mjs")], {
+  const child = spawn(process.execPath, [join(fixture.root, "server", "mcp-server.mjs")], {
     env: fixture.env, cwd: fixture.config.dataDir, stdio: ["pipe", "pipe", "pipe"],
   });
   const lines = createInterface({ input: child.stdout });

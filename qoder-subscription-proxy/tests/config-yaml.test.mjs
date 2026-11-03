@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendConfigBlock, parseConfigYaml, replaceConfigScalar } from "../bridge/config-yaml.mjs";
-import { ensureStreamingDefaults } from "../bridge/config.mjs";
-import { disablePanelAutoUpdate } from "../bridge/management-panel.mjs";
+import { appendConfigBlock, parseConfigYaml, replaceConfigScalar } from "../server/config-yaml.mjs";
+import { disablePanelAutoUpdate } from "../server/management-panel.mjs";
 
 test("核心保存的裸通配符和 |- 文字块在读取及插入相邻字段后保持语义", () => {
   const text = [
@@ -32,37 +31,4 @@ test("定点管理配置支持引号键、原行尾注释和 CRLF，并拒绝集
   assert.throws(() => replaceConfigScalar("management:\n  secret-key: |-\n    first\n", path, to));
   assert.throws(() => replaceConfigScalar("management:\n  secret-key:\n    - bad\n", path, to));
   assert.throws(() => replaceConfigScalar("management: {}", path, to));
-});
-
-test("v8 旧路径的显式重试、冷却、流式整段和 Codex 配置保留优先级", () => {
-  const original = [
-    "request-retry: 4", "max-retry-interval: 0", "transient-error-cooldown-seconds: -1",
-    "streaming:", "  keepalive-seconds: 45", "  custom-setting: true",
-    "oauth:", "  providers:", "    codex:", "      stream-bootstrap-timeout: 30s",
-    "codex:", "  stream-bootstrap-buffering: false", "",
-  ].join("\n");
-  const updated = ensureStreamingDefaults(original);
-  const { values, nodes } = parseConfigYaml(updated);
-  assert.equal(values.get('["request-retry"]'), 4);
-  assert.equal(values.get('["max-retry-interval"]'), 0);
-  assert.equal(values.get('["streaming","bootstrap-retries"]'), 1);
-  assert.equal(values.get('["streaming","keepalive-seconds"]'), 45);
-  for (const path of ['["routing"]', '["requests","streaming"]', '["upstream","codex"]']) assert.equal(nodes.has(path), false);
-  assert.equal(ensureStreamingDefaults(updated), updated);
-  // 旧段已被新段遮蔽时，按上游优先级只向当前段补项。
-  const mixed = ensureStreamingDefaults(original + "requests:\n  streaming:\n    keepalive-seconds: 30\n");
-  assert.equal(parseConfigYaml(mixed).values.get('["requests","streaming","bootstrap-retries"]'), 1);
-});
-
-test("升级只改生效的重试字段，补齐缺失值，并保留空整数的行末注释", () => {
-  const original = [
-    "request-retry: 7 # legacy shadowed", "routing:", "  retry:", "    request-retry:   # keep",
-    "    max-retry-interval: ~ # keep", "streaming:", "  bootstrap-retries: 8 # shadowed",
-    "requests:", "  streaming:", "    bootstrap-retries: null", "    keepalive-seconds: 33", "",
-  ].join("\r\n");
-  const expected = original.replace("retry:   #", "retry: 3   #").replace("interval: ~", "interval: 5")
-    .replace("\r\nstreaming:", "\r\n  cooldown:\r\n    transient-error-cooldown-seconds: 3\r\nstreaming:")
-    .replace("retries: null", "retries: 1");
-  assert.equal(ensureStreamingDefaults(original, { retryUpgrade: true }), expected);
-  assert.equal(ensureStreamingDefaults(expected, { retryUpgrade: true }), expected);
 });

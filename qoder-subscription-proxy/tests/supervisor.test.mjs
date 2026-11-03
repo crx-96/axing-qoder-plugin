@@ -9,17 +9,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { PLUGIN_VERSION, loadConfig, ensureStreamingDefaults, renderConfigYaml } from "../bridge/config.mjs";
-import { ensureApprovalRouting } from "../bridge/approval-routing.mjs";
-import { requestLocal } from "../bridge/local-http.mjs";
+import { PLUGIN_VERSION, loadConfig, renderConfigYaml } from "../server/config.mjs";
+import { ensureApprovalRouting } from "../server/approval-routing.mjs";
+import { requestLocal } from "../server/local-http.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
   probeBridge, sameProcess, processIdentity, withLifecycleLock, ensureDataDir,
   ensureRunning, getStatus, stopBridge, startWatchdog,
-} from "../bridge/bridge-process.mjs";
+} from "../server/supervisor.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const processModuleUrl = new URL("../bridge/bridge-process.mjs", import.meta.url).href;
+const processModuleUrl = new URL("../server/supervisor.mjs", import.meta.url).href;
 const execFileAsync = promisify(execFile);
 const windowsOnly = process.platform !== "win32" ? "仅在 Windows 验证进程身份与隔离 exe" : nativeCoreSkip;
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -32,7 +32,7 @@ function testConfig(directory, port = 1) {
     dataDir: directory, configPath: join(directory, "config.yaml"), authDir: join(directory, "auths"),
     binPath: join(directory, "no-binary-should-be-started.exe"), pidPath: join(directory, "bridge.pid"),
     lockPath: join(directory, "bridge.lock"), pausedPath: join(directory, "bridge.paused"),
-    imagesDir: join(directory, "generated"), endpoint: `http://127.0.0.1:${port}/v1`,
+    endpoint: `http://127.0.0.1:${port}/v1`,
     managementUrl: `http://127.0.0.1:${port}/management.html`,
   };
 }
@@ -158,7 +158,7 @@ async function stopOwnNodeChild(child) {
 }
 
 async function mcpClient(t, env, beforeCleanup, { initialize = true } = {}) {
-  const child = spawn(process.execPath, [join(pluginRoot, "scripts", "mcp-server.mjs")], {
+  const child = spawn(process.execPath, [join(pluginRoot, "server", "mcp-server.mjs")], {
     env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   });
   const waiters = new Map();
@@ -361,7 +361,7 @@ test("ensureDataDir 并发发布完整配置并保留既有内容", async (t) =>
   const results = await Promise.allSettled(Array.from({ length: 12 }, () => ensureDataDir(config)));
   const errors = results.filter((entry) => entry.status === "rejected").map((entry) => entry.reason.message);
   assert.equal(errors.length, 0, `并发读取不得观察到空/半份配置：${errors.join("; ")}`);
-  assert.equal(await readFile(config.configPath, "utf8"), ensureStreamingDefaults(ensureApprovalRouting(renderConfigYaml(config))));
+  assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(renderConfigYaml(config)));
   const marker = "# user-owned marker\n";
   await writeFile(config.configPath, marker + renderConfigYaml(config));
   await ensureDataDir(config);
@@ -385,18 +385,10 @@ test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建�
   const identity = await processIdentity(pid.pid);
   assert.equal(sameProcess(pid, identity, config), true);
   const marker = join(config.dataDir, "retry-policy-version");
-  assert.equal((await readFile(marker, "utf8")).trim(), PLUGIN_VERSION);
-  const retryEndpoint = "/v0/management/request-retry";
-  const edited = await requestLocal(config, retryEndpoint, { management: true, method: "PUT", body: { value: 0 } });
-  assert.equal(edited.status, 200);
-  await writeFile(marker, "0.2.9\n");
+  assert.equal(await readFile(marker, "utf8").catch(() => ""), "", "不再写入重试策略版本标记");
   const reused = await ensureRunning(config);
   assert.equal(reused.started, false);
   assert.equal((await readPid(config)).pid, pid.pid);
-  await waitUntil(async () => {
-    const result = await requestLocal(config, retryEndpoint, { management: true });
-    return result.status === 200 && JSON.parse(result.text)["request-retry"] === 3;
-  });
   const status = await getStatus(config);
   assert.equal(status.alive, true);
   assert.equal(status.ready, true);
@@ -651,78 +643,82 @@ test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再
   assert.equal((await probeBridge(config)).state, "offline");
 });
 
-test("补齐缺失的流式字段保留自定义项、四空格、注释与 CRLF", async (t) => {
+test("冷启动保留 BOM、CRLF 与用户自管请求参数，只补审批规则", async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
   const legacy = "\uFEFF" + renderConfigYaml(config) + [
     "routing:", "    retry:", "        request-retry: 0 # 旧核心回写",
-    "        max-retry-interval: 30", "requests:", "    proxy-url: direct", "",
+    "requests:", "    proxy-url: direct", "",
   ].join("\n");
   await writeFile(config.configPath, legacy.replaceAll("\n", "\r\n"));
   await ensureDataDir(config);
   const updated = await readFile(config.configPath, "utf8");
   assert.ok(updated.startsWith("\uFEFF"));
   assert.doesNotMatch(updated, /(?<!\r)\n/);
-  for (const line of ["        request-retry: 0 # 旧核心回写", "        max-retry-interval: 30",
-    "    proxy-url: direct", "keepalive-seconds: 15", "bootstrap-retries: 1", "send-keepalive-before-ft: false",
-    "stream-bootstrap-buffering: true", 'stream-bootstrap-timeout: "10s"']) assert.ok(updated.includes(line), line);
-  const custom = updated.replace("keepalive-seconds: 15", "keepalive-seconds: 45");
-  await writeFile(config.configPath, custom);
-  await ensureDataDir(config);
-  assert.equal(await readFile(config.configPath, "utf8"), custom);
-  // 已有的显式禁用冷却、重试轮次与流式心跳由用户管理。
-  const tuned = legacy.replace("    retry:", "    cooldown:\n        transient-error-cooldown-seconds: -1\n    retry:")
-    .replace("    proxy-url: direct", "    streaming:\n        keepalive-seconds: 45\n    proxy-url: direct");
-  const tunedResult = ensureStreamingDefaults(tuned);
-  assert.match(tunedResult, /request-retry: 0 #/);
-  assert.match(tunedResult, /transient-error-cooldown-seconds: -1/);
-  assert.match(tunedResult, /keepalive-seconds: 45/);
-  const timeoutOnly = legacy + 'upstream:\n    codex:\n        stream-bootstrap-timeout: "20s"\n';
-  assert.match(ensureStreamingDefaults(timeoutOnly), /request-retry: 0 #/);
-  const broken = legacy.replace("requests:\n    proxy-url: direct", "upstream: []");
-  await writeFile(config.configPath, broken);
-  await assert.rejects(ensureDataDir(config), /upstream\.codex/);
-  assert.equal(await readFile(config.configPath, "utf8"), broken);
+  for (const line of ["        request-retry: 0 # 旧核心回写", "    proxy-url: direct"]) assert.ok(updated.includes(line), line);
+  assert.ok(updated.includes("codex-auto-review"), "审批兼容规则仍随冷启动补齐");
+  const broken = legacy.replace("allow-remote: false", "allow-remote: true");
+  await writeFile(config.configPath, broken.replaceAll("\n", "\r\n"));
+  await assert.rejects(ensureDataDir(config), /allow-remote/);
+  assert.equal(await readFile(config.configPath, "utf8"), broken.replaceAll("\n", "\r\n"));
 });
 
-test("升级仅覆盖四项重试策略；同版重启、旧版会话和迁移失败都保护本地配置", async (t) => {
+test("Windows 配置暂不允许替换时等待释放，随后保留并发编辑", {
+  skip: process.platform !== "win32", timeout: 15000,
+}, async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
-  const marker = join(config.dataDir, "retry-policy-version");
-  await writeFile(config.pausedPath, "paused");
+  const original = renderConfigYaml(config);
+  for (const editWhileLocked of [false, true]) {
+    await writeFile(config.configPath, original);
+    const holder = spawn(powerShell, ["-NoProfile", "-NonInteractive", "-Command",
+      "$ErrorActionPreference='Stop'; $f=[IO.File]::Open($env:QODER_TEST_CONFIG,'Open','ReadWrite','ReadWrite'); " +
+      "try {[Console]::WriteLine('locked'); if ([Console]::ReadLine() -eq 'edit') {" +
+      "$f.Position=$f.Length; $f.WriteByte(10); $f.Flush()}} finally {$f.Dispose()}"],
+    { env: { ...process.env, QODER_TEST_CONFIG: config.configPath }, windowsHide: true, stdio: ["pipe", "pipe", "inherit"] });
+    const exited = once(holder, "exit");
+    try {
+      assert.match(String((await once(holder.stdout, "data"))[0]), /locked/);
+      const result = ensureDataDir(config).then(() => null, error => error);
+      await waitUntil(async () => (await readdir(config.dataDir)).some(name => name.endsWith(".tmp")), 3000);
+      holder.stdin.end(editWhileLocked ? "edit\n" : "release\n");
+      const error = await result;
+      if (editWhileLocked) {
+        assert.match(error?.message ?? "", /本地配置已变化/);
+        assert.equal(await readFile(config.configPath, "utf8"), original + "\n");
+      } else {
+        assert.equal(error, null);
+        assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(original));
+      }
+      assert.ok(!(await readdir(config.dataDir)).some(name => name.endsWith(".tmp")));
+    } finally {
+      holder.stdin.end();
+      await exited;
+    }
+  }
+});
+
+test("升级与冷启动不再改写请求参数；无效配置仍保护本地凭据", async (t) => {
+  const config = testConfig(await directoryFixture(t), await unusedPort());
   const original = ("\uFEFF" + renderConfigYaml(config) + [
-    "routing:", "  retry:", "    request-retry: 0 # original", "    max-retry-interval: 30",
-    "    max-retry-credentials: 2", "transient-error-cooldown-seconds: -1",
-    "streaming:", "  keepalive-seconds: 42", "  bootstrap-retries: 8", "  send-keepalive-before-ft: true",
-    "upstream:", "  codex:", '    stream-bootstrap-timeout: "42s"',
-    "api-keys:", "  codex:", "    - name: local", "      request-retry: 7", "",
+    "routing:", "  retry:", "    request-retry: 7 # 用户自管", "    max-retry-interval: 5",
+    "streaming:", "  keepalive-seconds: 42", "",
   ].join("\n")).replaceAll("\n", "\r\n");
-  const expected = original.replace("0 # original", "3 # original").replace("interval: 30", "interval: 5")
-    .replace("seconds: -1", "seconds: 3").replace("retries: 8", "retries: 1");
   await writeFile(config.configPath, original);
   await mkdir(config.authDir);
   const authFile = join(config.authDir, "account.json");
   const secrets = join(config.dataDir, "launcher-secrets.json");
   await writeFile(authFile, "untouched account");
   await writeFile(secrets, "untouched local keys");
-  const start = () => ensureRunning(config, { automatic: true });
-  assert.equal((await start()).ready, false);
-  assert.equal(await readFile(config.configPath, "utf8"), expected);
-  assert.equal((await readFile(marker, "utf8")).trim(), PLUGIN_VERSION);
-  await writeFile(config.configPath, original);
-  await start();
-  assert.equal(await readFile(config.configPath, "utf8"), original);
-  await writeFile(marker, "10.0.0\n");
-  await start();
-  assert.equal(await readFile(config.configPath, "utf8"), original);
-  assert.equal(await readFile(marker, "utf8"), "10.0.0\n");
-  await writeFile(marker, "0.2.9\n");
-  const invalid = original.replace("request-retry: 0 # original", "request-retry: []");
+  await ensureDataDir(config);
+  const updated = await readFile(config.configPath, "utf8");
+  assert.ok(updated.includes("request-retry: 7 # 用户自管"));
+  assert.ok(updated.includes("keepalive-seconds: 42"));
+  assert.ok(updated.includes("codex-auto-review"));
+  await ensureDataDir(config);
+  assert.equal(await readFile(config.configPath, "utf8"), updated, "重复冷启动必须幂等");
+  const invalid = original.replace("allow-remote: false", "allow-remote: true");
   await writeFile(config.configPath, invalid);
-  await assert.rejects(start(), /结构不受支持/);
+  await assert.rejects(ensureDataDir(config), /allow-remote/);
   assert.equal(await readFile(config.configPath, "utf8"), invalid);
-  assert.equal(await readFile(marker, "utf8"), "0.2.9\n");
-  await writeFile(config.configPath, original);
-  await start();
-  assert.equal(await readFile(config.configPath, "utf8"), expected);
   assert.equal(await readFile(authFile, "utf8"), "untouched account");
   assert.equal(await readFile(secrets, "utf8"), "untouched local keys");
 });
@@ -759,8 +755,8 @@ test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断�
   const config = testConfig(root, await unusedPort());
   const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
   const scenarios = [
-    ["gpt-ok", 200, 1], ["gpt-early-eof", 408, 1], ["gpt-mid-eof", 200, 1],
-    ["gpt-http-overload", 200, 4], ["gpt-stream-overload", 200, 2], ["gpt-persistent-overload", 503, 4],
+    ["gpt-ok", 200, 1], ["gpt-early-eof", 200, 1], ["gpt-mid-eof", 200, 1],
+    ["gpt-http-overload", 503, 1], ["gpt-stream-overload", 200, 1], ["gpt-persistent-overload", 503, 1],
   ];
   await ensureDataDir(config);
   const defaults = await readFile(config.configPath, "utf8");
@@ -788,8 +784,8 @@ test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断�
         if (model.endsWith("eof")) {
           assert.match(body, /request_timeout/);
           if (model === "gpt-mid-eof") assert.match(body, /response.reasoning_summary_text.delta/);
-          else assert.doesNotMatch(body, /response.created/);
-        } else if (status === 503) {
+          else assert.match(body, /response.created/);
+        } else if (status === 503 || model === "gpt-stream-overload") {
           assert.match(body, /server_is_overloaded/);
         } else {
           assert.match(body, /"type":"response.completed"/);

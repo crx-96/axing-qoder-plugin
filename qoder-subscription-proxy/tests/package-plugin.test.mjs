@@ -8,7 +8,7 @@ import { inflateRawSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const script = path.join(root, 'scripts/package-plugin.mjs');
-const expected = ['.mcp.json', ...readFileSync(path.join(root, 'scripts/distribution-files.txt'), 'utf8').trimEnd().split(/\r?\n/)].sort();
+const expected = ['mcp.json', ...readFileSync(path.join(root, 'scripts/distribution-files.txt'), 'utf8').trimEnd().split(/\r?\n/)].sort();
 
 function temporary(t) {
   const directory = mkdtempSync(path.join(path.resolve(root, '..'), '.插件 打包测试 '));
@@ -92,11 +92,11 @@ for (const platform of ['windows', 'posix']) {
     const entries = unpack(target);
     assert.deepEqual([...entries.keys()], expected);
     for (const [name, data] of entries) {
-      const source = name === '.mcp.json' && platform === 'posix' ? '.mcp.posix.json' : name;
+      const source = name === 'mcp.json' && platform === 'posix' ? 'mcp.posix.json' : name;
       assert.deepEqual(data, readFileSync(path.join(root, source)), name);
     }
     const manifest = JSON.parse(entries.get('.qoder-plugin/plugin.json'));
-    assert.match(entries.get(path.posix.join(manifest.commands, 'open-management.md')).toString(), /bridge_open_management/);
+    assert.equal(manifest.commands, undefined, '1.0.0 起不再随包斜杠指令');
     // 每个随包运行模块的本地导入都必须同时在 ZIP 内。
     for (const [name, bytes] of entries) {
       if (!name.endsWith('.mjs')) continue;
@@ -104,7 +104,7 @@ for (const platform of ['windows', 'posix']) {
         assert.ok(entries.has(path.posix.join(path.posix.dirname(name), match[1])), name + ': ' + match[1]);
       }
     }
-    const config = JSON.parse(entries.get('.mcp.json')).mcpServers['qoder-subscription-proxy'];
+    const config = JSON.parse(entries.get('mcp.json')).mcpServers['qoder-subscription-proxy'];
     assert.equal(config.command, platform === 'posix' ? '/bin/sh' : 'powershell.exe');
     assert(config.args.some(arg => arg.endsWith(platform === 'posix' ? '/scripts/start-mcp.sh' : '/scripts/start-mcp.ps1')));
     const again = path.join(directory, '再次.zip');
@@ -116,9 +116,9 @@ for (const platform of ['windows', 'posix']) {
 test('白名单排除测试、数据、凭据、日志、核心及未知脚本', t => {
   const directory = temporary(t);
   const source = fixture(directory);
-  for (const name of ['tests/private.test.mjs', 'bridge/data/token.json', 'bridge/bin/core.exe',
-    'bridge/bin/core.tar.gz', 'bridge/panel/secret.json', 'bridge/debug.log', '.env',
-    'scripts/prepare-test-core.mjs', 'scripts/unknown.mjs', 'bridge/local-debug-only.mjs', 'commands/private.md']) {
+  for (const name of ['tests/private.test.mjs', 'server/data/token.json', 'server/bin/core.exe',
+    'server/bin/core.tar.gz', 'server/panel/secret.json', 'server/debug.log', '.env',
+    'scripts/prepare-test-core.mjs', 'scripts/unknown.mjs', 'server/local-debug-only.mjs', 'commands/private.md']) {
     const filename = path.join(source, name);
     mkdirSync(path.dirname(filename), { recursive: true });
     writeFileSync(filename, 'must not be packaged');
@@ -150,7 +150,7 @@ test('拒绝覆盖、坏参数、缺失父目录及插件内输出', t => {
 test('缺失源文件失败不留下 ZIP', t => {
   const directory = temporary(t);
   const source = fixture(directory);
-  rmSync(path.join(source, 'bridge/bin/LICENSE'));
+  rmSync(path.join(source, 'server/bin/LICENSE'));
   const target = path.join(directory, '失败.zip');
   assert.notEqual(run(['posix', target], directory, path.join(source, 'scripts/package-plugin.mjs')).status, 0);
   assert(!existsSync(target));
@@ -169,8 +169,8 @@ test('拒绝源祖先链接、白名单目录链接和已有输出链接', t => 
   const target = path.join(directory, '链接.zip');
   assert.notEqual(run(['windows', target], directory, path.join(alias, 'scripts/package-plugin.mjs')).status, 0);
   assert(!existsSync(target));
-  const bridge = path.join(source, 'bridge');
-  const moved = path.join(directory, 'bridge');
+  const bridge = path.join(source, 'server');
+  const moved = path.join(directory, 'server');
   mkdirSync(moved);
   rmSync(bridge, { recursive: true });
   symlinkSync(moved, bridge, process.platform === 'win32' ? 'junction' : 'dir');

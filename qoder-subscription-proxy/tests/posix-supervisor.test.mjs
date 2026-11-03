@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   CONTROL_MESSAGE_LIMIT, createPosixControlMessage, queryPosixSupervisor, spawnPosixSupervisor,
-} from "../bridge/posix-supervisor.mjs";
+} from "../server/posix-supervisor.mjs";
 
 const supervisorUrl = new URL("../scripts/proxy-supervisor.mjs", import.meta.url).href;
 const unixOnly = process.platform === "win32" ? "Unix 信号处理与文件权限须在 macOS/Linux 验证" : false;

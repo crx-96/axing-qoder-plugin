@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import vm from "node:vm";
 import { execFileSync } from "node:child_process";
-import { patchManagementPanel, validateAntigravityCallback, disablePanelAutoUpdate, prepareManagementPanel } from "../bridge/management-panel.mjs";
-import { renderConfigYaml } from "../bridge/config.mjs";
+import { patchManagementPanel, validateAntigravityCallback, disablePanelAutoUpdate, prepareManagementPanel } from "../server/management-panel.mjs";
+import { renderConfigYaml } from "../server/config.mjs";
 
-const upstream = await readFile(new URL("../bridge/panel/management.upstream.html", import.meta.url));
+const upstream = await readFile(new URL("../server/panel/management.upstream.html", import.meta.url));
 const patched = patchManagementPanel(upstream);
 const state = "test-state-123";
 const callback = `http://localhost:51121/oauth-callback?code=sample-code&state=${state}`;
@@ -79,8 +79,8 @@ test("未知或已补丁资产不能重复修改，生成的脚本保持有效�
 test("Windows Git 换行转换开启后检出管理页仍保留原始字节和固定哈希", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "subscription-panel-git-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const assetPath = "qoder-subscription-proxy/bridge/panel/management.upstream.html";
-  await mkdir(join(directory, "qoder-subscription-proxy/bridge/panel"), { recursive: true });
+  const assetPath = "qoder-subscription-proxy/server/panel/management.upstream.html";
+  await mkdir(join(directory, "qoder-subscription-proxy/server/panel"), { recursive: true });
   await writeFile(join(directory, ".gitattributes"), await readFile(new URL("../../.gitattributes", import.meta.url)));
   await writeFile(join(directory, assetPath), upstream);
   const git = (...args) => execFileSync("git", args, { cwd: directory, stdio: "pipe" });

@@ -6,8 +6,8 @@
     {
       "name": "qoder-subscription-proxy",
       "source": "./qoder-subscription-proxy",
-      "version": "0.2.10",
-      "description": "qoder订阅代理：本机订阅授权、模型 API 与图片生成，随 MCP 生命周期托管。",
+      "version": "1.0.0",
+      "description": "qoder订阅代理：本机订阅授权、模型 API 与代理管理，随 MCP 生命周期托管。",
       "displayName": "qoder订阅代理",
       "displayName_i18n": { "zh-CN": "qoder订阅代理" },
       "description_i18n": { "zh-CN": "基于 CLIProxyAPI 的 Windows、macOS、Linux 本地订阅代理；macOS/Linux 使用 POSIX 本地市场入口。" },

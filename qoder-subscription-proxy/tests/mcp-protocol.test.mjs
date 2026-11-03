@@ -3,11 +3,11 @@ import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
-import { PLUGIN_VERSION } from "../bridge/config.mjs";
-import { handleMessage, runMcp } from "../bridge/mcp-protocol.mjs";
+import { PLUGIN_VERSION } from "../server/config.mjs";
+import { handleMessage, runMcp } from "../server/mcp-protocol.mjs";
 
 const config = { apiKey: "private-api-value", mgmtKey: "private-management-value" };
-const imageResult = { content: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] };
+const startResult = { started: true, ready: true, reason: "已启动" };
 
 function deferred() {
   let resolve;
@@ -19,9 +19,8 @@ function deferred() {
 function handlers(overrides = {}) {
   return {
     getStatus: async () => ({ ready: true }),
-    ensureRunning: async () => ({ started: true, ready: true, reason: "已启动" }),
+    ensureRunning: async () => startResult,
     stopBridge: async () => ({ stopped: true, reason: "已停止" }),
-    generateImage: async () => imageResult,
     ...overrides,
   };
 }
@@ -30,7 +29,7 @@ function request(id, method = "ping", params) {
   return { jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) };
 }
 
-function call(id, name = "bridge_generate_image", args = { prompt: "一只猫" }, meta) {
+function call(id, name = "bridge_start", args = {}, meta) {
   return request(id, "tools/call", { name, arguments: args, ...(meta === undefined ? {} : { _meta: meta }) });
 }
 
@@ -88,11 +87,11 @@ function harness(t, overrides = {}, options = {}) {
 test("输入 destroy 无 error 也会收尾并取消在途调用", { timeout: 3000 }, async (t) => {
   let signal;
   const entered = deferred();
-  const h = harness(t, { generateImage: async (_config, _args, options) => {
+  const h = harness(t, { ensureRunning: async (_config, options) => {
     signal = options.signal;
     entered.resolve();
     await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
-    return imageResult;
+    return startResult;
   } });
   h.send(call(1));
   await entered.promise;
@@ -146,7 +145,7 @@ test("本地配置准备完成后initialize成功，之前拒绝工具且不重�
   ready.resolve();
   assert.ok((await h.response(1)).result.serverInfo);
   h.send(request(5, "tools/list"));
-  assert.equal((await h.response(5)).result.tools.length, 5);
+  assert.equal((await h.response(5)).result.tools.length, 6);
   assert.equal(prepared, 1);
 });
 
@@ -203,100 +202,23 @@ test("initialize 协商已知版本，未知版本不回显，服务版本来自
   assert.equal((await handleMessage(request(1, "initialize", {}), { config })).error.code, -32602);
 });
 
-test("初始化与生图工具共同声明 GPT/Gemini 模型映射、免预查询、用户指定及能力边界", async () => {
+test("工具发现公布管理与生图工具，旧生图调用按未知工具拒绝", async () => {
   const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18" }), { config });
-  const listed = await handleMessage(request(2, "tools/list"), { config });
-  const guidance = initialized.result.instructions;
-  assert.equal(typeof guidance, "string");
-  const tool = listed.result.tools.find(tool => tool.name === "bridge_generate_image");
-  assert.ok(tool.description.startsWith(guidance));
-  for (const expected of [
-    /当前聊天主模型/, /Codex 订阅/, /未明确指定/, /优先使用本插件的 bridge_generate_image/,
-    /GPT 会话显式传入 model=gpt-image-2\.5/, /Gemini 会话显式传入 model=gemini-3\.1-flash-image/,
-    /Gemini 会话不能省略 model/, /用户明确指定的工具或通道优先/, /明确指定的图片模型优先/,
-    /主模型既不是 GPT 也不是 Gemini 时沿用宿主生图工具/, /不按待生成的图片模型判断/,
-    /仅适用于文生图/, /参考图编辑不受支持/, /不擅自换工具、换模型或重试/,
-    /遵守宿主工具权限/, /不改变聊天主模型/,
-  ]) assert.match(guidance, expected);
-  // 指引必须主动免除生图前的状态/模型核实，否则调用方会反复预查询而拖慢出图。
-  for (const expected of [
-    /主模型对自身是已知的/, /生图前不需要调用 bridge_status/, /查询模型列表/, /直接提交生图调用/,
-  ]) assert.match(guidance, expected);
-  assert.doesNotMatch(guidance, /无法确认当前聊天主模型/);
-  assert.match(tool.inputSchema.properties.model.description, /Gemini 会话必须传 gemini-3\.1-flash-image/);
-  assert.match(tool.inputSchema.properties.model.description, /省略仍为 gpt-image-2\.5/);
-  const status = listed.result.tools.find(tool => tool.name === "bridge_status");
-  assert.match(status.description, /models\.imageModels/);
-  assert.match(status.description, /含 Gemini 原生模型/);
-  assert.match(status.description, /生图前无需调用本工具确认主模型或图片模型/);
-});
-
-test("列出五个工具，管理入口无参数且生图仍遵守单图订阅约束", async () => {
-  const response = await handleMessage(request(1, "tools/list"), { config });
-  const tools = response.result.tools;
-  assert.deepEqual(tools.map((tool) => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_generate_image", "bridge_open_management"]);
-  for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false);
-  const image = tools[3];
-  assert.deepEqual(image.inputSchema.required, ["prompt"]);
-  assert.equal(image.inputSchema.properties.prompt.maxLength, 32_000);
-  assert.equal(image.inputSchema.properties.model.default, "gpt-image-2.5");
-  assert.equal(image.inputSchema.properties.output_format.default, "png");
-  assert.match(image.description, /已授权订阅/);
-  assert.match(image.description, /一张图片/);
-  assert.match(image.description, /本 MCP 不自动降级或重试/);
-  assert.match(image.description, /核心仍可能按配置轮换凭据和重试/);
-  assert.match(image.description, /单次调用不保证上游只执行一次/);
-  assert.match(image.description, /可能消耗订阅额度或产生费用/);
-  const missing = await handleMessage(call(2, "bridge_login", {}), { config }, { handlers: handlers() });
-  assert.equal(missing.error.code, -32602);
-});
-
-test("全部工具参数在调用依赖前严格校验，不接受未知参数、路径或 URL 输入字段", async () => {
-  let invoked = 0;
-  const injected = handlers({ generateImage: async () => { invoked++; return imageResult; } });
-  const invalid = [
-    null, [], "prompt", {}, { prompt: "" }, { prompt: " \n\t" }, { prompt: 3 },
-    { prompt: "a".repeat(32_001) }, { prompt: "猫", model: 8 }, { prompt: "猫", model: "" },
-    { prompt: "猫", model: "m".repeat(201) }, { prompt: "猫", size: "1x1" },
-    { prompt: "猫", quality: "ultra" }, { prompt: "猫", background: "none" },
-    { prompt: "猫", output_format: "svg" }, { prompt: "猫", path: "C:\\secret.png" },
-    { prompt: "猫", url: "https://example.test/image.png" }, { prompt: "猫", n: 2 },
-    JSON.parse('{"prompt":"猫","__proto__":{"admin":true}}'),
-  ];
-  for (const args of invalid) {
-    const response = await handleMessage(call(1, "bridge_generate_image", args), { config }, { handlers: injected });
-    assert.equal(response.error?.code, -32602, JSON.stringify(args).slice(0, 80));
-  }
-  assert.equal(invoked, 0);
-  for (const name of ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management"]) {
+  assert.equal(initialized.result.instructions, undefined);
+  const { result } = await handleMessage(request(2, "tools/list"), { config });
+  assert.deepEqual(result.tools.map(tool => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management", "image_gen_gpt", "image_gen_gemini"]);
+  for (const tool of result.tools.filter((entry) => entry.name.startsWith("bridge_"))) {
+    assert.deepEqual(tool.inputSchema, { type: "object", properties: {}, additionalProperties: false });
     for (const args of [null, [], { force: true }]) {
-      const response = await handleMessage(call(2, name, args), { config }, { handlers: injected });
-      assert.equal(response.error.code, -32602);
+      assert.equal((await handleMessage(call(3, tool.name, args), { config })).error.code, -32602);
     }
   }
-});
-
-test("图片默认值、Unicode 长度边界与全部枚举选项到达同一 handler", async () => {
-  const seen = [];
-  const signal = new AbortController().signal;
-  const injected = handlers({ generateImage: async (...args) => { seen.push(args); return imageResult; } });
-  const response = await handleMessage(call(1), { config }, { handlers: injected, signal });
-  assert.equal(response.result, imageResult);
-  assert.equal(seen[0][0], config);
-  assert.deepEqual(seen[0][1], { prompt: "一只猫", model: "gpt-image-2.5", output_format: "png" });
-  assert.equal(seen[0][2].signal, signal);
-  await handleMessage(call(2, "bridge_generate_image", { prompt: "猫", model: "gpt-image-2.5-flare" }), { config }, { handlers: injected });
-  assert.equal(seen[1][1].model, "gpt-image-2.5-flare");
-  const gemini = await handleMessage(call(3, "bridge_generate_image", { prompt: "猫", model: "gemini-3.1-flash-image" }), { config }, { handlers: injected });
-  assert.equal(gemini.result, imageResult);
-  assert.deepEqual(seen[2][1], { prompt: "猫", model: "gemini-3.1-flash-image", output_format: "png" });
-  const tools = (await handleMessage(request(2, "tools/list"), { config })).result.tools;
-  for (const [key, rule] of Object.entries(tools[3].inputSchema.properties)) {
-    for (const value of rule.enum ?? []) {
-      assert.ok((await handleMessage(call(3, "bridge_generate_image", { prompt: "猫", [key]: value }), { config }, { handlers: injected })).result);
-    }
+  for (const tool of result.tools.filter((entry) => entry.name.startsWith("image_gen_"))) {
+    assert.deepEqual(tool.inputSchema.required, ["prompt"]);
+    assert.equal(tool.inputSchema.additionalProperties, false);
   }
-  assert.ok((await handleMessage(call(4, "bridge_generate_image", { prompt: "🐈".repeat(32_000), model: "m".repeat(200) }), { config }, { handlers: injected })).result);
+  const removed = await handleMessage(call(4, "bridge_generate_image", { prompt: "test" }), { config });
+  assert.equal(removed.error.code, -32602);
 });
 
 test("start 传递取消信号，start/stop 投影结果并标识未就绪", async () => {
@@ -334,16 +256,14 @@ test("管理入口只在用户调用时执行一次，原始票据不进入返�
   assert.doesNotMatch(JSON.stringify(result), /127\.0\.0\.1|sensitive-test-ticket/);
 });
 
-test("管理与启停工具抛错标 isError，图片失败不自动重试或切换模型", async () => {
-  for (const [name, handlerName] of [["bridge_start", "ensureRunning"], ["bridge_stop", "stopBridge"], ["bridge_open_management", "openManagement"], ["bridge_generate_image", "generateImage"]]) {
+test("管理与启停工具抛错标 isError，失败只调用一次", async () => {
+  for (const [name, handlerName] of [["bridge_start", "ensureRunning"], ["bridge_stop", "stopBridge"], ["bridge_open_management", "openManagement"]]) {
     let count = 0;
-    const injected = handlers({ [handlerName]: async (_config, args) => {
+    const injected = handlers({ [handlerName]: async () => {
       count++;
-      if (name === "bridge_generate_image") assert.equal(args.model, "gpt-image-2.5-flare");
       throw Object.assign(new Error("private failure"), { code: "ECONNREFUSED" });
     } });
-    const args = name === "bridge_generate_image" ? { prompt: "猫", model: "gpt-image-2.5-flare" } : {};
-    const response = await handleMessage(call(1, name, args), { config }, { handlers: injected });
+    const response = await handleMessage(call(1, name, {}), { config }, { handlers: injected });
     assert.equal(response.result.isError, true);
     assert.match(resultText(response), /ECONNREFUSED/);
     assert.equal(count, 1);
@@ -352,18 +272,18 @@ test("管理与启停工具抛错标 isError，图片失败不自动重试或切
 
 test("安全错误码和 safeMessage 可解释且脱敏，普通 message/stack/body 不透传", async () => {
   const error = Object.assign(new Error(`raw ${config.apiKey} https://upstream.test/?token=hidden body`), {
-    code: "IMAGE_CONNECTION_FAILED", safeMessage: `无法连接，${config.apiKey} ${config.mgmtKey} https://upstream.test/?token=hidden`,
+    code: "ECONNRESET", safeMessage: `无法连接，${config.apiKey} ${config.mgmtKey} https://upstream.test/?token=hidden`,
     body: "private-response-body",
   });
-  const response = await handleMessage(call(1), { config }, { handlers: handlers({ generateImage: async () => { throw error; } }) });
+  const response = await handleMessage(call(1), { config }, { handlers: handlers({ ensureRunning: async () => { throw error; } }) });
   assert.equal(response.result.isError, true);
   assert.match(resultText(response), /无法连接/);
-  assert.match(resultText(response), /IMAGE_CONNECTION_FAILED/);
-  assert.match(resultText(response), /本 MCP 未自动重试；核心仍可能按配置重试/);
+  assert.match(resultText(response), /ECONNRESET/);
+  assert.match(resultText(response), /检查代理状态/);
   assert.doesNotMatch(JSON.stringify(response), /private-|upstream|hidden|raw |stack|body/);
-  const unknown = await handleMessage(call(2), { config }, { handlers: handlers({ generateImage: async () => { throw Object.assign(error, { safeMessage: undefined, code: "secret-token-value" }); } }) });
+  const unknown = await handleMessage(call(2), { config }, { handlers: handlers({ ensureRunning: async () => { throw Object.assign(error, { safeMessage: undefined, code: "secret-token-value" }); } }) });
   assert.doesNotMatch(JSON.stringify(unknown), /secret-token|private-|upstream|raw |body/);
-  const long = await handleMessage(call(3), { config }, { handlers: handlers({ generateImage: async () => { throw { safeMessage: "错".repeat(2_000) }; } }) });
+  const long = await handleMessage(call(3), { config }, { handlers: handlers({ ensureRunning: async () => { throw { safeMessage: "错".repeat(2_000) }; } }) });
   assert.ok(resultText(long).length < 600);
 });
 
@@ -383,7 +303,7 @@ test("非法 JSON、非法信封及参数之后仍能处理 ping 与工具请求
   h.input.write("{broken\nnull\n[]\n\n");
   h.send({ jsonrpc: "1.0", id: 5, method: "ping" });
   h.send(request(6, "tools/call", []));
-  h.send(call(7, "bridge_generate_image", { prompt: "" }));
+  h.send(call(7, "bridge_start", { prompt: "" }));
   h.send(request(8, "missing-method"));
   h.send(request(9));
   assert.deepEqual((await h.response(9)).result, {});
@@ -419,9 +339,9 @@ test("UTF-8 跨数据块、CRLF 与 EOF 无换行的完整请求仍能正确解�
 
 test("工具异常是 isError，随后同一连接继续处理工具和 ping", async (t) => {
   let calls = 0;
-  const h = harness(t, { generateImage: async () => {
+  const h = harness(t, { ensureRunning: async () => {
     if (++calls === 1) throw Object.assign(new Error("private-message"), { code: "ETIMEDOUT" });
-    return imageResult;
+    return startResult;
   } });
   h.send(call(1));
   const error = await h.response(1);
@@ -430,29 +350,29 @@ test("工具异常是 isError，随后同一连接继续处理工具和 ping", a
   assert.doesNotMatch(resultText(error), /private-message/);
   h.send(call(2));
   h.send(request(3));
-  assert.deepEqual((await h.response(2)).result, imageResult);
+  assert.deepEqual(JSON.parse(resultText(await h.response(2))), startResult);
   assert.deepEqual((await h.response(3)).result, {});
 });
 
-test("长图片调用不阻塞 ping 或 status，完成顺序可与请求顺序不同", async (t) => {
-  const image = deferred();
+test("长启动调用不阻塞 ping 或 status，完成顺序可与请求顺序不同", async (t) => {
+  const start = deferred();
   const entered = deferred();
-  const h = harness(t, { generateImage: async () => { entered.resolve(); return image.promise; } });
-  h.send(call("image"));
+  const h = harness(t, { ensureRunning: async () => { entered.resolve(); return start.promise; } });
+  h.send(call("start"));
   await entered.promise;
   h.send(request("ping"));
   h.send(call("status", "bridge_status", {}));
   await h.response("ping");
   await h.response("status");
-  assert.equal(h.messages.some((message) => message.id === "image"), false);
-  image.resolve(imageResult);
-  assert.deepEqual((await h.response("image")).result, imageResult);
+  assert.equal(h.messages.some((message) => message.id === "start"), false);
+  start.resolve(startResult);
+  assert.deepEqual(JSON.parse(resultText(await h.response("start"))), startResult);
 });
 
 test("取消仅 abort 对应 ID（包括 0），其他调用继续，通知本身没有响应", async (t) => {
   const entered = deferred();
   const signals = [];
-  const h = harness(t, { generateImage: async (_config, _args, { signal }) => {
+  const h = harness(t, { ensureRunning: async (_config, { signal }) => {
     signals.push(signal);
     if (signals.length === 2) entered.resolve();
     return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
@@ -476,7 +396,7 @@ test("重复的在途 ID 被拒绝，不覆盖原请求的取消控制器", asyn
   const entered = deferred();
   let signal;
   let invoked = 0;
-  const h = harness(t, { generateImage: async (_config, _args, options) => {
+  const h = harness(t, { ensureRunning: async (_config, options) => {
     invoked++;
     signal = options.signal;
     entered.resolve();
@@ -494,11 +414,11 @@ test("重复的在途 ID 被拒绝，不覆盖原请求的取消控制器", asyn
 
 test("无 id 的通知不执行工具、不回包，非法 progressToken 被拒绝", async (t) => {
   let invoked = 0;
-  const h = harness(t, { generateImage: async () => { invoked++; return imageResult; } });
-  h.send({ jsonrpc: "2.0", method: "tools/call", params: { name: "bridge_generate_image", arguments: { prompt: "猫" } } });
+  const h = harness(t, { ensureRunning: async () => { invoked++; return startResult; } });
+  h.send({ jsonrpc: "2.0", method: "tools/call", params: { name: "bridge_start", arguments: {} } });
   h.send({ jsonrpc: "2.0", method: "ping" });
   h.send({ jsonrpc: "2.0", method: "notifications/initialized" });
-  h.send(call(1, "bridge_generate_image", { prompt: "猫" }, { progressToken: {} }));
+  h.send(call(1, "bridge_start", {}, { progressToken: {} }));
   h.send(request(2));
   await h.response(2);
   assert.equal((await h.response(1)).error.code, -32602);
@@ -511,7 +431,7 @@ test("八个常规任务满载时仍可查状态并停止，控制通道也限�
   const releases = [];
   const status = deferred();
   const stop = deferred();
-  const h = harness(t, { getStatus: () => status.promise, stopBridge: () => stop.promise, generateImage: async () => {
+  const h = harness(t, { getStatus: () => status.promise, stopBridge: () => stop.promise, ensureRunning: async () => {
     const release = deferred();
     releases.push(release);
     if (releases.length === 8) entered.resolve();
@@ -534,22 +454,22 @@ test("八个常规任务满载时仍可查状态并停止，控制通道也限�
   stop.resolve({ stopped: true });
   assert.equal(JSON.parse(resultText(await h.response(12))).ready, true);
   assert.equal(JSON.parse(resultText(await h.response(13))).stopped, true);
-  releases[0].resolve(imageResult);
+  releases[0].resolve(startResult);
   await h.response(1);
   await nextTurn();
   h.send(call(11));
   await nextTurn();
   assert.equal(releases.length, 9);
-  for (const release of releases) release.resolve(imageResult);
+  for (const release of releases) release.resolve(startResult);
   await h.response(11);
 });
 
 test("带 progressToken 的长调用每 10 秒心跳，结束后不再发送", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const entered = deferred();
-  const image = deferred();
-  const h = harness(t, { generateImage: async () => { entered.resolve(); return image.promise; } });
-  h.send(call(1, "bridge_generate_image", { prompt: "猫" }, { progressToken: 0 }));
+  const start = deferred();
+  const h = harness(t, { ensureRunning: async () => { entered.resolve(); return start.promise; } });
+  h.send(call(1, "bridge_start", {}, { progressToken: 0 }));
   await entered.promise;
   t.mock.timers.tick(9_999);
   await nextTurn();
@@ -560,17 +480,17 @@ test("带 progressToken 的长调用每 10 秒心跳，结束后不再发送", a
   assert.equal(first.params.progress, 1);
   t.mock.timers.tick(10_000);
   await h.wait((message) => message.params?.progress === 2);
-  image.resolve(imageResult);
+  start.resolve(startResult);
   await h.response(1);
   t.mock.timers.tick(30_000);
   await nextTurn();
   assert.equal(h.messages.filter((message) => message.method === "notifications/progress").length, 2);
 });
 
-test("取消立即停止心跳，即使图片实现尚未结束；背压不阻止取消输入", async (t) => {
+test("取消立即停止心跳，即使启动实现尚未结束；背压不阻止取消输入", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const entered = deferred();
-  const image = deferred();
+  const start = deferred();
   const writes = [];
   const callbacks = [];
   let signal;
@@ -578,12 +498,12 @@ test("取消立即停止心跳，即使图片实现尚未结束；背压不阻�
     writes.push(JSON.parse(chunk.toString()));
     callbacks.push(callback);
   } });
-  const h = harness(t, { generateImage: async (_config, _args, options) => {
+  const h = harness(t, { ensureRunning: async (_config, options) => {
     signal = options.signal;
     entered.resolve();
-    return image.promise;
+    return start.promise;
   } }, { output });
-  h.send(call(1, "bridge_generate_image", { prompt: "猫" }, { progressToken: "progress" }));
+  h.send(call(1, "bridge_start", {}, { progressToken: "progress" }));
   await entered.promise;
   t.mock.timers.tick(10_000);
   await nextTurn();
@@ -595,7 +515,7 @@ test("取消立即停止心跳，即使图片实现尚未结束；背压不阻�
   callbacks.shift()();
   await nextTurn();
   assert.equal(writes.length, 1);
-  image.resolve(imageResult);
+  start.resolve(startResult);
   await nextTurn();
   assert.equal(writes[1].result.isError, true);
   callbacks.shift()();
@@ -605,7 +525,7 @@ test("取消立即停止心跳，即使图片实现尚未结束；背压不阻�
 test("EOF 取消在途请求，忽略取消的 handler 也不会使会话无限等待", async (t) => {
   const entered = deferred();
   let signal;
-  const h = harness(t, { generateImage: async (_config, _args, options) => {
+  const h = harness(t, { ensureRunning: async (_config, options) => {
     signal = options.signal;
     entered.resolve();
     return new Promise(() => {});
@@ -622,7 +542,7 @@ test("EOF 取消在途请求，忽略取消的 handler 也不会使会话无限�
 test("输入错误会取消调用且停止会话，不调用真实进程操作", async (t) => {
   const entered = deferred();
   let signal;
-  const h = harness(t, { generateImage: async (_config, _args, options) => {
+  const h = harness(t, { ensureRunning: async (_config, options) => {
     signal = options.signal;
     entered.resolve();
     return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
@@ -655,13 +575,13 @@ test("stdout 背压期间串行写入，drain 后继续，JSON 行不会交错",
   assert.deepEqual(chunks.map((chunk) => JSON.parse(chunk).id), [1, 2]);
 });
 
-test("stdout 断管不抛出未处理错误，并取消在途图片", async (t) => {
+test("stdout 断管不抛出未处理错误，并取消在途启动", async (t) => {
   const entered = deferred();
   let signal;
   const output = new Writable({ write(_chunk, _encoding, callback) {
     callback(Object.assign(new Error("private-broken-pipe"), { code: "EPIPE" }));
   } });
-  const h = harness(t, { generateImage: async (_config, _args, options) => {
+  const h = harness(t, { ensureRunning: async (_config, options) => {
     signal = options.signal;
     entered.resolve();
     return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));

@@ -61,11 +61,12 @@ function isolatedEnv(bin, overrides = {}) {
 async function runtimeFixture(t, { system = "Linux", architecture = "x86_64" } = {}) {
   const directory = await temporary(t, "运行时 '单引号 $字面量");
   const scripts = join(directory, "插件", "scripts");
+  const serverDir = join(directory, "插件", "server");
   const bin = join(directory, "fake-bin");
   const log = join(directory, "runtime.log");
   await mkdir(bin, { recursive: true });
   await put(join(scripts, "start-mcp.sh"), launcherText);
-  await put(join(scripts, "mcp-server.mjs"), `process.stdin.setEncoding("utf8");
+  await put(join(serverDir, "mcp-server.mjs"), `process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => process.stdout.write(chunk));
 process.stdin.on("end", () => { process.stderr.write("selected=" + process.env.POSIX_SELECTED + "\\n"); process.exitCode = Number(process.env.POSIX_TEST_EXIT || 0); });\n`);
   await executable(join(bin, "uname"), `case "$1" in -s) printf '%s\\n' ${quote(system)} ;; -m) printf '%s\\n' ${quote(architecture)} ;; *) exit 1 ;; esac`);
@@ -105,24 +106,24 @@ async function sourceFixture(t) {
   await put(join(repository, ".qoder-plugin", "marketplace.json"), JSON.stringify(catalog, null, 2) + "\n");
   await put(join(repository, "README.md"), "市场安装说明 fixture\n");
   await put(join(repository, "LICENSE"), "市场许可证 fixture\n");
-  await put(join(plugin, ".qoder-plugin", "plugin.json"), JSON.stringify({ name: "qoder-subscription-proxy", version: "0.2.9", mcpServers: "./.mcp.json" }));
-  await copyFile(join(root, ".mcp.posix.json"), join(plugin, ".mcp.posix.json"));
-  await copyFile(join(root, ".mcp.json"), join(plugin, ".mcp.json"));
+  await put(join(plugin, ".qoder-plugin", "plugin.json"), JSON.stringify({ name: "qoder-subscription-proxy", version: "0.2.9", mcpServers: "./mcp.json" }));
+  await copyFile(join(root, "mcp.posix.json"), join(plugin, "mcp.posix.json"));
+  await copyFile(join(root, "mcp.json"), join(plugin, "mcp.json"));
   const manifest = await readFile(join(root, "scripts/distribution-files.txt"), "utf8");
   for (const file of manifest.trimEnd().split(/\r?\n/)) {
-    if (file.endsWith("/plugin.json") || file === ".mcp.posix.json") continue;
+    if (file.endsWith("/plugin.json") || file === "mcp.posix.json") continue;
     await put(join(plugin, file), file === "scripts/distribution-files.txt" ? manifest : `fixture: ${file}\n`);
   }
-  await put(join(plugin, "bridge/bin/qoder-plugin-subscription-proxy.exe"), "old native core fixture");
+  await put(join(plugin, "server/bin/qoder-plugin-subscription-proxy.exe"), "old native core fixture");
   for (const platform of ["darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64"]) {
-    const binary = join(plugin, "bridge", "bin", platform, "qoder-plugin-subscription-proxy");
+    const binary = join(plugin, "server", "bin", platform, "qoder-plugin-subscription-proxy");
     await put(binary, `#!/bin/sh\n# fake binary ${platform}\nexit 0\n`);
     await chmod(binary, 0o644);
   }
   await put(join(plugin, "scripts", "start-mcp.sh"), launcherText);
   const prepare = join(plugin, "scripts", "prepare-posix-marketplace.sh");
   await put(prepare, prepareText);
-  for (const file of ["data/auth.json", "bridge/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "bridge/unknown.tmp", "bridge/local-debug-only.mjs", "commands/private.md", "bridge/bin/unknown.tmp", "bridge/bin/CLIProxyAPI_8.0.51_windows_amd64.zip", "bridge/bin/CLIProxyAPI_8.0.51_linux_amd64.tar.gz", "bridge/bin/linux-x64/unknown.tmp", "bridge/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
+  for (const file of ["data/auth.json", "server/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "server/unknown.tmp", "server/local-debug-only.mjs", "commands/private.md", "server/bin/unknown.tmp", "server/bin/CLIProxyAPI_8.0.51_windows_amd64.zip", "server/bin/CLIProxyAPI_8.0.51_linux_amd64.tar.gz", "server/bin/linux-x64/unknown.tmp", "server/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
     await put(join(plugin, file), "must-not-copy-private-fixture\n");
   }
   return { directory, repository, plugin, target, prepare, catalog };
@@ -144,8 +145,8 @@ async function snapshot(directory) {
 }
 
 test("POSIX 清单显式 sh 调用且默认 Windows 清单保留；新脚本 LF", async () => {
-  const posix = JSON.parse(await readFile(join(root, ".mcp.posix.json"), "utf8"));
-  const windows = JSON.parse(await readFile(join(root, ".mcp.json"), "utf8"));
+  const posix = JSON.parse(await readFile(join(root, "mcp.posix.json"), "utf8"));
+  const windows = JSON.parse(await readFile(join(root, "mcp.json"), "utf8"));
   assert.equal(windows.mcpServers["qoder-subscription-proxy"].command, "powershell.exe");
   assert.equal(windows.mcpServers["qoder-subscription-proxy"].timeout, 660000);
   assert.deepEqual(posix.mcpServers["qoder-subscription-proxy"], { type: "stdio", command: "/bin/sh", args: ["${QODER_PLUGIN_ROOT}/scripts/start-mcp.sh"], timeout: 660000 });
@@ -242,35 +243,34 @@ test("prepare：生成独立市场、原样 catalog、POSIX 清单，不复制�
     assert.deepEqual(await readFile(join(fixture.target, file)), await readFile(join(fixture.repository, file)));
   }
   const copy = join(fixture.target, "qoder-subscription-proxy");
-  assert.deepEqual(await readFile(join(copy, ".mcp.json")), await readFile(join(fixture.plugin, ".mcp.posix.json")));
-  assert.equal(JSON.parse(await readFile(join(fixture.plugin, ".mcp.json"))).mcpServers["qoder-subscription-proxy"].command, "powershell.exe");
+  assert.deepEqual(await readFile(join(copy, "mcp.json")), await readFile(join(fixture.plugin, "mcp.posix.json")));
+  assert.equal(JSON.parse(await readFile(join(fixture.plugin, "mcp.json"))).mcpServers["qoder-subscription-proxy"].command, "powershell.exe");
   const copied = await snapshot(copy);
-  assert.ok(copied["bridge/posix-supervisor.mjs"]);
-  assert.ok(copied["commands/open-management.md"]);
-  assert.equal(copied["bridge/local-debug-only.mjs"], undefined);
+  assert.ok(copied["server/posix-supervisor.mjs"]);
+  assert.equal(copied["server/local-debug-only.mjs"], undefined);
   assert.equal(copied["commands/private.md"], undefined);
   assert.ok(copied["scripts/proxy-supervisor.mjs"]);
   assert.ok(copied["Antigravity授权.cmd"]);
   assert.ok(copied["scripts/antigravity-login.ps1"]);
   assert.ok(copied["scripts/start-mcp.ps1"]);
   for (const file of Object.keys(copied)) assert.doesNotMatch(file, /(^|\/)data\/|(^|\/)tests\/|unknown\.tmp/);
-  assert.ok(copied["bridge/core-runtime.mjs"]);
-  assert.deepEqual(Object.keys(copied).filter((file) => file.startsWith("bridge/bin/")), [
-    "bridge/bin/LICENSE", "bridge/bin/README.md", "bridge/bin/README_CN.md",
-    "bridge/bin/config.example.yaml", "bridge/bin/platforms.json",
+  assert.ok(copied["server/core-runtime.mjs"]);
+  assert.deepEqual(Object.keys(copied).filter((file) => file.startsWith("server/bin/")), [
+    "server/bin/LICENSE", "server/bin/README.md", "server/bin/README_CN.md",
+    "server/bin/config.example.yaml", "server/bin/platforms.json",
   ]);
   for (const file of Object.keys(copied)) assert.doesNotMatch(file, /\.(?:exe|zip|gz)$|bridge\/bin\/(?:darwin|linux)-/);
 });
 
 test("prepare：源目录没有任何平台二进制仍能完整打包许可证和下载清单", { skip: shellSkip }, async (t) => {
   const fixture = await sourceFixture(t);
-  await rm(join(fixture.plugin, "bridge/bin/qoder-plugin-subscription-proxy.exe"));
+  await rm(join(fixture.plugin, "server/bin/qoder-plugin-subscription-proxy.exe"));
   for (const platform of ["darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64"]) {
-    await rm(join(fixture.plugin, "bridge/bin", platform), { recursive: true });
+    await rm(join(fixture.plugin, "server/bin", platform), { recursive: true });
   }
   await runShell(fixture.prepare, [posixPath(fixture.target)]);
   const copied = await snapshot(join(fixture.target, "qoder-subscription-proxy"));
-  for (const file of ["bridge/core-runtime.mjs", "bridge/bin/LICENSE", "bridge/bin/platforms.json", "THIRD_PARTY_NOTICES.md"]) {
+  for (const file of ["server/core-runtime.mjs", "server/bin/LICENSE", "server/bin/platforms.json", "THIRD_PARTY_NOTICES.md"]) {
     assert.ok(copied[file]);
   }
   assert.equal(Object.keys(copied).some((file) => /\.(?:exe|zip|gz)$|bridge\/bin\/(?:darwin|linux)-/.test(file)), false);
@@ -302,7 +302,7 @@ test("prepare：支持相对中文空格路径与尾斜杠，拒绝源仓库内�
 
 test("prepare：缺失平台清单等必要源文件时失败并清理本次未完成副本", { skip: shellSkip }, async (t) => {
   const fixture = await sourceFixture(t);
-  const missing = join(fixture.plugin, "bridge/bin/platforms.json");
+  const missing = join(fixture.plugin, "server/bin/platforms.json");
   await rm(missing);
   const before = await snapshot(fixture.repository);
   await assert.rejects(runShell(fixture.prepare, [posixPath(fixture.target)]), (error) => /分发文件缺失/.test(error.stderr));
@@ -324,8 +324,8 @@ test("prepare：拒绝符号链接目标及源分发目录，不跟随指向真�
   await assert.rejects(access(fixture.target), { code: "ENOENT" });
   await rm(join(fixture.repository, "README.md"));
   await writeFile(join(fixture.repository, "README.md"), marketReadme);
-  await rm(join(fixture.plugin, "bridge/panel"), { recursive: true });
-  await symlink(existing, join(fixture.plugin, "bridge/panel"));
+  await rm(join(fixture.plugin, "server/panel"), { recursive: true });
+  await symlink(existing, join(fixture.plugin, "server/panel"));
   await assert.rejects(runShell(fixture.prepare, [fixture.target]), (error) => /分发目录缺失或是符号链接/.test(error.stderr));
   await assert.rejects(access(fixture.target), { code: "ENOENT" });
   assert.deepEqual(await readdir(existing), []);

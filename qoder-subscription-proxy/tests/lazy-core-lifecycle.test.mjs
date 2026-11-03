@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
-const entry = fileURLToPath(new URL("../scripts/mcp-server.mjs", import.meta.url));
+const entry = fileURLToPath(new URL("../server/mcp-server.mjs", import.meta.url));
 
 async function fixture(t, { failDownload = false, shortDownload = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "lazy-core-lifecycle-"));
@@ -107,13 +107,10 @@ test("核心下载被阻塞时握手、工具发现、状态和ping均可用；�
   const f = await fixture(t);
   assert.ok((await f.initialize.response).result.serverInfo);
   await f.downloading;
-  assert.equal((await f.request("tools/list").response).result.tools.length, 5);
+  assert.equal((await f.request("tools/list").response).result.tools.length, 6);
   const status = await waitStatus(f, (value) => value.core.state === "downloading");
   assert.equal(status.ready, false);
   assert.equal(status.startupError, undefined);
-  const image = await f.call("bridge_generate_image", { prompt: "不会发送的测试图片" }).response;
-  assert.equal(image.result.isError, true);
-  assert.match(image.result.content[0].text, /未就绪/);
   const start = f.call("bridge_start");
   assert.deepEqual((await f.request("ping").response).result, {});
   assert.equal(f.messages.has(start.id), false);

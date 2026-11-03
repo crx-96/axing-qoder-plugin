@@ -1,7 +1,9 @@
 import { appendConfigBlock, parseConfigYaml } from "./config-yaml.mjs";
 
-/** GJSON 选择器定位宿主审批提示，以免匹配普通聊天。 */
-const classifierPath = 'input.0.content.#(type=="input_text"&&text%"You are a security classifier for auto permission mode.*").type';
+/** GJSON 选择器定位宿主审批提示，以免匹配普通聊天；通配前缀覆盖 CN 与国际版两种措辞。 */
+const classifierPath = 'input.0.content.#(type=="input_text"&&text%"You are a security *").type';
+/** 仅匹配 CN 措辞的旧内置选择器；用于识别可整体迁移的旧配置。 */
+const legacyClassifierPath = 'input.0.content.#(type=="input_text"&&text%"You are a security classifier for auto permission mode.*").type';
 /** 标准 v8 与兼容布局分别在对应 payload 段中保存规则。 */
 const overridePath = ["requests", "payload", "override"];
 /** 核心按整段兼容旧 payload。 */
@@ -18,7 +20,8 @@ const terminalGuidance = [
 ].join("\n\n");
 
 /** 按目标缩进生成当前内置规则，也可重建历史规则以识别可安全迁移的配置。 */
-export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], targetModel = "codex-auto-review", efforts = ["none", "low"], includeGuidance = true) {
+export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], targetModel = "codex-auto-review",
+  efforts = ["none", "low"], includeGuidance = true, classifier = classifierPath) {
   const pad = " ".repeat(indent);
   // match 列表是 AND；快速检查与复核必须使用独立的模型选择器。
   const models = sourceModels.flatMap((model) => ["developer", "system"].flatMap((role) => efforts.flatMap(effort => [
@@ -29,7 +32,7 @@ export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], tar
     `${pad}        - "reasoning.effort": ${JSON.stringify(effort)}`,
     `${pad}          "input.0.role": ${JSON.stringify(role)}`,
     `${pad}          "input.0.content.#": 1`,
-    `${pad}          ${JSON.stringify(classifierPath)}: "input_text"`,
+    `${pad}          ${JSON.stringify(classifier)}: "input_text"`,
   ])));
   return [
     `${pad}- models:`,
@@ -72,12 +75,13 @@ function renderedSignature(rule) {
   return ruleSignatures(parseConfigYaml("override:\n" + rule + "\n"), ["override"])[0];
 }
 
-/** 当前规则签名用于幂等检测；仅以下两版完整历史签名有自动替换资格。 */
+/** 当前规则签名用于幂等检测；仅以下三版完整历史签名有自动替换资格。 */
 const policySignature = renderedSignature(renderApprovalOverride(2));
-/** 已分发的两版旧规则签名。 */
+/** 已分发的三版旧规则签名：Luna 单档、纯模型路由、仅 CN 措辞的带指引规则；均使用旧选择器重建。 */
 const legacySignatures = new Set([
-  renderApprovalOverride(2, ["gpt-6-astra", "gpt-6.1-sol"], "gpt-6-luna", ["none"], false),
-  renderApprovalOverride(2, ["gpt-*"], "codex-auto-review", ["none", "low"], false),
+  renderApprovalOverride(2, ["gpt-6-astra", "gpt-6.1-sol"], "gpt-6-luna", ["none"], false, legacyClassifierPath),
+  renderApprovalOverride(2, ["gpt-*"], "codex-auto-review", ["none", "low"], false, legacyClassifierPath),
+  renderApprovalOverride(2, ["gpt-*"], "codex-auto-review", ["none", "low"], true, legacyClassifierPath),
 ].map(renderedSignature));
 
 /** 保留用户自定义规则，仅迁移完整匹配的旧版审批规则并补入当前规则。 */

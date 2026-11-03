@@ -5,9 +5,9 @@ import { promisify } from "node:util";
 import { copyFile, mkdir, mkdtemp, writeFile, rm, access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { once } from "node:events";
-import { loadConfig } from "../bridge/config.mjs";
+import { loadConfig } from "../server/config.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
-import { processIdentity, probeBridge } from "../bridge/bridge-process.mjs";
+import { processIdentity, probeBridge } from "../server/supervisor.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const launcher = join(root, "scripts", "start-mcp.ps1");
-const entry = join(root, "scripts", "mcp-server.mjs");
+const entry = join(root, "server", "mcp-server.mjs");
 const systemRoot = process.env.SystemRoot || "C:\\Windows";
 const powerShell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const execFileAsync = promisify(execFile);
@@ -198,13 +198,13 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     return;
   }
   const initialized = await request("中文握手", "initialize", initializeParams);
-  assert.equal(initialized.serverInfo.version, "0.2.10");
+  assert.equal(initialized.serverInfo.version, "1.0.0");
   assert.equal(initialized.protocolVersion, "2025-06-18");
   assert.deepEqual(await request("中文往返-引号\"-反斜杠\\", "ping"), {});
   const tools = await request("工具清单", "tools/list");
-  assert.equal(tools.tools.length, 5);
+  assert.equal(tools.tools.length, 6);
   assert.ok(tools.tools.some((tool) => tool.name === "bridge_open_management"));
-  assert.match(tools.tools.find((tool) => tool.name === "bridge_generate_image").description, /图片/);
+  assert.ok(!tools.tools.some(tool => tool.name === "bridge_generate_image"));
   if (killWrapper) {
     await waitUntil(async () => {
       const status = await request("后台自动启动", "tools/call", { name: "bridge_status", arguments: {} });
@@ -227,11 +227,6 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     assert.equal(paused.ready, false);
     assert.equal(paused.autoRecoveryPaused, true);
     assert.equal(paused.startupError, undefined, "主动暂停不是初始化故障");
-    const generated = await request("中文参数", "tools/call", {
-      name: "bridge_generate_image", arguments: { prompt: "画一只红色小猫，招牌写\"你好\"。\n路径字符 C:\\隔离\\图片" },
-    });
-    assert.equal(generated.isError, true, "暂停代理必须拒绝实际图片请求");
-    assert.match(generated.content[0].text, /未就绪/);
     assert.equal((await probeBridge(config)).state, "offline");
     await assert.rejects(access(config.pidPath), { code: "ENOENT" });
   }

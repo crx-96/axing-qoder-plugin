@@ -1,9 +1,8 @@
 /** 按行传输的 MCP 服务；工具并发执行，协议输出串行写入，不管理桥子进程句柄。 */
 import { StringDecoder } from "node:string_decoder";
-import { ensureRunning, getStatus, stopBridge } from "./bridge-process.mjs";
-import { PLUGIN_VERSION } from "./config.mjs";
+import { ensureRunning, getStatus, stopBridge } from "./supervisor.mjs";
 import { generateImage } from "./image-generation.mjs";
-import { DEFAULT_IMAGE_MODEL, GEMINI_IMAGE_MODEL } from "./image-models.mjs";
+import { PLUGIN_VERSION } from "./config.mjs";
 
 /** 2025-03-26 强制支持批请求，本按行单消息实现不声明支持；其余版本协商到首项。 */
 const PROTOCOL_VERSIONS = ["2025-06-18", "2024-11-05"];
@@ -13,7 +12,7 @@ const MAX_TOOLS = 8;
 const PROGRESS_MS = 10_000;
 /** EOF 或断管后的最大收尾时间，单位毫秒；不等待不响应取消的实现。 */
 const SHUTDOWN_MS = 1_000;
-/** 单行及尚未终止行的 UTF-16 长度上限；足以容纳最大提示词及 JSON 转义。 */
+/** 单行及尚未终止行的 UTF-16 长度上限。 */
 const MAX_LINE_LENGTH = 1_048_576;
 /** 输出最多排队 64 MiB；持续背压时拒绝会话，仍允许读取取消与 EOF。 */
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -23,31 +22,22 @@ const SERVER_INFO = { name: "qoder-subscription-proxy", version: PLUGIN_VERSION 
 const DEFAULT_HANDLERS = { ensureRunning, getStatus, stopBridge, generateImage };
 /** 无参数工具的契约；显式传 null、数组或额外参数均不接受。 */
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
-/**
- * 生图通道选择指引，同时用于 initialize.instructions 与生图工具描述前缀。
- * 插件读不到会话主模型，因此明确告知调用方主模型对自身已知、生图前无需预查询，
- * 避免为核实一件工具无法回答的事而反复调用 bridge_status 或模型列表。
- */
-const IMAGE_TOOL_GUIDANCE = `当前聊天主模型为 GPT（包括通过 Codex 订阅接入）或 Gemini，且用户未明确指定生图工具或通道时，优先使用本插件的 bridge_generate_image，不要先调用宿主内置 ImageGen 或其他生图服务。未明确指定图片模型时，GPT 会话显式传入 model=${DEFAULT_IMAGE_MODEL}，Gemini 会话显式传入 model=${GEMINI_IMAGE_MODEL}；Gemini 会话不能省略 model，省略会按 ${DEFAULT_IMAGE_MODEL} 处理。你会话的主模型对自身是已知的，生图前不需要调用 bridge_status、查询模型列表或另行核实主模型与图片模型是否可用；直接提交生图调用，由本工具返回结果或失败原因。按当前聊天主模型判断，不按待生成的图片模型判断；用户明确指定的工具或通道优先，明确指定的图片模型优先于上述默认映射；主模型既不是 GPT 也不是 Gemini 时沿用宿主生图工具，不据此改道。仅适用于文生图，参考图编辑不受支持，不把图片路径或 URL 当作已读取的输入。工具不可用、授权/额度/权限受阻或生成失败时如实说明，不擅自换工具、换模型或重试。遵守宿主工具权限，不改变聊天主模型。`;
-/** 图片只接受文字与生成选项，不接收文件路径、图片 URL 或输出路径。 */
+/** 生图工具参数：提示词必填，模型与尺寸可选且只接受字符串。 */
 const IMAGE_SCHEMA = {
   type: "object",
   properties: {
-    prompt: { type: "string", minLength: 1, maxLength: 32_000, pattern: "\\S", description: "必填的非空图片文字描述；不会读取其中的路径或 URL。" },
-    model: { type: "string", minLength: 1, maxLength: 200, pattern: "\\S", default: DEFAULT_IMAGE_MODEL, description: `图片模型：GPT 会话传 ${DEFAULT_IMAGE_MODEL}，Gemini 会话必须传 ${GEMINI_IMAGE_MODEL}；用户指定优先。省略仍为 ${DEFAULT_IMAGE_MODEL}，不会自动识别聊天主模型，也不需要先查询模型列表确认。` },
-    size: { type: "string", enum: ["auto", "1024x1024", "1536x1024", "1024x1536"], description: "GPT 图片尺寸；Gemini 分别映射为 1K 的 1:1、3:2、2:3 比例，不保证精确像素；auto 或省略由上游决定。" },
-    quality: { type: "string", enum: ["auto", "low", "medium", "high"], description: "GPT 图片质量；Gemini 仅允许 auto 或省略。" },
-    background: { type: "string", enum: ["auto", "transparent", "opaque"], description: "GPT 背景选项；Gemini 仅允许 auto 或省略。" },
-    output_format: { type: "string", enum: ["png", "jpeg", "webp"], default: "png", description: "GPT 输出编码，默认 png；Gemini 仅允许默认值或省略，按上游实际图片格式保存，不转码或保证 PNG。" },
+    prompt: { type: "string", description: "画面内容描述" },
+    model: { type: "string", description: "可选；省略时按族内可用生图模型自动决策" },
+    size: { type: "string", description: "可选输出尺寸，如 1024x1024" },
   },
   required: ["prompt"],
   additionalProperties: false,
 };
-/** 工具清单与运行时参数校验共用 schema，避免两套约束漂移。 */
+/** 宿主可发现的代理管理工具；管理工具不接受参数，生图工具按 IMAGE_SCHEMA 校验。 */
 const TOOLS = [
   {
     name: "bridge_status",
-    description: "查看订阅桥运行状态、核心后台下载状态和启动失败原因；MCP 已连接不代表代理已就绪，ready=true 才可使用代理。models.imageModels 列出本工具可路由的图片模型（含 Gemini 原生模型）。生图前无需调用本工具确认主模型或图片模型。不会执行登录。",
+    description: "查看订阅桥运行状态、核心后台下载状态和启动失败原因；MCP 已连接不代表代理已就绪，ready=true 才可使用代理。列出核心返回的模型数量与样例。",
     inputSchema: EMPTY_SCHEMA,
   },
   {
@@ -61,22 +51,26 @@ const TOOLS = [
     inputSchema: EMPTY_SCHEMA,
   },
   {
-    name: "bridge_generate_image",
-    description: `${IMAGE_TOOL_GUIDANCE} 通过已授权订阅生成一张图片。省略 model 时默认 ${DEFAULT_IMAGE_MODEL}，也可指定账号支持的图片模型；不改变聊天主模型；本 MCP 不自动降级或重试，但 CLIProxyAPI 核心仍可能按配置轮换凭据和重试，单次调用不保证上游只执行一次。仅接受文字描述与生成选项，不读取路径或 URL。可能消耗订阅额度或产生费用；超时、失败或取消不保证上游未执行。`,
-    inputSchema: IMAGE_SCHEMA,
-  },
-  {
     name: "bridge_open_management",
     description: "经用户要求在系统浏览器打开本插件已登录的管理页，供用户本人授权与管理账号。",
     inputSchema: EMPTY_SCHEMA,
+  },
+  {
+    name: "image_gen_gpt",
+    description: "经本机订阅代理的 OpenAI 图片接口生图（gpt-image 系模型）。用户说 GPT/OpenAI 生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体。",
+    inputSchema: IMAGE_SCHEMA,
+  },
+  {
+    name: "image_gen_gemini",
+    description: "经本机订阅代理的聊天接口生图（gemini 系图片模型）。用户说 Gemini/谷歌生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体。",
+    inputSchema: IMAGE_SCHEMA,
   },
 ];
 /** 只允许稳定错误标识出现在异常响应中，不转发异常 message、stack 或响应正文。 */
 const SAFE_CODES = new Set([
   "ABORT_ERR", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "EACCES", "EPERM",
   "ENOTFOUND", "EAI_AGAIN", "ERR_INVALID_ARG_VALUE", "ERR_INVALID_ARG_TYPE",
-  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED", "IMAGE_GENERATION_FAILED", "RATE_LIMITED", "TIMEOUT",
-  "INVALID_ARGUMENT", "BRIDGE_UNAVAILABLE", "IMAGE_CONNECTION_FAILED",
+  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED",
   "CORE_CONFIG", "CORE_CANCELLED", "CORE_TIMEOUT", "CORE_CURL", "CORE_DOWNLOAD", "CORE_SIZE",
   "CORE_ARCHIVE_HASH", "CORE_BINARY_HASH", "CORE_ARCHIVE", "CORE_PATH", "CORE_CACHE",
   "CORE_PUBLISH", "CORE_CLEANUP", "CORE_LOCK",
@@ -126,7 +120,7 @@ function safeError(error, config) {
   }
   // safeMessage 的归属是插件常量，额外移除链接与多行，避免误带 URL 查询串或堆栈。
   message = message.replace(/https?:\/\/\S+/gi, "[链接已隐藏]").split(/[\r\n]/, 1)[0].slice(0, 500);
-  return `${message}${safeCode ? `（${code}）` : ""} 本 MCP 未自动重试；核心仍可能按配置重试，请检查桥状态和订阅额度。`;
+  return `${message}${safeCode ? `（${code}）` : ""} 请检查代理状态。`;
 }
 
 /** 生命周期原因允许短的普通说明；含密钥、URL、正文或堆栈痕迹时改用安全摘要。 */
@@ -138,35 +132,21 @@ function safeReason(value, fallback, config) {
   return value;
 }
 
-/** 按公布的 schema 校验全部工具参数；错误不回显不可信的字段名或值。 */
-function validateArguments(schema, args) {
-  if (!isObject(args)) return "arguments 必须是对象。";
-  if (Object.keys(args).some((key) => !Object.hasOwn(schema.properties, key))) return "包含不支持的工具参数。";
-  if (schema.required?.some((key) => !Object.hasOwn(args, key))) return "缺少必需的 prompt 参数。";
-  for (const [key, value] of Object.entries(args)) {
-    const rule = schema.properties[key];
-    if (typeof value !== rule.type) return `${key} 必须是字符串。`;
-    if (rule.enum && !rule.enum.includes(value)) return `${key} 不在允许的枚举中。`;
-    // JSON Schema 的长度按 Unicode 码点计算，不能把一个 emoji 当成两个字符。
-    const length = Array.from(value).length;
-    if ((rule.minLength && (!value.trim() || length < rule.minLength)) || (rule.maxLength && length > rule.maxLength)) {
-      return `${key} 为空或超过允许长度。`;
-    }
-  }
-  return null;
-}
-
 /**
  * 执行已验证的工具；测试只替换依赖函数，不另造分发逻辑。
- * ctx 仅含 config 与可选 startupError；启动下载与图片模块共享请求级取消信号。
+ * ctx 仅含 config 与可选 startupError；启动下载与管理入口使用请求级取消信号。
  */
-async function callTool(name, args, ctx, handlers, signal) {
+async function callTool(name, ctx, handlers, signal, args = {}) {
   const { config } = ctx;
   signal?.throwIfAborted();
   switch (name) {
     case "bridge_status": {
       const status = await handlers.getStatus(config);
-      return textResult(ctx.startupError ? { ...status, startupError: safeError(ctx.startupError, config) } : status);
+      // 启动故障走脱敏摘要；网关端口占用等诊断本身已是固定安全文案。
+      const extra = {};
+      if (ctx.startupError) extra.startupError = safeError(ctx.startupError, config);
+      if (ctx.gatewayError) extra.gatewayError = ctx.gatewayError;
+      return textResult(Object.keys(extra).length ? { ...status, ...extra } : status);
     }
     case "bridge_start": {
       const result = await handlers.ensureRunning(config, { signal });
@@ -184,10 +164,12 @@ async function callTool(name, args, ctx, handlers, signal) {
       await handlers.openManagement(config, { signal });
       return textResult("已请求系统浏览器打开授权与账号管理页。");
     }
-    case "bridge_generate_image": {
-      const result = await handlers.generateImage(config, { model: DEFAULT_IMAGE_MODEL, output_format: "png", ...args }, { signal });
-      if (!isObject(result) || !Array.isArray(result.content)) throw new Error("invalid image result");
-      return result;
+    case "image_gen_gpt":
+    case "image_gen_gemini": {
+      // 族内模型决策与落盘由生图模块完成；多模型待选结果原样返回供宿主弹窗。
+      const family = name === "image_gen_gpt" ? "gpt" : "gemini";
+      const result = await handlers.generateImage(config,
+        { family, prompt: args.prompt, model: args.model, size: args.size, signal });      return textResult(result);
     }
   }
 }
@@ -208,7 +190,7 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
     case "initialize": {
       if (typeof params?.protocolVersion !== "string" || !params.protocolVersion.trim()) return fail(id, -32602, "缺少有效的 protocolVersion。");
       const protocolVersion = PROTOCOL_VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : PROTOCOL_VERSIONS[0];
-      return ok(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: SERVER_INFO, instructions: IMAGE_TOOL_GUIDANCE });
+      return ok(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
     }
     case "ping":
       return ok(id, {});
@@ -218,14 +200,22 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
       const tool = TOOLS.find(({ name }) => name === params?.name);
       if (!tool) return fail(id, -32602, "未知工具或缺少工具名称。");
       const args = params.arguments === undefined ? {} : params.arguments;
-      const invalid = validateArguments(tool.inputSchema, args);
-      if (invalid) return fail(id, -32602, invalid);
+      // 按工具 schema 逐项校验：管理工具为空 schema，自然拒绝任何非空参数；生图工具只接受声明的字符串参数。
+      if (!isObject(args)) return fail(id, -32602, "arguments 必须是对象。");
+      const properties = tool.inputSchema.properties ?? {};
+      if (Object.keys(args).some((key) => !Object.hasOwn(properties, key)) ||
+          Object.values(args).some((value) => typeof value !== "string")) {
+        return fail(id, -32602, "工具参数只接受 schema 声明的字符串字段。");
+      }
+      if ((tool.inputSchema.required ?? []).some((key) => typeof args[key] !== "string" || !args[key].trim())) {
+        return fail(id, -32602, "缺少必需的非空字符串参数。");
+      }
       if (params._meta !== undefined && (!isObject(params._meta)
         || (Object.hasOwn(params._meta, "progressToken") && !isId(params._meta.progressToken)))) {
         return fail(id, -32602, "无效的进度元数据。");
       }
       try {
-        const result = await callTool(tool.name, args, ctx, { ...DEFAULT_HANDLERS, ...handlers }, signal);
+        const result = await callTool(tool.name, ctx, { ...DEFAULT_HANDLERS, ...handlers }, signal, args);
         signal?.throwIfAborted();
         return ok(id, result);
       } catch (error) {
@@ -362,7 +352,7 @@ export async function runMcp(ctx, { input = process.stdin, output = process.stdo
     }
     if (isTool || isInitialize) {
       const toolName = isTool ? message.params?.name : undefined;
-      // 检查和停止各有一个饱和时可用的名额，重复控制调用仍受限，避免诊断被生图等长任务堵住。
+      // 检查和停止各有一个饱和时可用的名额，重复控制调用仍受限，避免诊断被核心下载等长任务堵住。
       if (requests.size >= MAX_TOOLS) {
         const reserved = toolName === "bridge_status" || toolName === "bridge_stop";
         if (!reserved || [...requests.values()].some((active) => active.toolName === toolName)) {

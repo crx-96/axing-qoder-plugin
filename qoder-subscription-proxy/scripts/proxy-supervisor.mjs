@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   CONTROL_MESSAGE_LIMIT, CONTROL_REQUEST_TIMEOUT_MS, encodePosixMessage,
   createPosixControlMessage, posixSupervisorError, validatePosixControlMessage, validatePosixPaths,
-} from "../bridge/posix-supervisor.mjs";
+} from "../server/posix-supervisor.mjs";
 
 /** 优先给核心五秒完成正常退出；SIGKILL 后仍须观察 exit，不能凭 kill 返回值宣称成功。 */
 const TERMINATE_GRACE_MS = 5000;

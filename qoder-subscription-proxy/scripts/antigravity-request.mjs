@@ -1,8 +1,8 @@
 /** Windows 授权助手的私有管道子进程，只向已验证归属的核心发送一次 OAuth 操作。 */
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../bridge/config.mjs";
-import { requestOwned } from "../bridge/bridge-process.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { requestOwned } from "../server/supervisor.mjs";
 
 /** 控制台输入最长 16 KiB；为 JSON 转义和协议字段保留空间。 */
 const MAX_INPUT_BYTES = 128 * 1024;

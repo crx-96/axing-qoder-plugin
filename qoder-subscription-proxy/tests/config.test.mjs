@@ -10,16 +10,17 @@ import test from "node:test";
 import {
   DEFAULT_HOST,
   DEFAULT_PORT,
+  MANAGEMENT_PORT,
   PLUGIN_VERSION,
   loadConfig,
   renderConfigYaml,
   validateExistingConfig,
-} from "../bridge/config.mjs";
-import { resolveCoreBinaryPath } from "../bridge/core-runtime.mjs";
-import { parseConfigYaml } from "../bridge/config-yaml.mjs";
+} from "../server/config.mjs";
+import { resolveCoreBinaryPath } from "../server/core-runtime.mjs";
+import { parseConfigYaml } from "../server/config-yaml.mjs";
 
 const execFileAsync = promisify(execFile);
-const moduleUrl = new URL("../bridge/config.mjs", import.meta.url).href;
+const moduleUrl = new URL("../server/config.mjs", import.meta.url).href;
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 async function fixture(t) {
@@ -44,7 +45,7 @@ test("默认数据目录跨安装版本稳定保留授权，隔离旧桥且不�
     import { join } from "node:path";
     import { loadConfig, PLUGIN_VERSION } from ${JSON.stringify(moduleUrl)};
     assert.equal(homedir(), ${JSON.stringify(root)});
-    assert.equal(PLUGIN_VERSION, "0.2.10");
+    assert.equal(PLUGIN_VERSION, "1.0.0");
     const oldDir = join(homedir(), ".zcode", "zcode-subscription-proxy", "data");
     await mkdir(join(oldDir, "auths"), { recursive: true });
     await writeFile(join(oldDir, "launcher-secrets.json"), JSON.stringify({ apiKey: "old-plugin-api", mgmtKey: "old-management" }));
@@ -75,33 +76,40 @@ test("插件、市场和 MCP 对外版本保持一致", async () => {
   const marketplace = JSON.parse(await readFile(join(pluginRoot, "..", ".qoder-plugin", "marketplace.json"), "utf8"));
   const listing = marketplace.plugins.find((plugin) => plugin.name === manifest.name);
   assert.ok(listing);
-  assert.equal(PLUGIN_VERSION, "0.2.10");
+  assert.equal(PLUGIN_VERSION, "1.0.0");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(resolve(pluginRoot, "..", listing.source), pluginRoot);
-  assert.equal(manifest.commands, "./commands");
-  const command = await readFile(join(pluginRoot, manifest.commands, "open-management.md"), "utf8");
-  assert.match(command, /^---\r?\ndescription: 授权与账号管理/);
-  assert.ok(command.includes("`bridge_open_management`"));
+  // 1.0.0 起管理页入口改为连接器授权按钮，不再随包斜杠指令。
+  assert.equal(manifest.commands, undefined);
+  assert.equal(manifest.mcpServers, "./mcp.json");
 });
 
 test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () => {
-  for (const filename of [".mcp.json", ".mcp.posix.json"]) {
+  for (const filename of ["mcp.json", "mcp.posix.json"]) {
     const { mcpServers } = JSON.parse(await readFile(join(pluginRoot, filename), "utf8"));
-    assert.deepEqual(Object.keys(mcpServers), ["qoder-subscription-proxy"]);
+    assert.deepEqual(Object.keys(mcpServers), ["qoder-subscription-proxy", "management-page"]);
     const entry = mcpServers["qoder-subscription-proxy"];
     assert.equal(entry.timeout, 660000);
     assert.equal(entry.timeoutMs, undefined);
     assert.ok(entry.args.some(value => value.startsWith("${QODER_PLUGIN_ROOT}/scripts/")));
     assert.doesNotMatch(JSON.stringify(entry), /CLAUDE_PLUGIN_ROOT|zcode/i);
+    // 管理页连接器指向固定回环端口的授权元数据端点，宿主据此渲染常驻授权按钮。
+    const page = mcpServers["management-page"];
+    assert.equal(page.type, "http");
+    assert.equal(page.url, `http://${DEFAULT_HOST}:${MANAGEMENT_PORT}/mcp`);
   }
   assert.notEqual(DEFAULT_PORT, 18787);
+  // 模型端口与管理页端口固定且互不相同，跨版本不得变化。
+  assert.equal(DEFAULT_PORT, 19787);
+  assert.equal(MANAGEMENT_PORT, 19788);
+  assert.notEqual(DEFAULT_PORT, MANAGEMENT_PORT);
 });
 
 test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对路径", async (t) => {
   const { root, load } = await fixture(t);
   const config = await load();
-  assert.equal(PLUGIN_VERSION, "0.2.10");
+  assert.equal(PLUGIN_VERSION, "1.0.0");
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(DEFAULT_PORT, 19787);
@@ -112,7 +120,7 @@ test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对�
   assert.equal(config.managementUrl, "http://127.0.0.1:19787/management.html");
   for (const [key, suffix] of Object.entries({
     configPath: "config.yaml", authDir: "auths", pidPath: "bridge.pid", lockPath: "bridge.lock",
-    pausedPath: "bridge.paused", imagesDir: "generated",
+    pausedPath: "bridge.paused",
   })) assert.equal(config[key], join(config.dataDir, suffix));
   assert.deepEqual((await readdir(config.dataDir)).sort(), ["launcher-secrets.json"]);
   const relativeData = relative(process.cwd(), join(root, "relative-data"));
@@ -276,7 +284,7 @@ test("YAML 字符串使用安全转义，换行/引号/反斜杠/Unicode 不注�
   assert.ok(defaults.includes('  secret-key: "' + config.mgmtKey + '"\n'));
   assert.match(defaults, /  allow-remote: false\n/);
   assert.match(defaults, /  disable-control-panel: false\n/);
-  assert.match(rendered, /multimedia:\n(?:  #[^\n]*\n)?  disable-image-generation: "passthrough"\n/);
+  assert.doesNotMatch(rendered, /disable-image-generation/);
   assert.equal(rendered.split("\n").filter((line) => line === "server:").length, 1);
   const apiLine = rendered.split("\n").find((line) => line.startsWith("    - "));
   const mgmtLine = rendered.split("\n").find((line) => line.startsWith("  secret-key: "));

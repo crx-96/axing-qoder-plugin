@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-const entry = fileURLToPath(new URL("../scripts/mcp-server.mjs", import.meta.url));
+const entry = fileURLToPath(new URL("../server/mcp-server.mjs", import.meta.url));
 
 async function fixture(t, extra = {}) {
   const directory = await mkdtemp(join(tmpdir(), "bridge-prepare-entry-"));
@@ -95,7 +95,7 @@ test("缺失自定义核心只导致后台启动失败，MCP仍可查询状态�
 
 test("已暂停时允许管理MCP连接，不启动或下载核心", { timeout: 10000 }, async (t) => {
   const f = await fixture(t, { paused: true, env: { BRIDGE_BIN: process.execPath } });
-  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "0.2.10");
+  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "1.0.0");
   const status = JSON.parse((await f.request("tools/call", { name: "bridge_status", arguments: {} })).result.content[0].text);
   assert.equal(status.ready, false);
   assert.equal(status.autoRecoveryPaused, true);

@@ -6,14 +6,16 @@ import { withLifecycleLock } from "./lifecycle-lock.mjs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { getCoreRelease, resolveCoreBinaryPath } from "./core-runtime.mjs";
-import { appendConfigBlock, parseConfigYaml, replaceConfigScalar } from "./config-yaml.mjs";
+import { parseConfigYaml } from "./config-yaml.mjs";
 
 /** 仅支持此回环地址，不接受 localhost、IPv6 或任意网络接口。 */
 export const DEFAULT_HOST = "127.0.0.1";
-/** 默认 HTTP 端口，避开旧桥 8787 与普通 CLIProxyAPI 8317；环境变量仍须为合法十进制端口。 */
+/** 模型 API 固定端口；跨版本保持不变，用户客户端地址与核心配置均依赖该常量。 */
 export const DEFAULT_PORT = 19787;
-/** 与插件 manifest 保持一致；版本升级不改变专属数据目录。 */
-export const PLUGIN_VERSION = "0.2.10";
+/** 管理页网关固定端口：免密管理入口与连接器授权元数据共用；与模型端口不同且跨版本保持不变。 */
+export const MANAGEMENT_PORT = 19788;
+/** 与插件 manifest 保持一致；版本升级不改变专属数据目录与上述固定端口。 */
+export const PLUGIN_VERSION = "1.0.0";
 /** 旧版公共密码仅用于识别需要升级的文件和兼容环境配置。 */
 const LEGACY_MGMT_KEY = "123456";
 
@@ -153,7 +155,7 @@ export async function loadConfig({ pluginRoot, env = process.env, platform = pro
     apiKey: apiKey ?? secrets.apiKey,
     /** 按安装持久保存的管理密钥，独立于模型 API Key；核心启动后可在 YAML 中保存其哈希。 */
     mgmtKey: secrets.mgmtKey,
-    /** 不包含密钥的管理面板入口。 */
+    /** 核心原生管理面板，供手动登录；免密入口由连接器授权按钮或 bridge_open_management 打开。 */
     managementUrl: `http://${host}:${port}/management.html`,
     /** OpenAI 兼容接口地址。 */
     endpoint: `http://${host}:${port}/v1`,
@@ -161,8 +163,6 @@ export async function loadConfig({ pluginRoot, env = process.env, platform = pro
     lockPath: join(dataDir, "bridge.lock"),
     /** 用户主动暂停自动启动的持久标记。 */
     pausedPath: join(dataDir, "bridge.paused"),
-    /** 生成图片的插件专属输出目录，升级不改变位置。 */
-    imagesDir: join(dataDir, "generated"),
   };
   // 既有 YAML 不能静默覆盖本次环境输入；创建/启动锁内仍需再次核对以消除检查后竞争。
   let text;
@@ -183,55 +183,12 @@ function yamlString(value) {
 
 /** 插件生成配置的文件头，仅说明来源，不据此覆盖用户设置。 */
 const CONFIG_HEADER = "# 由 qoder-subscription-proxy 插件生成；手工修改核心字段时须同步环境变量。";
-/** 插件升级时接管的全局重试字段；账号级策略由用户管理，时间间隔以秒计。 */
-const RETRY_DEFAULTS = [
-  // 采用上游示例的三轮额外重试，限制每轮冷却等待，给 Qoder 等待响应头留出时间。
-  [["routing", "retry"], { "request-retry": 3, "max-retry-interval": 5 }],
-  // 单账号遇到瞬时 5xx 后的冷却须短于 5 秒轮间等待预算，否则没有可用凭据重试。
-  [["routing", "cooldown"], { "transient-error-cooldown-seconds": 3 }],
-  [["requests", "streaming"], { "bootstrap-retries": 1 }],
-];
-/** 冷启动时补齐的默认值；心跳和 Codex 缓冲参数不参与版本升级覆盖。 */
-const STREAMING_DEFAULTS = [
-  ...RETRY_DEFAULTS,
-  [["requests", "streaming"], { "keepalive-seconds": 15, "send-keepalive-before-ft": false }],
-  [["upstream", "codex"], { "stream-bootstrap-buffering": true, "stream-bootstrap-timeout": '"10s"' }],
-];
 
-/** 常规启动仅补缺；retryUpgrade 模式只同步全局重试白名单，保留其他字段、注释与旧版路径。 */
-export function ensureStreamingDefaults(text, { retryUpgrade = false } = {}) {
-  let parsed = parseConfigYaml(text);
-  /** 检查实际路径，包括显式的零值和空容器。 */
-  const hasPath = path => parsed.nodes.has(JSON.stringify(path));
-  for (const [currentPath, fields] of retryUpgrade ? RETRY_DEFAULTS : STREAMING_DEFAULTS) {
-    // 核心按整段选择 streaming，不能创建会遮蔽整个旧段的新段。
-    let path = currentPath;
-    if (path[1] === "streaming" && !hasPath(path) && hasPath(["streaming"])) path = ["streaming"];
-
-    // routing 的旧写法逐字段回退。升级只替换实际生效的标量，不触及同名的账号字段。
-    const missing = [];
-    for (const [key, scalar] of Object.entries(fields)) {
-      let target = [...path, key];
-      if (!hasPath(target) && path[0] === "routing" && hasPath([key])) target = [key];
-      if (hasPath(target)) {
-        if (retryUpgrade && parsed.values.get(JSON.stringify(target)) !== scalar) {
-          text = replaceConfigScalar(text, target, scalar);
-          parsed = parseConfigYaml(text);
-        }
-      } else if (path[0] !== "upstream" || (!hasPath(["codex", key]) && !hasPath(["oauth", "providers", "codex", key]))) {
-        missing.push([key, scalar]);
-      }
-    }
-    // 仅在修改后重建行号索引，后续字段就地处理，完整配置正常启动只解析一次。
-    if (!missing.length) continue;
-    text = appendConfigBlock(parsed, path, "map", indent =>
-      missing.map(([key, scalar]) => " ".repeat(indent) + key + ": " + scalar).join("\n"));
-    parsed = parseConfigYaml(text);
-  }
-  return text;
-}
-
-/** 生成含本机安全字段的 v8 基础配置，启动时再统一应用新装与升级共用的流式默认值。 */
+/**
+ * 生成含本机安全字段的 v8 基础配置。
+ * 重试、冷却、心跳等请求参数一律沿用核心上游默认值，插件不写入也不迁移这些字段；
+ * 用户如需调整请在管理页或 config.yaml 中自行设置。
+ */
 export function renderConfigYaml(config) {
   return [
     CONFIG_HEADER,
@@ -252,9 +209,6 @@ export function renderConfigYaml(config) {
     `    - ${yamlString(config.apiKey)}`,
     "oauth:",
     `  auth-dir: ${yamlString(config.authDir)}`,
-    "multimedia:",
-    "  # 不自动注入原生图片工具，仍保留独立图片生成端点",
-    '  disable-image-generation: "passthrough"',
     "",
   ].join("\n");
 }

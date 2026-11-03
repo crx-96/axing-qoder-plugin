@@ -1,4 +1,4 @@
-/** ZIP 与 PNG 共用的 IEEE CRC-32 查找表，按反射多项式 0xEDB88320 计算每个字节的余数。 */
+/** ZIP 归档完整性校验使用的 IEEE CRC-32 查找表，按反射多项式 0xEDB88320 计算每个字节的余数。 */
 const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
   let value = byte;
   for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);

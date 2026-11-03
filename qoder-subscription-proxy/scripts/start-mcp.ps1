@@ -33,7 +33,7 @@ try {
     # wrapper is forcibly killed. Native stdio duplicates bypass PowerShell's pipeline.
     Add-Type -Path (Join-Path $PSScriptRoot 'ProxyJob.cs') -ErrorAction Stop | Out-Null
     $result = [Qoder.SubscriptionProxy.ProxyJob]::RunMcp(
-        $ownerPidText, $runtime, (Join-Path $PSScriptRoot 'mcp-server.mjs')
+        $ownerPidText, $runtime, (Join-Path $PSScriptRoot '..\server\mcp-server.mjs')
     )
     exit $result
 } catch {

@@ -10,8 +10,8 @@ fail() {
 
 # 入口路径以脚本本身为准，不依赖宿主的工作目录或安装缓存位置。
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || fail '无法解析插件脚本目录。'
-entry="$script_dir/mcp-server.mjs"
-[ -f "$entry" ] || fail '缺少 scripts/mcp-server.mjs，请重新生成或安装插件。'
+entry="$script_dir/../server/mcp-server.mjs"
+[ -f "$entry" ] || fail '缺少 server/mcp-server.mjs，请重新生成或安装插件。'
 
 # 仅接受已提供原生核心的系统与架构；Git Bash 不是正式支持的平台。
 system=$(uname -s) || fail '无法识别操作系统。'

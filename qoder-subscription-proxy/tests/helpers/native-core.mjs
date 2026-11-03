@@ -12,7 +12,7 @@ export async function copyTestCore(target) {
   assert.notEqual(resolve(target), resolve(testCorePath), "只能复制核心，不能覆盖测试源文件");
   assert.equal((await lstat(testCorePath)).isFile(), true, "BRIDGE_TEST_BIN 必须是普通文件，不能是符号链接");
   await copyFile(testCorePath, target);
-  const metadata = JSON.parse(await readFile(new URL("../../bridge/bin/platforms.json", import.meta.url), "utf8"));
+  const metadata = JSON.parse(await readFile(new URL("../../server/bin/platforms.json", import.meta.url), "utf8"));
   const release = metadata.platforms[`${process.platform}-${process.arch}`];
   assert.ok(release, "原生测试只支持平台清单列出的当前系统与架构");
   assert.equal(createHash("sha256").update(await readFile(target)).digest("hex"), release.binarySha256,

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { requestLocal, httpFailure } from "../bridge/local-http.mjs";
+import { requestLocal, httpFailure } from "../server/local-http.mjs";
 
 async function localServer(t, handler) {
   const server = http.createServer(handler);

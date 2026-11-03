@@ -3,8 +3,8 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import http from "node:http";
 import test from "node:test";
-import { requestLocal } from "../bridge/local-http.mjs";
-import { connectOwned } from "../bridge/owned-http.mjs";
+import { requestLocal } from "../server/local-http.mjs";
+import { connectOwned } from "../server/owned-http.mjs";
 
 async function fixture(t) {
   const connections = [];

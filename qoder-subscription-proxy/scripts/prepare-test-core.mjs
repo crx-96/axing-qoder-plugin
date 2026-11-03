@@ -2,8 +2,8 @@
 import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../bridge/config.mjs";
-import { ensureCore } from "../bridge/core-runtime.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { ensureCore } from "../server/core-runtime.mjs";
 
 /** 下载到 runner 临时目录并向后续步骤公布测试核心路径，不启动桥或读取用户授权。 */
 async function main() {

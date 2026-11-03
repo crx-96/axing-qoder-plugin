@@ -8,14 +8,19 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { ensureApprovalRouting, renderApprovalOverride } from "../bridge/approval-routing.mjs";
-import { parseConfigYaml, replaceConfigScalar } from "../bridge/config-yaml.mjs";
-import { loadConfig, ensureStreamingDefaults, renderConfigYaml, validateExistingConfig } from "../bridge/config.mjs";
-import { ensureDataDir } from "../bridge/bridge-process.mjs";
+import { ensureApprovalRouting, renderApprovalOverride } from "../server/approval-routing.mjs";
+import { parseConfigYaml, replaceConfigScalar } from "../server/config-yaml.mjs";
+import { loadConfig, renderConfigYaml, validateExistingConfig } from "../server/config.mjs";
+import { ensureDataDir } from "../server/supervisor.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const prefix = "You are a security classifier for auto permission mode.";
+/** 国际版自动审批检查的首行措辞；通配选择器须同时覆盖两种宿主文案。 */
+const intlPrefix = "You are a security monitor for an autonomous AI coding agent.";
+/** 当前内置规则的通配选择器与仅匹配 CN 措辞的旧选择器，用于重建历史配置。 */
+const broadSelector = 'input.0.content.#(type=="input_text"&&text%"You are a security *").type';
+const cnSelector = 'input.0.content.#(type=="input_text"&&text%"You are a security classifier for auto permission mode.*").type';
 const classifierSystem = `You are a security classifier for auto permission mode.
 
 Decide whether the pending tool action can run without asking the user.
@@ -145,8 +150,11 @@ for (const suffix of [
 test("核心去掉 GJSON 键引号后可加载、迁移且保持幂等", () => {
   const currentConfig = ensureApprovalRouting(base);
   const previousConfig = base + "requests:\n  payload:\n    override:\n" +
-    renderApprovalOverride(6, ["gpt-*"], "codex-auto-review", ["none", "low"], false) + "\n";
-  for (const original of [legacyConfig, previousConfig, currentConfig]) {
+    renderApprovalOverride(6, ["gpt-*"], "codex-auto-review", ["none", "low"], false, cnSelector) + "\n";
+  // 旧内置规则只匹配 CN 措辞；国际版审批措辞上线后须整体迁移为通配选择器。
+  const previousGuidedConfig = currentConfig.replaceAll(JSON.stringify(broadSelector), JSON.stringify(cnSelector));
+  assert.notEqual(previousGuidedConfig, currentConfig);
+  for (const original of [legacyConfig, previousConfig, previousGuidedConfig, currentConfig]) {
     const saved = original.replace(/^(\s*(?:- )?)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'):/gm, (_match, indent, key) =>
       `${indent}${key.startsWith('"') ? JSON.parse(key) : key.slice(1, -1).replaceAll("''", "'")}:`);
     assert.deepEqual(parseConfigYaml(saved).values, parseConfigYaml(original).values);
@@ -193,7 +201,7 @@ test("审批补充只追加风险判断说明，保留宿主政策、拒绝记�
 });
 
 test("迁移 0.2.4 纯模型路由并保留用户修改的路由", () => {
-  const oldRule = renderApprovalOverride(6, ["gpt-*"], "codex-auto-review", ["none", "low"], false) + "\n";
+  const oldRule = renderApprovalOverride(6, ["gpt-*"], "codex-auto-review", ["none", "low"], false, cnSelector) + "\n";
   for (const old of [oldRule, oldRule + oldRule, oldRule + legacyRule]) {
     const migrated = ensureApprovalRouting(base + "requests:\n  payload:\n    override:\n" + old);
     const { values } = parseConfigYaml(migrated);
@@ -369,7 +377,7 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     "      models:", "        - name: gpt-compatible", "          alias: gpt-compatible", "",
   ].join("\n");
   const original = renderConfigYaml(current).replace("  disable-control-panel: false", "  disable-control-panel: true") + provider;
-  const textConfig = ensureStreamingDefaults(ensureApprovalRouting(original));
+  const textConfig = ensureApprovalRouting(original);
   validateExistingConfig(current, textConfig);
   await writeFile(current.configPath, textConfig);
   const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
@@ -396,6 +404,9 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
       ["none", "low"].map(effort => [model, effort, role, prefix, "codex-auto-review", "low"]))),
     ["gpt-6-luna", "none", "system", classifierSystem, "codex-auto-review", "low"],
     ["gpt-6-luna", "low", "system", classifierSystem, "codex-auto-review", "low"],
+    ["gpt-6-astra", "none", "system", intlPrefix, "codex-auto-review", "low"],
+    ["gpt-6-astra", "low", "developer", intlPrefix, "codex-auto-review", "low"],
+    ["gpt-6-astra", "xhigh", "system", intlPrefix, "gpt-6-astra", "xhigh"],
     ["gpt-6-astra", "xhigh", "system", prefix, "gpt-6-astra", "xhigh"],
     ["gpt-6-astra", "low", "system", "Ordinary coding task", "gpt-6-astra", "low"],
     ["gpt-6-astra", "none", "user", prefix, "gpt-6-astra", "none"],
@@ -503,9 +514,8 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     assert.ok(/input\.0\.content\.1\.text: \|-/.test(saved));
     validateExistingConfig(current, saved);
     assert.ok(ensureApprovalRouting(saved) === saved, "核心回写后应复用现有规则");
-    const upgraded = ensureStreamingDefaults(saved);
-    assert.equal(parseConfigYaml(upgraded).values.get(JSON.stringify(["routing", "retry", "request-retry"])), 0);
-    assert.ok(ensureStreamingDefaults(upgraded) === upgraded, "补齐核心省略的默认字段后再启动必须幂等");
+    // 1.0.0 起插件不再管理重试参数：核心回写的值原样保留，冷启动只同步托管密钥。
+    assert.equal(parseConfigYaml(saved).values.get(JSON.stringify(["routing", "retry", "request-retry"])), 0);
 
     child.kill();
     await exited;
@@ -513,8 +523,8 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     const reloaded = await loadConfig({ pluginRoot, env });
     await ensureDataDir(reloaded);
     const readyYaml = await readFile(reloaded.configPath, "utf8");
-    assert.ok(readyYaml === replaceConfigScalar(upgraded, ["management", "secret-key"], reloaded.mgmtKey),
-      "冷启动只允许补缺省字段并恢复托管密钥");
+    assert.ok(readyYaml === replaceConfigScalar(saved, ["management", "secret-key"], reloaded.mgmtKey),
+      "冷启动只同步托管密钥，不改写请求参数");
 
     child = spawn(binary, ["-local-model", "-config", reloaded.configPath], { cwd: root, windowsHide: true, stdio: "ignore" });
     exited = once(child, "exit");

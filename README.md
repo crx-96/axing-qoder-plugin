@@ -1,25 +1,25 @@
 # axing-qoder-plugin
 
-面向 **Qoder Desktop** 的第三方插件集，当前包含 [qoder订阅代理](qoder-subscription-proxy/README.md)：将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理与图片生成 MCP 工具。
+面向 **Qoder Desktop** 的第三方插件集，当前包含 [qoder订阅代理](qoder-subscription-proxy/README.md)：将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理 MCP 工具。
 
 仓库地址：[crx-96/axing-qoder-plugin](https://github.com/crx-96/axing-qoder-plugin)。本项目不是 Qoder 或订阅服务商的官方产品。
 
 ## 下载与安装
 
-本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **0.2.10**。
+本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.0**。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v0.2.10-windows.zip` |
-| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v0.2.10-posix.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.0.0-windows.zip` |
+| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v1.0.0-posix.zip` |
 
 **不要选择 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`**，它们是整个仓库的源码，不是可直接导入的单插件安装包。用户无需克隆仓库或自行打包。
 
 按 [Qoder 插件文档](https://docs.qoder.com/qoder/plugins) 和 [扩展发布文档](https://docs.qoder.com/qoder/extension-publishing)，在 Qoder Desktop 中进入 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择下载的文件；无需先解压。
 
-安装后启用插件并连接 MCP。待代理就绪，便可在任务输入框输入 `/`，搜索 `open-management`，选择说明为「授权与账号管理」的插件指令并发送。浏览器会打开已登录的本机管理页。首次接入订阅时，在该页选择服务商完成授权。[插件使用说明](qoder-subscription-proxy/README.md)
+安装后启用插件并连接 MCP。待代理就绪，在插件详情页点击 `management-page` 连接器的 **授权** 按钮，浏览器即通过固定回环端口 `19788` 打开免密管理登录页；首次接入订阅时在该页选择服务商完成授权。模型 API 固定使用端口 `19787`。[插件使用说明](qoder-subscription-proxy/README.md)
 
-从旧版升级时，先等请求结束并调用 `bridge_stop`。导入新版、重连 MCP 后调用 `bridge_start`，即可使用新核心和流式配置。
+从旧版升级时，先等请求结束并调用 `bridge_stop`。导入新版、重连 MCP 后调用 `bridge_start`，即可使用新版工具；重试、流式等请求参数沿用核心上游默认值，插件不再写入或迁移。
 
 ## 从源码打包
 
@@ -27,13 +27,13 @@
 
 ```sh
 mkdir dist
-node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v0.2.10-windows.zip
-node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v0.2.10-posix.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v1.0.0-windows.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v1.0.0-posix.zip
 ```
 
 若 `dist` 已存在，无需再次创建。目标父目录必须先存在；脚本拒绝覆盖已有 ZIP。发布时文件名中的版本须与插件清单一致，并上传两个 ZIP 到对应的 GitHub Release，而不是提交二进制安装包到源码仓库。
 
-ZIP 根目录直接是插件内容，不再套一层仓库或插件目录。POSIX 包会使用对应的 `.mcp.json`；源码默认 Windows 清单不能直接用于 macOS/Linux。
+ZIP 根目录直接是插件内容，不再套一层仓库或插件目录。POSIX 包会使用对应的 `mcp.posix.json` 内容发布为 `mcp.json`；源码默认 Windows 清单不能直接用于 macOS/Linux。
 
 ## 分发与兼容边界
 

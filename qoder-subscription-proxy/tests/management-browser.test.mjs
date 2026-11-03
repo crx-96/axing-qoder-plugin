@@ -8,9 +8,9 @@ import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { ensureRunning, shutdownOwnedBridges } from "../bridge/bridge-process.mjs";
-import { loadConfig } from "../bridge/config.mjs";
-import { createManagementLogin } from "../bridge/management-login.mjs";
+import { ensureRunning, shutdownOwnedBridges } from "../server/supervisor.mjs";
+import { loadConfig } from "../server/config.mjs";
+import { createManagementLogin } from "../server/management-gateway.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
 const browser = process.env.BRIDGE_TEST_BROWSER;
@@ -133,7 +133,7 @@ test("真实浏览器兑换一次性票据、挂载授权页并在刷新后保�
   socket = await connectBrowser(profile, child);
   send = cdpClient(socket);
   let origin;
-  login = createManagementLogin(config, { async launchBrowser(url) {
+  login = createManagementLogin(config, { port: await unusedPort(), async launchBrowser(url) {
     origin = new URL(url).origin;
     assert.ok(new URL(url).hash.length > 1);
     const result = await send("Page.navigate", { url });

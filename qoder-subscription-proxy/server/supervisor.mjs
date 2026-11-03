@@ -10,9 +10,8 @@ export { withLifecycleLock };
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { PLUGIN_VERSION, renderConfigYaml, ensureStreamingDefaults, validateExistingConfig } from "./config.mjs";
+import { MANAGEMENT_PORT, renderConfigYaml, validateExistingConfig } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
-import { isRoutableImageModel } from "./image-models.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
 import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
@@ -73,44 +72,35 @@ async function replacePrivateFile(path, text, original) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, text, { flag: "wx", mode: 0o600 });
-    if (original !== undefined && await readOptional(path) !== original) {
-      throw bridgeError("本地配置已变化，请重试配置同步。");
+    // Windows 核心保存配置后的短时文件句柄可能不共享删除权限。只为配置替换保留一秒重试预算。
+    const deadline = Date.now() + 1000;
+    for (;;) {
+      if (original !== undefined && await readOptional(path) !== original) {
+        throw bridgeError("本地配置已变化，请重试配置同步。");
+      }
+      try {
+        await rename(temporary, path);
+        return;
+      } catch (error) {
+        if (original === undefined || process.platform !== "win32" ||
+            !["EPERM", "EACCES", "EBUSY"].includes(error.code) || Date.now() >= deadline) throw error;
+        // 保留完整临时文件，下一轮先核对并发保存的内容，再尝试原子发布。
+        await delay(50);
+      }
     }
-    await rename(temporary, path);
   } finally {
     await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
   }
 }
 
-/** 在生命周期锁内应用本插件版本的全局重试策略。只迁移已有配置，调用方在新建配置后再登记。 */
-export async function syncRetryPolicy(config) {
-  // 独立记录已同步的最高正式版本，管理页重写 YAML 或另一旧版会话启动时都不会重置用户调整。
-  const marker = join(config.dataDir, "retry-policy-version");
-  const applied = (await readOptional(marker))?.trim();
-  if (applied !== undefined) {
-    if (!/^\d+\.\d+\.\d+$/.test(applied)) throw bridgeError("重试策略版本记录无效，未覆盖本地配置。");
-    if (PLUGIN_VERSION.localeCompare(applied, "en", { numeric: true }) <= 0) return;
-  }
-  const original = await readOptional(config.configPath);
-  if (original === null) return;
-  // 先核对配置归属；迁移仅修改白名单字段。两次写入间中断时，下次可幂等地重试。
-  validateExistingConfig(config, original);
-  const updated = ensureStreamingDefaults(original, { retryUpgrade: true });
-  if (updated !== original) {
-    validateExistingConfig(config, updated);
-    await replacePrivateFile(config.configPath, updated, original);
-  }
-  await replacePrivateFile(marker, PLUGIN_VERSION + "\n");
-}
-
-/** 准备授权目录与配置。实际启动持有生命周期锁，首次并发创建使用完整临时文件抢占发布。 */
+/** 在生命周期锁内核对并补齐现有配置的安全字段；请求参数一律沿用核心上游默认值，插件不做迁移。 */
 export async function ensureDataDir(config) {
   // 先创建私有授权目录，新安装直接发布已合并默认策略的完整配置。
   await mkdir(config.authDir, { recursive: true, mode: 0o700 });
   if (await readOptional(config.configPath) === null) {
     const temporary = `${config.configPath}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, ensureStreamingDefaults(ensureApprovalRouting(renderConfigYaml(config))), { flag: "wx", mode: 0o600 });
+      await writeFile(temporary, ensureApprovalRouting(renderConfigYaml(config)), { flag: "wx", mode: 0o600 });
       try { await link(temporary, config.configPath); }
       catch (error) { if (error.code !== "EEXIST") throw error; }
     } finally {
@@ -120,7 +110,7 @@ export async function ensureDataDir(config) {
   // 校验既有安全字段再迁移；仅在内容变化时原子发布并清理临时文件。
   const original = await readFile(config.configPath, "utf8");
   validateExistingConfig(config, original);
-  const updated = syncManagementSecret(ensureStreamingDefaults(ensureApprovalRouting(original)), config.mgmtKey);
+  const updated = syncManagementSecret(ensureApprovalRouting(original), config.mgmtKey);
   if (updated === original) return;
   validateExistingConfig(config, updated);
   await replacePrivateFile(config.configPath, updated, original);
@@ -235,7 +225,6 @@ async function launch(config, signal) {
   if (previous) await closeSupervisor(previous);
   await prepareExecutable(config);
   await ensureDataDir(config);
-  await syncRetryPolicy(config);
   const panelDirectory = await prepareManagementPanel(config);
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
@@ -376,8 +365,6 @@ export async function ensureRunning(config, { automatic = false, allowDownload =
   const work = (async () => {
     // 先在锁内检查持久暂停和既有代理；只有显式启动才清除暂停标记。
     const existing = await withLifecycleLock(config, async () => {
-      // 热复用、暂停或核心尚未下载时也同步已有配置；这一步不会启动或重启代理。
-      await syncRetryPolicy(config);
       if (automatic && await readOptional(config.pausedPath) !== null) {
         return { started: false, ready: false, reason: "用户已停止桥，自动恢复已暂停" };
       }
@@ -465,8 +452,8 @@ export async function getStatus(config) {
         throw bridgeError("当前进程尚未加载网页授权修复；请先 bridge_stop，再 bridge_start。");
       }
       const ids = await probeModels(config);
-      // imageModels 是本工具可路由的图片模型全集，不受 sample 的 40 条截断影响。
-      modelState = { count: ids.length, sample: ids.slice(0, 40), imageModels: ids.filter(isRoutableImageModel) };
+      // 核心可能提供大量模型，状态只返回总数与有限样例。
+      modelState = { count: ids.length, sample: ids.slice(0, 40) };
       ready = true;
     } catch (error) { modelState = { count: null, sample: [], note: error.message }; }
   }
@@ -480,7 +467,7 @@ export async function getStatus(config) {
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
     authCount, models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
     core: await getCoreStatus(config),
-    loginHint: "运行插件指令 open-management 打开授权与账号管理。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。",
+    loginHint: `点击插件管理页连接器的授权按钮，或让 AI 调用 bridge_open_management，从固定端口 ${MANAGEMENT_PORT} 免输密码进入管理页。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。`,
   };
 }
 

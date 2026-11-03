@@ -184,24 +184,27 @@ export function appendConfigBlock(parsed, path, kind, render) {
 }
 
 /** 定点替换单行标量，接受字符串、布尔值及安全整数；缺失、集合和多行值均拒绝写入。 */
-export function replaceConfigScalar(text, path, value) {
+export function replaceConfigScalar(text, path, value, { allowNull = false } = {}) {
   const parsed = parseConfigYaml(text);
   const key = JSON.stringify(path);
   const node = parsed.nodes.get(key);
   const before = parsed.values.get(key);
-  // YAML 允许把可选整数留空。沿用原键、缩进和尾注释，只在冒号后补上升级后的整数。
-  if (node?.kind === null && node.raw === undefined && Number.isSafeInteger(value)) {
+  // 迁移可选配置时允许空值；凭据调用方仍要求既有标量。输出编码与普通替换一致。
+  const nullable = Number.isSafeInteger(value) || (allowNull && ["boolean", "string"].includes(typeof value));
+  const encoded = JSON.stringify(value)?.replace(/[\u007f-\u009f\u2028\u2029]/g,
+    c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  if (node?.kind === null && node.raw === undefined && nullable) {
     const row = parsed.lines[node.line];
     const trimmed = row.trimEnd();
     const comment = readEntry(trimmed.trimStart())?.raw;
     const end = (comment ? trimmed.slice(0, -comment.length).trimEnd() : trimmed).length;
-    parsed.lines[node.line] = row.slice(0, end) + " " + value + row.slice(end);
+    parsed.lines[node.line] = row.slice(0, end) + " " + encoded + row.slice(end);
     return parsed.lines.join(parsed.newline);
   }
-  // 显式 null 和 ~ 也可迁移为整数，空列表或映射仍按结构错误处理。
-  const nullableInteger = Number.isSafeInteger(value) && /^(?:null|~)(?: +#.*)?$/.test(node?.raw ?? "");
+  // 显式 null 和 ~ 同样可迁移，空列表或映射仍按结构错误处理。
+  const explicitNull = nullable && /^(?:null|~)(?: +#.*)?$/.test(node?.raw ?? "");
   if (!node?.raw || node.kind !== null || node.raw.startsWith("|") ||
-      (!nullableInteger && !["string", "number", "boolean"].includes(typeof before)) ||
+      (!explicitNull && !["string", "number", "boolean"].includes(typeof before)) ||
       !(["string", "boolean"].includes(typeof value) || Number.isSafeInteger(value))) throw unsupportedYaml();
 
   // 解析过的原始值仍含行末注释；只截取第一个完整标量，允许引号中的空格和 #。
@@ -209,8 +212,6 @@ export function replaceConfigScalar(text, path, value) {
   const token = node.raw.match(/^(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^ ]+)/)[0];
   const row = parsed.lines[node.line];
   const offset = row.replace(/ +$/, "").length - node.raw.length;
-  const encoded = JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029]/g,
-    c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
   parsed.lines[node.line] = row.slice(0, offset) + encoded + row.slice(offset + token.length);
   return parsed.lines.join(parsed.newline);
 }

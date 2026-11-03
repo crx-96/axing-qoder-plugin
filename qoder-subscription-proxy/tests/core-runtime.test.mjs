@@ -10,10 +10,10 @@ import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { deflateRawSync, gzipSync } from "node:zlib";
 import test from "node:test";
-import { createCoreRuntime, ensureCore, getCoreRelease, getCoreStatus, resolveCoreBinaryPath } from "../bridge/core-runtime.mjs";
+import { createCoreRuntime, ensureCore, getCoreRelease, getCoreStatus, resolveCoreBinaryPath } from "../server/core-runtime.mjs";
 
-const manifest = JSON.parse(await readFile(new URL("../bridge/bin/platforms.json", import.meta.url), "utf8"));
-const moduleUrl = new URL("../bridge/core-runtime.mjs", import.meta.url).href;
+const manifest = JSON.parse(await readFile(new URL("../server/bin/platforms.json", import.meta.url), "utf8"));
+const moduleUrl = new URL("../server/core-runtime.mjs", import.meta.url).href;
 const binary = Buffer.from("synthetic core bytes; never executed\n".repeat(17));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 

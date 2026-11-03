@@ -34,11 +34,11 @@ async function packagePlugin(platform, requested) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  // 两种平台共享发布清单。默认 MCP 入口另行选择，POSIX 包使用 .mcp.posix.json 的内容。
+  // 两种平台共享发布清单。默认 MCP 入口另行选择，POSIX 包使用 mcp.posix.json 的内容。
   const manifest = path.join(root, 'scripts/distribution-files.txt');
   assertNoLinks(manifest);
   if (!lstatSync(manifest).isFile()) throw new Error('分发清单必须是常规文件');
-  const files = ['.mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/)];
+  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/)];
   if (new Set(files).size !== files.length) throw new Error('分发清单包含重复路径');
   for (const name of files) {
     if (/[\\:\r\n]/.test(name) || name.split('/').some(part => !part || part === '.' || part === '..')) {
@@ -46,8 +46,8 @@ async function packagePlugin(platform, requested) {
     }
   }
   // 先验证共享 CRC 源文件与父目录，禁止通过符号链接导入构建时运行的代码。
-  assertNoLinks(path.join(root, 'bridge/crc32.mjs'));
-  const { crc32 } = await import('../bridge/crc32.mjs');
+  assertNoLinks(path.join(root, 'server/crc32.mjs'));
+  const { crc32 } = await import('../server/crc32.mjs');
   files.sort();
   if (files.length >= 0xffff) throw new Error('文件数超出 ZIP32 限制');
   // 按稳定顺序写局部记录和中央目录，记录压缩尺寸、校验和与 POSIX 执行位。
@@ -56,7 +56,7 @@ async function packagePlugin(platform, requested) {
   let offset = 0;
   let centralSize = 0;
   for (const name of files) {
-    const sourceName = name === '.mcp.json' && platform === 'posix' ? '.mcp.posix.json' : name;
+    const sourceName = name === 'mcp.json' && platform === 'posix' ? 'mcp.posix.json' : name;
     const source = path.join(root, sourceName);
     assertNoLinks(source);
     if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);

@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { getCoreRelease, resolveCoreBinaryPath } from "../bridge/core-runtime.mjs";
+import { getCoreRelease, resolveCoreBinaryPath } from "../server/core-runtime.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const binRoot = join(pluginRoot, "bridge", "bin");
+const binRoot = join(pluginRoot, "server", "bin");
 const metadata = JSON.parse(await readFile(join(binRoot, "platforms.json"), "utf-8"));
 const notices = await readFile(join(pluginRoot, "THIRD_PARTY_NOTICES.md"), "utf-8");
 const expected = {
