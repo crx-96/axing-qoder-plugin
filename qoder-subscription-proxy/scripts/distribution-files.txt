@@ -1,6 +1,7 @@
 mcp.posix.json
 .qoder-plugin/plugin.json
 Antigravity授权.cmd
+assets/logo.png
 DISCLAIMER.md
 LICENSE
 README.md

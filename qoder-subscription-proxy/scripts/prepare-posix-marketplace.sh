@@ -43,7 +43,7 @@ trap 'exit 1' HUP INT TERM
 mkdir "$target" || fail '无法创建目标目录（可能已被创建）；未覆盖任何已有目标。'
 owned=$target
 copy_root="$target/qoder-subscription-proxy"
-mkdir "$target/.qoder-plugin" "$copy_root" "$copy_root/.qoder-plugin" "$copy_root/server" "$copy_root/server/bin" "$copy_root/server/panel" "$copy_root/scripts"
+mkdir "$target/.qoder-plugin" "$copy_root" "$copy_root/.qoder-plugin" "$copy_root/assets" "$copy_root/server" "$copy_root/server/bin" "$copy_root/server/panel" "$copy_root/scripts"
 
 # 仅复制显式允许的常规文件；拒绝符号链接文件和目录，防止引用外部真实数据。
 # 参数为插件内相对路径，目标同名；目录已由本脚本创建。
@@ -55,7 +55,7 @@ copy_file() {
     [ -f "$source" ] && [ ! -L "$source" ] || fail "分发文件缺失或是符号链接：$relative"
     cp "$source" "$copy_root/$relative"
 }
-for directory in .qoder-plugin server server/bin server/panel scripts; do
+for directory in .qoder-plugin assets server server/bin server/panel scripts; do
     [ -d "$plugin_root/$directory" ] && [ ! -L "$plugin_root/$directory" ] || fail "分发目录缺失或是符号链接：$directory"
 done
 
