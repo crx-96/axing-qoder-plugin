@@ -15,7 +15,7 @@ export const DEFAULT_PORT = 19787;
 /** 管理页网关固定端口：免密管理入口与连接器授权元数据共用；与模型端口不同且跨版本保持不变。 */
 export const MANAGEMENT_PORT = 19788;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录与上述固定端口。 */
-export const PLUGIN_VERSION = "1.0.2";
+export const PLUGIN_VERSION = "1.0.3";
 /** 旧版公共密码仅用于识别需要升级的文件和兼容环境配置。 */
 const LEGACY_MGMT_KEY = "123456";
 

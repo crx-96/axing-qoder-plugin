@@ -16,7 +16,7 @@ import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.m
 import { requestLocal, httpFailure } from "./local-http.mjs";
 import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
 import { ensureApprovalRouting } from "./approval-routing.mjs";
-import { readSystemProxyUrl, syncProxyUrl } from "./system-proxy.mjs";
+import { readEffectiveProxyUrl, syncProxyUrl } from "./system-proxy.mjs";
 
 const execFileAsync = promisify(execFile);
 const inFlight = new Map();
@@ -97,6 +97,7 @@ async function replacePrivateFile(path, text, original) {
 /**
  * 按 Windows 系统代理同步 requests.proxy-url；核心不读系统代理设置，只在冷启动时由插件写入。
  * 读取失败或平台无系统代理概念时保持现有配置，用户自管的代理值不接管也不改写。
+ * 系统代理地址不可达且检测到隧道网卡在用时按直连处理，避免核心反复拨号失效地址。
  * @param {string} text 已通过安全字段校验的 config.yaml 文本
  * @param {object} config loadConfig 返回的运行配置
  * @param {Function} readProxy 系统代理读取实现
@@ -115,7 +116,7 @@ async function syncUpstreamProxy(text, config, readProxy) {
  * 审批规则与 requests.proxy-url 是既有例外：后者按 Windows 系统代理同步，且只改写插件自己写过的值。
  * readProxy 只供独立测试注入，生产调用沿用系统环境。
  */
-export async function ensureDataDir(config, { readProxy = readSystemProxyUrl } = {}) {
+export async function ensureDataDir(config, { readProxy = readEffectiveProxyUrl } = {}) {
   // 先创建私有授权目录，新安装直接发布已合并默认策略的完整配置。
   await mkdir(config.authDir, { recursive: true, mode: 0o700 });
   if (await readOptional(config.configPath) === null) {

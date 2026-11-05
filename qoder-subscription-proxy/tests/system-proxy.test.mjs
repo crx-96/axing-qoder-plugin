@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { once, EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { desiredProxyUrl, normalizeProxyServer, readSystemProxyUrl, syncProxyUrl } from "../server/system-proxy.mjs";
+import {
+  desiredProxyUrl, hasTunnelEgress, isProxyReachable, normalizeProxyServer,
+  readEffectiveProxyUrl, readSystemProxyUrl, syncProxyUrl,
+} from "../server/system-proxy.mjs";
 import { parseConfigYaml } from "../server/config-yaml.mjs";
 import { loadConfig, renderConfigYaml } from "../server/config.mjs";
 import { ensureDataDir } from "../server/supervisor.mjs";
@@ -73,6 +76,138 @@ test("readSystemProxyUrl 只在 Windows 读取注册表，任何失败都返回�
   assert.equal(await stdout(""), null);
   assert.equal(await readSystemProxyUrl({ platform: "win32", exec: async () => { throw new Error("注册表不可读"); } }), null);
   assert.equal(await readSystemProxyUrl({ platform: "win32", exec: async () => ({}) }), null);
+});
+
+/** 临时 TCP 监听：为可达性探测提供真实可连接的端口，测试结束自动关闭。 */
+async function tcpListener(t) {
+  const server = net.createServer((socket) => socket.destroy());
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  return server.address().port;
+}
+
+/** 可手工触发事件的假套接字；用于覆盖超时与错误路径而不依赖宿主网络状态。 */
+function fakeSocket() {
+  const socket = new EventEmitter();
+  socket.destroyed = false;
+  socket.destroy = () => { socket.destroyed = true; };
+  return socket;
+}
+
+test("isProxyReachable 连得上才算可达，超时、错误与非法地址一律不可达且不抛出", async (t) => {
+  const live = await tcpListener(t);
+  assert.equal(await isProxyReachable(`http://127.0.0.1:${live}`, { timeout: 2000 }), true, "在听的回环端口可达");
+  // 回环不经路由表也不被隧道网卡捕获，关闭的端口必须快速判为不可达。
+  assert.equal(await isProxyReachable(`http://127.0.0.1:${await unusedPort()}`, { timeout: 2000 }), false);
+
+  // 无响应地址：连接实现按 timeout 触发空闲计时器事件，与真实 net 套接字行为一致。
+  const pending = fakeSocket();
+  const pendingArguments = [];
+  const pendingResult = isProxyReachable(clash, {
+    timeout: 20,
+    connect: (options) => {
+      pendingArguments.push(options);
+      setTimeout(() => pending.emit("timeout"), options.timeout);
+      return pending;
+    },
+  });
+  assert.equal(await pendingResult, false, "时限内连不上按不可达处理");
+  assert.deepEqual(pendingArguments, [{ host: "127.0.0.1", port: 7897, timeout: 20 }]);
+  assert.equal(pending.destroyed, true, "试探用的套接字必须释放");
+
+  const connected = fakeSocket();
+  const settled = isProxyReachable(clash, { timeout: 2000, connect: () => connected });
+  connected.emit("connect");
+  assert.equal(await settled, true);
+  assert.equal(connected.destroyed, true, "可达后同样释放套接字");
+
+  const failed = fakeSocket();
+  const failure = isProxyReachable(clash, { timeout: 2000, connect: () => failed });
+  failed.emit("error", Object.assign(new Error("连接被拒绝"), { code: "ECONNREFUSED" }));
+  assert.equal(await failure, false);
+
+  const closed = fakeSocket();
+  const closing = isProxyReachable(clash, { timeout: 2000, connect: () => closed });
+  closed.emit("close");
+  assert.equal(await closing, false);
+
+  // IPv6 主机名要剥掉方括号再交给 net。
+  const six = fakeSocket();
+  const sixArguments = [];
+  const sixResult = isProxyReachable("http://[::1]:7897", { timeout: 2000, connect: (options) => { sixArguments.push(options); return six; } });
+  six.emit("connect");
+  assert.equal(await sixResult, true);
+  assert.equal(sixArguments[0].host, "::1");
+
+  // 可达性只看主机与端口；带凭据的地址由归一化环节拦截，不会走到这里。
+  const credentialed = fakeSocket();
+  const credentialResult = isProxyReachable("http://user:pass@127.0.0.1:7897", { timeout: 2000, connect: () => credentialed });
+  credentialed.emit("connect");
+  assert.equal(await credentialResult, true);
+  for (const url of ["not a proxy", "http://127.0.0.1", "127.0.0.1:7897", "", "http://:7897"]) {
+    assert.equal(await isProxyReachable(url, { connect: () => { throw new Error("不得发起连接"); } }), false, url);
+  }
+  assert.equal(await isProxyReachable(clash, { connect: () => { throw new Error("同步失败"); } }), false, "连接实现同步抛错也按不可达处理");
+});
+
+test("hasTunnelEgress 只在 Windows 枚举网卡，任何失败都按未检测到隧道处理", async () => {
+  assert.equal(await hasTunnelEgress({ platform: "linux" }), false);
+  assert.equal(await hasTunnelEgress({ platform: "darwin", exec: async () => { throw new Error("不得调用"); } }), false);
+  const calls = [];
+  const exec = async (file, args, options) => {
+    calls.push({ file, args, options });
+    return { stdout: '{"tunnel":true}' };
+  };
+  assert.equal(await hasTunnelEgress({ platform: "win32", exec }), true);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].file, /powershell\.exe$/i);
+  assert.equal(calls[0].args[0], "-NoProfile");
+  const command = calls[0].args.join(" ");
+  // 必须走 .NET 原生枚举：Get-NetRoute 要加载 CIM 模块，实测约 3.5 秒，会吃掉冷启动预算。
+  assert.match(command, /NetworkInterface\]::GetAllNetworkInterfaces/);
+  assert.equal(command.includes("Get-NetRoute"), false);
+  assert.match(command, /PropVirtual/, "Wintun 系适配器按类型识别，不依赖本地化名称");
+  assert.match(command, /wintun\|wireguard\|tap-windows/, "TAP 类隧道按关键字兜底");
+  assert.match(command, /OperationalStatus/, "只认连接状态的网卡");
+  assert.equal(calls[0].options.shell, undefined, "execFile 参数数组不经过 shell");
+  assert.equal(calls[0].options.windowsHide, true);
+  const stdout = async (value) => hasTunnelEgress({ platform: "win32", exec: async () => ({ stdout: value }) });
+  assert.equal(await stdout('\uFEFF{"tunnel":true}\r\n'), true);
+  assert.equal(await stdout('{"tunnel":false}'), false);
+  assert.equal(await stdout('{"tunnel":"true"}'), false, "只接受布尔真值");
+  assert.equal(await stdout("not json"), false);
+  assert.equal(await stdout("[]"), false);
+  assert.equal(await stdout(""), false);
+  assert.equal(await hasTunnelEgress({ platform: "win32", exec: async () => { throw new Error("枚举失败"); } }), false);
+  assert.equal(await hasTunnelEgress({ platform: "win32", exec: async () => ({}) }), false);
+});
+
+test("readEffectiveProxyUrl 仅在地址不可达且隧道在用时回落直连", async () => {
+  const seen = [];
+  const run = ({ url, reachable, tunneled }) => readEffectiveProxyUrl({
+    read: async () => { seen.push("read"); return url; },
+    probe: async () => { seen.push("probe"); return reachable; },
+    tunnel: async () => { seen.push("tunnel"); return tunneled; },
+  });
+  // 本就直连或状态不可用时不必探测，TUN 单开的用户零额外开销。
+  seen.length = 0;
+  assert.equal(await run({ url: "", reachable: true, tunneled: true }), "");
+  assert.deepEqual(seen, ["read"]);
+  seen.length = 0;
+  assert.equal(await run({ url: null, reachable: true, tunneled: true }), null);
+  assert.deepEqual(seen, ["read"]);
+  // 地址可达即沿用，隧道状态无关：显式端口与 TUN 都只有一跳。
+  seen.length = 0;
+  assert.equal(await run({ url: clash, reachable: true, tunneled: true }), clash);
+  assert.deepEqual(seen, ["read", "probe"]);
+  // 不可达 + 隧道在用：直连确定可用，死地址只会让核心反复拨号失败。
+  seen.length = 0;
+  assert.equal(await run({ url: clash, reachable: false, tunneled: true }), "");
+  assert.deepEqual(seen, ["read", "probe", "tunnel"]);
+  // 不可达 + 没有隧道：保留写入，客户端随后启动即可自愈，清空反倒要重启桥。
+  seen.length = 0;
+  assert.equal(await run({ url: clash, reachable: false, tunneled: false }), clash);
+  assert.deepEqual(seen, ["read", "probe", "tunnel"]);
 });
 
 test("syncProxyUrl 写入、清空并接管恰好相同的用户值", () => {
@@ -176,6 +311,28 @@ test("用户自管的显式直连在冷启动后保留且不被接管", async (t
   assert.equal(await readFile(config.proxyStatePath, "utf8").catch((error) => error.code), "ENOENT");
   await ensureDataDir(config, { readProxy: reader(clash) });
   assert.equal(await readFile(config.configPath, "utf8"), preserved, "重复冷启动同样不得改写用户代理");
+});
+
+test("隧道在用且系统代理地址失效时冷启动回落直连，隧道消失后恢复写入", async (t) => {
+  const { config } = await fixture(t, "qoder-system-proxy-tunnel-");
+  let reachable = true;
+  let tunneled = true;
+  const readProxy = () => readEffectiveProxyUrl({ read: async () => clash, probe: async () => reachable, tunnel: async () => tunneled });
+  await ensureDataDir(config, { readProxy });
+  assert.equal(parseConfigYaml(await readFile(config.configPath, "utf8")).values.get(proxyKey), clash, "地址可达时照常写入");
+  assert.equal(await readFile(config.proxyStatePath, "utf8"), `${clash}\n`);
+  // 客户端关闭混合端口但 TUN 仍在承载出口：直连可用，失效地址必须清掉，否则核心每次请求都拨号失败。
+  reachable = false;
+  await ensureDataDir(config, { readProxy });
+  assert.equal(parseConfigYaml(await readFile(config.configPath, "utf8")).values.get(proxyKey), "", "隧道在用且地址不可达时回落直连");
+  assert.equal(await readFile(config.proxyStatePath, "utf8"), "\n", "归属记录同步清空");
+  await ensureDataDir(config, { readProxy });
+  assert.equal(parseConfigYaml(await readFile(config.configPath, "utf8")).values.get(proxyKey), "", "重复冷启动保持幂等");
+  // 隧道关闭（用户退出 TUN 只留系统代理）后恢复跟随：此时直连出不去，写入才能在客户端启动后自愈。
+  tunneled = false;
+  await ensureDataDir(config, { readProxy });
+  assert.equal(parseConfigYaml(await readFile(config.configPath, "utf8")).values.get(proxyKey), clash, "没有隧道兜底时保留写入");
+  assert.equal(await readFile(config.proxyStatePath, "utf8"), `${clash}\n`);
 });
 
 /** 取一个当前空闲的回环端口；原生核心需要真实可监听的地址。 */

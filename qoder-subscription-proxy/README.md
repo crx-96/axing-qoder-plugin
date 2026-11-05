@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.2
+# qoder订阅代理 · 1.0.3
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前 Windows 包为 `qoder-subscription-proxy-v1.0.2-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v1.0.2-posix.zip`；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前 Windows 包为 `qoder-subscription-proxy-v1.0.3-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v1.0.3-posix.zip`；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -59,7 +59,9 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 第一个功能性例外是终端自动审批兼容：冷启动会在 `requests.payload.override` 补齐定向规则，把宿主自动权限模式的安全分类请求（CN 与国际版两种提示措辞）路由到 `codex-auto-review` 并附加终端风险判断指引。该规则只匹配独立审批检查请求，不影响普通对话；识别条件变化时需重新核对。规则补齐幂等，用户修改过的规则保留。
 
-第二个例外是上游出口代理：核心只读取 `requests.proxy-url` 与 `HTTPS_PROXY` 等环境变量，**不读取 Windows 的「系统代理」设置**，因此仅启用系统代理（非 TUN）时模型请求会直连并失败。冷启动会读取 `HKCU` 的 Internet Settings，把启用中的系统代理写入 `requests.proxy-url`，系统代理关闭时写回空值即上游默认直连。同步只改写插件上次写入的值（记录在数据目录 `bridge.proxy`）；你自行设置的代理（含 `direct`、`none` 或任意自定义地址）原样保留，同时不再跟随系统设置，清空该值即可恢复跟随。切换代理模式或端口后需重启桥生效（`bridge_stop` 再 `bridge_start`，或在宿主 MCP 设置中重连连接器）。PAC 自动配置脚本与仅 SOCKS 的系统代理无法表达为 `proxy-url`，按直连处理；macOS/Linux 没有等价的系统代理设置，沿用核心的环境变量代理。
+第二个例外是上游出口代理：核心只读取 `requests.proxy-url` 与 `HTTPS_PROXY` 等环境变量，**不读取 Windows 的「系统代理」设置**，因此仅启用系统代理（非 TUN）时模型请求会直连并失败。冷启动会读取 `HKCU` 的 Internet Settings，把启用中的系统代理写入 `requests.proxy-url`，系统代理关闭时写回空值即上游默认直连。同步只改写插件上次写入的值（记录在数据目录 `bridge.proxy`）；你自行设置的代理（含 `direct`、`none` 或任意自定义地址）原样保留，同时不再跟随系统设置，清空该值即可恢复跟随。切换代理模式或端口后需重启桥生效（`bridge_stop` 再 `bridge_start`，或在宿主 MCP 设置中重连连接器）。
+
+TUN 模式不需要这个地址：隧道网卡在 IP 层承载全部出口流量，核心直连即可，插件也不会为此多做任何事——系统代理关闭时既不探测地址也不查询网卡。但注册表里的系统代理常与 TUN 并存（客户端两个开关都开，或退出时未清理），照抄一个已失效的地址会让核心每次请求都拨号失败，而核心的握手超时不约束拨号与 `CONNECT`，失败还要叠加 `requests.retry` 的轮次。因此写入前会先探测该地址能否建立 TCP 连接：**可达就照常写入**，显式端口与 TUN 都只有一跳，不会叠加成两层代理；**不可达且检测到隧道网卡在用才回落直连**，此时直连确定可用；不可达又没有隧道时仍然写入，因为直连同样出不去，而写入能让客户端随后启动时自愈，清空反倒要重启桥才能恢复。探测只对回环地址可信——TUN 会直接应答非回环连接，这种情形按可达处理，与不探测时一致。隧道检测只认「已连接」状态的 Wintun/TAP 类网卡，检测失败即视为没有隧道；若你的隧道网卡处于连接状态却并未承载出口（例如分离路由的企业 VPN），在 `config.yaml` 自行填写 `requests.proxy-url` 即可，插件不改写也不接管该值。PAC 自动配置脚本按目标域名分别决策，无法表达为单一的 `proxy-url`，与仅 SOCKS 的系统代理一样按直连处理，需要固定出口时同样请自行填写；macOS/Linux 没有等价的系统代理设置，沿用核心的环境变量代理。
 
 ## MCP 工具与生图
 
@@ -116,6 +118,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 - **管理页登录失败**：重新点击连接器按钮；手动登录时核对 `mgmtKey` 与端口。
 - **403 / 429 / 5xx**：先检查权限、配额、网络和上游异常，不反复重启本机进程。
 - **下载失败**：检查 curl、HTTPS、代理与目录权限后重试；哈希不匹配不得跳过校验。
+- **切换 TUN / 系统代理后出口不符合预期**：同步只发生在冷启动，`bridge_stop` 再 `bridge_start`；系统代理地址探测不可达且隧道网卡在用时按直连处理，需要固定出口请自行填写 `requests.proxy-url`。
 
 ## 开发验证
 

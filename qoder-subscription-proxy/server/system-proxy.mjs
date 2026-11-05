@@ -4,17 +4,27 @@
  * CLIProxyAPI 核心只通过环境变量（HTTPS_PROXY 等）或 `requests.proxy-url` 决定上游出口，
  * 不读取 WinINET 的「系统代理」设置，因此在仅启用系统代理（非 TUN）的机器上模型请求会直连并失败。
  * 本模块在冷启动时把系统代理地址同步进 config.yaml，并保证只改写插件自己写过的值。
+ *
+ * TUN 模式不需要这个地址：隧道网卡在 IP 层承载全部出口流量，核心直连即可正常工作，
+ * 而注册表里的 ProxyEnable/ProxyServer 常与 TUN 并存（客户端两个开关都开，或退出时未清理）。
+ * 照抄一个已失效的地址会让核心每次请求都拨号失败——核心的 tls-handshake-timeout-seconds
+ * 明确不约束 dial 与 proxy CONNECT，失败还要叠加 requests.retry 的轮次。因此写入前先探测可达性，
+ * 且只在「地址不可达 + 隧道网卡在用」时回落直连；地址不可达又没有隧道兜底时维持照写，
+ * 因为此时直连同样出不去，而写入能让客户端随后启动时自愈，清空反倒要重启桥才能恢复。
  */
 
 import { execFile } from "node:child_process";
+import { createConnection } from "node:net";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { appendConfigBlock, parseConfigYaml, replaceConfigScalar } from "./config-yaml.mjs";
 
 const execFileAsync = promisify(execFile);
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-/** 注册表读取时限；读取慢或失败都按不可用处理，不得拖长或阻塞冷启动。 */
+/** 注册表与网卡读取时限；读取慢或失败都按不可用处理，不得拖长或阻塞冷启动。 */
 const READ_TIMEOUT_MS = 5000;
+/** 代理可达性探测时限；本机监听是毫秒级，该预算只用于兜住被丢包的陈旧地址。 */
+const PROBE_TIMEOUT_MS = 1200;
 /** 核心与随包示例中的上游代理字段路径。 */
 const PROXY_PATH = ["requests", "proxy-url"];
 
@@ -92,6 +102,94 @@ export async function readSystemProxyUrl({ platform = process.platform, exec = e
   catch { return null; }
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) return null;
   return desiredProxyUrl(settings);
+}
+
+/**
+ * 探测代理地址能否建立 TCP 连接。只验证连通，不发送任何代理协议数据。
+ * 回环地址不经路由表也不被隧道网卡捕获，结果可信；非回环地址在 TUN 下会被隧道直接应答而恒为可达，
+ * 这种情形无法区分，按可达处理即可——与不探测时的行为一致，不会更差。
+ * @param {string} url 期望写入的上游代理地址
+ * @param {object} [options] 依赖注入项
+ * @param {number} [options.timeout=PROBE_TIMEOUT_MS] 连接时限（毫秒）
+ * @param {Function} [options.connect=createConnection] TCP 连接实现，只供测试注入；生产沿用系统环境
+ * @returns {Promise<boolean>} 时限内是否连上；地址不可解析或端口非法一律视为不可达，且不抛出
+ */
+export async function isProxyReachable(url, { timeout = PROBE_TIMEOUT_MS, connect = createConnection } = {}) {
+  let target;
+  try { target = new URL(url); } catch { return false; }
+  // URL 把 IPv6 主机名包在方括号里，net 需要裸地址。
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  const port = Number(target.port);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return false;
+  return new Promise((resolve) => {
+    let socket;
+    let settled = false;
+    // 连接、超时、错误、关闭四条路径只结算一次，并释放试探用的套接字。
+    const finish = (reachable) => {
+      if (settled) return;
+      settled = true;
+      socket?.destroy();
+      resolve(reachable);
+    };
+    try { socket = connect({ host, port, timeout }); }
+    catch { resolve(false); return; }
+    socket.once("connect", () => finish(true));
+    // timeout 由套接字空闲计时器触发，同时覆盖 DNS 解析挂起与 SYN 被丢弃的地址。
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+    socket.once("close", () => finish(false));
+  });
+}
+
+/**
+ * 判断是否有隧道网卡（TUN/VPN）处于连接状态，即直连是否已被隧道承载。
+ * 用 .NET 原生枚举而非 Get-NetRoute：后者要加载 CIM 模块，实测约 3.5 秒，会吃掉冷启动预算；
+ * 原生枚举约 0.3 秒，且 Wintun 系适配器统一上报 PropVirtual 类型，不必依赖本地化的适配器名。
+ * 只作为「地址不可达」时的兜底判据，因此任何不确定都返回 false，即维持写入系统代理的原有行为。
+ * @param {object} [options] 依赖注入项
+ * @param {string} [options.platform=process.platform] Node 平台标识，允许测试注入
+ * @param {Function} [options.exec=execFileAsync] PowerShell 执行实现，只供测试注入；生产沿用系统环境
+ * @returns {Promise<boolean>} 是否检测到在用的隧道网卡
+ */
+export async function hasTunnelEgress({ platform = process.platform, exec = execFileAsync } = {}) {
+  // macOS/Linux 的隧道形态与 Windows 不同，且这两个平台本就不写入系统代理，无需检测。
+  if (platform !== "win32") return false;
+  // 脚本内不含任何外部输入；关键字覆盖 Wintun/TAP 两类隧道与常见客户端的适配器命名。
+  const script = [
+    "$ErrorActionPreference='Stop';",
+    "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);",
+    "$t=$false;",
+    "foreach($n in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()){",
+    "if($n.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up){continue};",
+    "$k=$n.NetworkInterfaceType.ToString()+' '+[string]$n.Description+' '+[string]$n.Name;",
+    "if($k -match 'PropVirtual|PropNonVirtual|Tunnel|wintun|wireguard|tap-windows|utun|mihomo|clash|sing-box|v2ray|netch|sstap|softether|openvpn|tailscale|zerotier|vpn'){$t=$true;break}};",
+    "[pscustomobject]@{tunnel=$t} | ConvertTo-Json -Compress",
+  ].join(" ");
+  let stdout;
+  try {
+    ({ stdout } = await exec(powerShell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+      windowsHide: true, timeout: READ_TIMEOUT_MS, maxBuffer: 32768,
+    }));
+  } catch { return false; }
+  try { return JSON.parse(String(stdout ?? "").replace(/^\uFEFF/, "").trim())?.tunnel === true; }
+  catch { return false; }
+}
+
+/**
+ * 计算冷启动实际应写入的上游代理地址：在系统代理值之上叠加可达性与隧道判断。
+ * @param {object} [options] 依赖注入项
+ * @param {Function} [options.read=readSystemProxyUrl] 系统代理读取实现，只供测试注入
+ * @param {Function} [options.probe=isProxyReachable] 代理可达性探测实现，只供测试注入
+ * @param {Function} [options.tunnel=hasTunnelEgress] 隧道网卡检测实现，只供测试注入
+ * @returns {Promise<string|null>} 语义同 readSystemProxyUrl：`""` 表示直连，`null` 表示状态不可用
+ */
+export async function readEffectiveProxyUrl({ read = readSystemProxyUrl, probe = isProxyReachable, tunnel = hasTunnelEgress } = {}) {
+  const url = await read();
+  // null 是状态不可用（保持现有配置），"" 是本就直连（TUN 单开属于此类）；两者都不必探测。
+  if (url === null || url === "") return url;
+  if (await probe(url)) return url;
+  // 不可达且隧道在用才回落直连：此时直连确定可用，而死地址只会让核心反复拨号失败。
+  return await tunnel() ? "" : url;
 }
 
 /**
