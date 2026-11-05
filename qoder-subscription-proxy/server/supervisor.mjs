@@ -16,6 +16,7 @@ import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.m
 import { requestLocal, httpFailure } from "./local-http.mjs";
 import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
 import { ensureApprovalRouting } from "./approval-routing.mjs";
+import { readSystemProxyUrl, syncProxyUrl } from "./system-proxy.mjs";
 
 const execFileAsync = promisify(execFile);
 const inFlight = new Map();
@@ -93,8 +94,28 @@ async function replacePrivateFile(path, text, original) {
   }
 }
 
-/** 在生命周期锁内核对并补齐现有配置的安全字段；请求参数一律沿用核心上游默认值，插件不做迁移。 */
-export async function ensureDataDir(config) {
+/**
+ * 按 Windows 系统代理同步 requests.proxy-url；核心不读系统代理设置，只在冷启动时由插件写入。
+ * 读取失败或平台无系统代理概念时保持现有配置，用户自管的代理值不接管也不改写。
+ * @param {string} text 已通过安全字段校验的 config.yaml 文本
+ * @param {object} config loadConfig 返回的运行配置
+ * @param {Function} readProxy 系统代理读取实现
+ * @returns {Promise<{text: string, recorded?: string}>} recorded 存在时需要发布新的归属记录
+ */
+async function syncUpstreamProxy(text, config, readProxy) {
+  const desired = await readProxy();
+  // null 表示系统代理状态不可用（注册表读取失败或值无法解析）；此时既不清空也不写入。
+  if (desired === null) return { text };
+  const recorded = (await readOptional(config.proxyStatePath))?.trim() ?? null;
+  return syncProxyUrl(text, { desired, recorded });
+}
+
+/**
+ * 在生命周期锁内核对并补齐现有配置的安全字段；请求参数一律沿用核心上游默认值，插件不做迁移。
+ * 审批规则与 requests.proxy-url 是既有例外：后者按 Windows 系统代理同步，且只改写插件自己写过的值。
+ * readProxy 只供独立测试注入，生产调用沿用系统环境。
+ */
+export async function ensureDataDir(config, { readProxy = readSystemProxyUrl } = {}) {
   // 先创建私有授权目录，新安装直接发布已合并默认策略的完整配置。
   await mkdir(config.authDir, { recursive: true, mode: 0o700 });
   if (await readOptional(config.configPath) === null) {
@@ -110,10 +131,14 @@ export async function ensureDataDir(config) {
   // 校验既有安全字段再迁移；仅在内容变化时原子发布并清理临时文件。
   const original = await readFile(config.configPath, "utf8");
   validateExistingConfig(config, original);
-  const updated = syncManagementSecret(ensureApprovalRouting(original), config.mgmtKey);
-  if (updated === original) return;
-  validateExistingConfig(config, updated);
-  await replacePrivateFile(config.configPath, updated, original);
+  const proxy = await syncUpstreamProxy(syncManagementSecret(ensureApprovalRouting(original), config.mgmtKey), config, readProxy);
+  if (proxy.recorded === undefined && proxy.text === original) return;
+  if (proxy.text !== original) {
+    validateExistingConfig(config, proxy.text);
+    await replacePrivateFile(config.configPath, proxy.text, original);
+  }
+  // 归属记录必须在配置发布成功之后写入；顺序颠倒会让下次冷启动误判为用户自管而停止跟随系统代理。
+  if (proxy.recorded !== undefined) await replacePrivateFile(config.proxyStatePath, `${proxy.recorded}\n`);
 }
 
 /** Windows 创建时间与完整命令行共同防止 PID 回收及同名 exe 误杀。 */

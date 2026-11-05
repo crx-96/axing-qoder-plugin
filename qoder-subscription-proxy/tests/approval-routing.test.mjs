@@ -15,6 +15,8 @@ import { ensureDataDir } from "../server/supervisor.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+/** 宿主可能启用系统代理；注入固定状态让配置断言与真实设置无关。 */
+const noSystemProxy = { readProxy: async () => "" };
 const prefix = "You are a security classifier for auto permission mode.";
 /** 国际版自动审批检查的首行措辞；通配选择器须同时覆盖两种宿主文案。 */
 const intlPrefix = "You are a security monitor for an autonomous AI coding agent.";
@@ -306,14 +308,14 @@ for (const oldRules of ["", "requests:\n  payload:\n    override:\n" + legacyRul
     const original = renderConfigYaml(current) + "observability:\n  logs:\n    request-log: true\n    logging-to-file: true\n    logs-max-total-size-mb: 256\n";
     await writeFile(current.configPath, original + oldRules);
     const secrets = await readFile(join(root, "launcher-secrets.json"));
-    await ensureDataDir(current);
+    await ensureDataDir(current, noSystemProxy);
     const updated = await readFile(current.configPath, "utf8");
     assert.ok(updated.startsWith(original));
     const { values } = parseConfigYaml(updated);
     assert.equal(values.get(overrideKey).length, 1);
     assert.equal(values.get(JSON.stringify(["requests", "payload", "override", 0, "params", "model"])), "codex-auto-review");
     assert.deepEqual(await readFile(join(root, "launcher-secrets.json")), secrets);
-    await ensureDataDir(current);
+    await ensureDataDir(current, noSystemProxy);
     assert.equal(await readFile(current.configPath, "utf8"), updated);
     await loadConfig({ pluginRoot, env });
   });
@@ -521,7 +523,7 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     await exited;
     const env = { BRIDGE_DATA_DIR: root, BRIDGE_PORT: String(port), BRIDGE_API_KEY: "isolated-api" };
     const reloaded = await loadConfig({ pluginRoot, env });
-    await ensureDataDir(reloaded);
+    await ensureDataDir(reloaded, noSystemProxy);
     const readyYaml = await readFile(reloaded.configPath, "utf8");
     assert.ok(readyYaml === replaceConfigScalar(saved, ["management", "secret-key"], reloaded.mgmtKey),
       "冷启动只同步托管密钥，不改写请求参数");

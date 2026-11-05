@@ -24,6 +24,8 @@ const execFileAsync = promisify(execFile);
 const windowsOnly = process.platform !== "win32" ? "仅在 Windows 验证进程身份与隔离 exe" : nativeCoreSkip;
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const signature = { message: "CLI Proxy API Server", endpoints: ["GET /v1/models"] };
+/** 宿主可能启用系统代理；注入固定状态让配置断言与真实设置无关。 */
+const noSystemProxy = { readProxy: async () => "" };
 
 function testConfig(directory, port = 1) {
   assert.ok(![8787, 19787].includes(port), "禁止访问旧桥或插件默认端口");
@@ -32,6 +34,7 @@ function testConfig(directory, port = 1) {
     dataDir: directory, configPath: join(directory, "config.yaml"), authDir: join(directory, "auths"),
     binPath: join(directory, "no-binary-should-be-started.exe"), pidPath: join(directory, "bridge.pid"),
     lockPath: join(directory, "bridge.lock"), pausedPath: join(directory, "bridge.paused"),
+    proxyStatePath: join(directory, "bridge.proxy"),
     endpoint: `http://127.0.0.1:${port}/v1`,
     managementUrl: `http://127.0.0.1:${port}/management.html`,
   };
@@ -358,13 +361,13 @@ test("ensureRunning 不接管只有根签名但无本版本 PID 归属的服务"
 test("ensureDataDir 并发发布完整配置并保留既有内容", async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
   config.apiKey = "synthetic-test-value-".repeat(32768);
-  const results = await Promise.allSettled(Array.from({ length: 12 }, () => ensureDataDir(config)));
+  const results = await Promise.allSettled(Array.from({ length: 12 }, () => ensureDataDir(config, noSystemProxy)));
   const errors = results.filter((entry) => entry.status === "rejected").map((entry) => entry.reason.message);
   assert.equal(errors.length, 0, `并发读取不得观察到空/半份配置：${errors.join("; ")}`);
   assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(renderConfigYaml(config)));
   const marker = "# user-owned marker\n";
   await writeFile(config.configPath, marker + renderConfigYaml(config));
-  await ensureDataDir(config);
+  await ensureDataDir(config, noSystemProxy);
   assert.equal((await readFile(config.configPath, "utf8")).startsWith(marker), true);
   assert.ok(!(await readdir(config.dataDir)).some((name) => name.endsWith(".tmp")));
 });
@@ -650,7 +653,7 @@ test("冷启动保留 BOM、CRLF 与用户自管请求参数，只补审批规�
     "requests:", "    proxy-url: direct", "",
   ].join("\n");
   await writeFile(config.configPath, legacy.replaceAll("\n", "\r\n"));
-  await ensureDataDir(config);
+  await ensureDataDir(config, noSystemProxy);
   const updated = await readFile(config.configPath, "utf8");
   assert.ok(updated.startsWith("\uFEFF"));
   assert.doesNotMatch(updated, /(?<!\r)\n/);
@@ -658,7 +661,7 @@ test("冷启动保留 BOM、CRLF 与用户自管请求参数，只补审批规�
   assert.ok(updated.includes("codex-auto-review"), "审批兼容规则仍随冷启动补齐");
   const broken = legacy.replace("allow-remote: false", "allow-remote: true");
   await writeFile(config.configPath, broken.replaceAll("\n", "\r\n"));
-  await assert.rejects(ensureDataDir(config), /allow-remote/);
+  await assert.rejects(ensureDataDir(config, noSystemProxy), /allow-remote/);
   assert.equal(await readFile(config.configPath, "utf8"), broken.replaceAll("\n", "\r\n"));
 });
 
@@ -677,7 +680,7 @@ test("Windows 配置暂不允许替换时等待释放，随后保留并发编辑
     const exited = once(holder, "exit");
     try {
       assert.match(String((await once(holder.stdout, "data"))[0]), /locked/);
-      const result = ensureDataDir(config).then(() => null, error => error);
+      const result = ensureDataDir(config, noSystemProxy).then(() => null, error => error);
       await waitUntil(async () => (await readdir(config.dataDir)).some(name => name.endsWith(".tmp")), 3000);
       holder.stdin.end(editWhileLocked ? "edit\n" : "release\n");
       const error = await result;
@@ -708,16 +711,16 @@ test("升级与冷启动不再改写请求参数；无效配置仍保护本地�
   const secrets = join(config.dataDir, "launcher-secrets.json");
   await writeFile(authFile, "untouched account");
   await writeFile(secrets, "untouched local keys");
-  await ensureDataDir(config);
+  await ensureDataDir(config, noSystemProxy);
   const updated = await readFile(config.configPath, "utf8");
   assert.ok(updated.includes("request-retry: 7 # 用户自管"));
   assert.ok(updated.includes("keepalive-seconds: 42"));
   assert.ok(updated.includes("codex-auto-review"));
-  await ensureDataDir(config);
+  await ensureDataDir(config, noSystemProxy);
   assert.equal(await readFile(config.configPath, "utf8"), updated, "重复冷启动必须幂等");
   const invalid = original.replace("allow-remote: false", "allow-remote: true");
   await writeFile(config.configPath, invalid);
-  await assert.rejects(ensureDataDir(config), /allow-remote/);
+  await assert.rejects(ensureDataDir(config, noSystemProxy), /allow-remote/);
   assert.equal(await readFile(config.configPath, "utf8"), invalid);
   assert.equal(await readFile(authFile, "utf8"), "untouched account");
   assert.equal(await readFile(secrets, "utf8"), "untouched local keys");
@@ -758,7 +761,7 @@ test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断�
     ["gpt-ok", 200, 1], ["gpt-early-eof", 200, 1], ["gpt-mid-eof", 200, 1],
     ["gpt-http-overload", 503, 1], ["gpt-stream-overload", 200, 1], ["gpt-persistent-overload", 503, 1],
   ];
-  await ensureDataDir(config);
+  await ensureDataDir(config, noSystemProxy);
   const defaults = await readFile(config.configPath, "utf8");
   await writeFile(config.configPath, defaults.replace("disable-control-panel: false", "disable-control-panel: true") + [
     "api-keys:", "  codex:", "    - name: fixture", `      base-url: "http://127.0.0.1:${upstream.address().port}"`,

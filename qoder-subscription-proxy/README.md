@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.1
+# qoder订阅代理 · 1.0.2
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前 Windows 包为 `qoder-subscription-proxy-v1.0.1-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v1.0.1-posix.zip`；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前 Windows 包为 `qoder-subscription-proxy-v1.0.2-windows.zip`，macOS/Linux 包为 `qoder-subscription-proxy-v1.0.2-posix.zip`；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -57,7 +57,9 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 插件生成的 `config.yaml` 只包含本机安全必需字段：回环监听与固定端口、仅本机管理（`allow-remote: false`）、固定随包管理页、客户端 API Key、授权目录。**重试、冷却、流式心跳、启动缓冲等请求参数一律沿用 CLIProxyAPI 上游默认值**，插件不写入、不复位、不迁移；如需调整请在管理页或 `config.yaml` 中自行设置。
 
-唯一的功能性例外是终端自动审批兼容：冷启动会在 `requests.payload.override` 补齐定向规则，把宿主自动权限模式的安全分类请求（CN 与国际版两种提示措辞）路由到 `codex-auto-review` 并附加终端风险判断指引。该规则只匹配独立审批检查请求，不影响普通对话；识别条件变化时需重新核对。规则补齐幂等，用户修改过的规则保留。
+第一个功能性例外是终端自动审批兼容：冷启动会在 `requests.payload.override` 补齐定向规则，把宿主自动权限模式的安全分类请求（CN 与国际版两种提示措辞）路由到 `codex-auto-review` 并附加终端风险判断指引。该规则只匹配独立审批检查请求，不影响普通对话；识别条件变化时需重新核对。规则补齐幂等，用户修改过的规则保留。
+
+第二个例外是上游出口代理：核心只读取 `requests.proxy-url` 与 `HTTPS_PROXY` 等环境变量，**不读取 Windows 的「系统代理」设置**，因此仅启用系统代理（非 TUN）时模型请求会直连并失败。冷启动会读取 `HKCU` 的 Internet Settings，把启用中的系统代理写入 `requests.proxy-url`，系统代理关闭时写回空值即上游默认直连。同步只改写插件上次写入的值（记录在数据目录 `bridge.proxy`）；你自行设置的代理（含 `direct`、`none` 或任意自定义地址）原样保留，同时不再跟随系统设置，清空该值即可恢复跟随。切换代理模式或端口后需重启桥生效（`bridge_stop` 再 `bridge_start`，或在宿主 MCP 设置中重连连接器）。PAC 自动配置脚本与仅 SOCKS 的系统代理无法表达为 `proxy-url`，按直连处理；macOS/Linux 没有等价的系统代理设置，沿用核心的环境变量代理。
 
 ## MCP 工具与生图
 
@@ -81,6 +83,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 | `config.yaml`、`auths/` | 运行配置及敏感授权凭据 |
 | `bridge.log` | 日志可能包含上游账号或请求信息，分享前须脱敏 |
 | `bridge.pid`、`bridge.paused` | 归属记录与持久暂停状态 |
+| `bridge.proxy` | 插件上次同步进 `requests.proxy-url` 的系统代理值，用于区分用户自管代理 |
 | `runtimes/` | 经校验的固定版本、当前平台核心 |
 | `management-panel/`、`generated/` | 生成的管理页与生图工具输出 |
 
@@ -96,7 +99,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 | `BRIDGE_API_KEY` | 覆盖模型客户端密钥，须满足 HTTP 请求头要求并与已有配置一致 |
 | `BRIDGE_MGMT_KEY` | 通常留空；管理密码由本机生成，不允许覆盖 |
 | `BRIDGE_BIN` | 可信兼容的 CLIProxyAPI v8 可执行文件；不下载、不替换 |
-| `QODER_HTTP_PROXY` | 核心 HTTPS 下载优先代理 |
+| `QODER_HTTP_PROXY` | 核心 HTTPS 下载优先代理；只影响下载，模型出口见「核心配置策略」的系统代理同步 |
 
 ## 自动启动与退出清理
 

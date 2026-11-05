@@ -28,6 +28,7 @@ server/panel/LICENSE
 server/panel/management.upstream.html
 server/posix-supervisor.mjs
 server/supervisor.mjs
+server/system-proxy.mjs
 scripts/ProxyJob.cs
 scripts/antigravity-login.ps1
 scripts/antigravity-request.mjs

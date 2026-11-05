@@ -15,7 +15,7 @@ export const DEFAULT_PORT = 19787;
 /** 管理页网关固定端口：免密管理入口与连接器授权元数据共用；与模型端口不同且跨版本保持不变。 */
 export const MANAGEMENT_PORT = 19788;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录与上述固定端口。 */
-export const PLUGIN_VERSION = "1.0.1";
+export const PLUGIN_VERSION = "1.0.2";
 /** 旧版公共密码仅用于识别需要升级的文件和兼容环境配置。 */
 const LEGACY_MGMT_KEY = "123456";
 
@@ -163,6 +163,8 @@ export async function loadConfig({ pluginRoot, env = process.env, platform = pro
     lockPath: join(dataDir, "bridge.lock"),
     /** 用户主动暂停自动启动的持久标记。 */
     pausedPath: join(dataDir, "bridge.paused"),
+    /** 插件上次写入 requests.proxy-url 的值；用于区分系统代理同步结果与用户自管代理。 */
+    proxyStatePath: join(dataDir, "bridge.proxy"),
   };
   // 既有 YAML 不能静默覆盖本次环境输入；创建/启动锁内仍需再次核对以消除检查后竞争。
   let text;

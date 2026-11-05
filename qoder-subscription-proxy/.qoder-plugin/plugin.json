@@ -1,6 +1,6 @@
 {
   "name": "qoder-subscription-proxy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "qoder订阅代理：本机订阅授权、固定端口的模型 API 与代理管理，随 MCP 生命周期托管；管理页连接器按钮一键打开免密管理登录页。",
   "author": { "name": "crx-96" },
   "license": "MIT",

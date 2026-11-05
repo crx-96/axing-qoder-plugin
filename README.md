@@ -6,12 +6,12 @@
 
 ## 下载与安装
 
-本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.1**。
+本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.2**。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.0.1-windows.zip` |
-| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v1.0.1-posix.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.0.2-windows.zip` |
+| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v1.0.2-posix.zip` |
 
 **不要选择 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`**，它们是整个仓库的源码，不是可直接导入的单插件安装包。用户无需克隆仓库或自行打包。
 
@@ -19,7 +19,7 @@
 
 安装后启用插件并连接 MCP。待代理就绪，在插件详情页点击 `management-page` 连接器的 **授权** 按钮，浏览器即通过固定回环端口 `19788` 打开免密管理登录页；首次接入订阅时在该页选择服务商完成授权。模型 API 固定使用端口 `19787`。[插件使用说明](qoder-subscription-proxy/README.md)
 
-从旧版升级时，先等请求结束并调用 `bridge_stop`。导入新版、重连 MCP 后调用 `bridge_start`，即可使用新版工具；重试、流式等请求参数沿用核心上游默认值，插件不再写入或迁移。
+从旧版升级时，先等请求结束并调用 `bridge_stop`。导入新版、重连 MCP 后调用 `bridge_start`，即可使用新版工具；重试、流式等请求参数沿用核心上游默认值，插件不再写入或迁移，只按 Windows 系统代理同步 `requests.proxy-url`，详见[插件核心配置策略](qoder-subscription-proxy/README.md#核心配置策略)。
 
 ## 从源码打包
 
@@ -27,8 +27,8 @@
 
 ```sh
 mkdir dist
-node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v1.0.1-windows.zip
-node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v1.0.1-posix.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v1.0.2-windows.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v1.0.2-posix.zip
 ```
 
 若 `dist` 已存在，无需再次创建。目标父目录必须先存在；脚本拒绝覆盖已有 ZIP。发布时文件名中的版本须与插件清单一致，并上传两个 ZIP 到对应的 GitHub Release，而不是提交二进制安装包到源码仓库。
