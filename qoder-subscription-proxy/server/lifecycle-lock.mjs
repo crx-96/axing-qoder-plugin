@@ -8,9 +8,7 @@ function lockError(message) {
   return Object.assign(new Error(message), { code: "BRIDGE_NOT_READY", safeMessage: message });
 }
 
-/** 串行化同一数据目录的进程启停和旧版凭据迁移；持锁进程退出时由系统释放。 */
-// POSIX 用回环端口而不是磁盘 socket 作锁，进程被强杀也不会留下可被误删的锁文件。
-// 哈希碰撞只会保守地等待/报错，不抢占监听者；realpath 合并指向同一数据目录的别名。
+/** 同目录启停与迁移必须串行；Linux 抽象 socket 避免 TCP 竞争，所有平台均由 OS 在进程退出时释放锁。 */
 export async function withLifecycleLock(config, action, timeoutMs = 25000, signal) {
   if (!["win32", "darwin", "linux"].includes(process.platform)) throw lockError("不支持此操作系统");
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
@@ -19,8 +17,10 @@ export async function withLifecycleLock(config, action, timeoutMs = 25000, signa
   const lockPort = 20000 + Number.parseInt(hash.slice(0, 8), 16) % 20000;
   const address = process.platform === "win32"
     ? `\\\\.\\pipe\\qoder-subscription-bridge-${hash}`
-    : { host: "127.0.0.1", port: lockPort, exclusive: true };
-  if (process.platform !== "win32" && lockPort === config.port) {
+    : process.platform === "linux"
+      ? `\0qoder-subscription-bridge-${hash}`
+      : { host: "127.0.0.1", port: lockPort, exclusive: true };
+  if (process.platform === "darwin" && lockPort === config.port) {
     throw lockError("BRIDGE_PORT 与本数据目录的生命周期锁端口冲突；请使用其他代理端口");
   }
   const deadline = Date.now() + timeoutMs;

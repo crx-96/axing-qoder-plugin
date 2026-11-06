@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm } from "node:fs/promises";
@@ -267,6 +268,22 @@ test("sameProcess 核对 pid、创建时间、命令行与 exe/config 绝对路�
   for (const changed of [null, { ...record, binPath: undefined }, { ...record, configPath: join(tmpdir(), "foreign.yaml") }]) {
     assert.equal(sameProcess(changed, identity, config), false);
   }
+});
+
+test("Linux 生命周期锁不受同哈希 TCP 端口占用或代理端口重合影响", { skip: process.platform !== "linux" }, async (t) => {
+  const config = testConfig(await realpath(await directoryFixture(t)));
+  const hash = createHash("sha256").update(config.dataDir).digest("hex");
+  const port = 20000 + Number.parseInt(hash.slice(0, 8), 16) % 20000;
+  const server = http.createServer();
+  try {
+    server.listen({ host: "127.0.0.1", port, exclusive: true });
+    await once(server, "listening");
+  } catch (error) {
+    if (error.code !== "EADDRINUSE") throw error;
+  }
+  t.after(async () => { if (server.listening) await new Promise((resolve) => server.close(resolve)); });
+  assert.equal(await withLifecycleLock(config, () => "acquired", 150), "acquired");
+  assert.equal(await withLifecycleLock({ ...config, port }, () => "same-port", 150), "same-port");
 });
 
 test("生命周期锁排他、超时且 action 异常后释放", async (t) => {
