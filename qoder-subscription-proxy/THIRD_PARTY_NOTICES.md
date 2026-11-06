@@ -2,42 +2,44 @@
 
 ## CLIProxyAPI
 
-本插件使用 **CLIProxyAPI**，在宿主启动插件 MCP 进程时后台自动校验/准备当前平台核心，缺少有效缓存则下载；MCP 握手只等待本地配置，核心准备完成后自动启动代理，无需先有模型或工具调用。CLIProxyAPI 提供 OpenAI 兼容 API、服务商适配、模型列表、OAuth 管理及图片生成接口。插件自己的代码负责 Qoder MCP 接入、本机进程托管、本地配置和授权辅助，不应被理解为这些上游能力的原创实现。
+本插件使用 **CLIProxyAPI**，每个安装 ZIP 内置对应平台核心，在宿主启动插件 MCP 进程时后台校验并安装到本机缓存，无需首启下载；只有从源码直接运行等未随包场景才回退下载。MCP 握手只等待本地配置，核心准备完成后自动启动代理，无需先有模型或工具调用。CLIProxyAPI 提供 OpenAI 兼容 API、服务商适配、模型列表、OAuth 管理及图片生成接口。插件自己的代码负责 Qoder MCP 接入、本机进程托管、本地配置和授权辅助，不应被理解为这些上游能力的原创实现。
 
 | 项目 | 值 |
 | --- | --- |
 | 上游仓库 | https://github.com/router-for-me/CLIProxyAPI |
-| 固定下载版本 | `v8.0.55`；支持 Windows x64、macOS x64/arm64、Linux x64/arm64，每台机器仅下载当前平台 |
-| 对应源码 | https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.55 |
-| 发布页 | https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.55 |
+| 固定核心版本 | `v8.0.57`；支持 Windows x64、macOS x64/arm64、Linux x64/arm64，每个安装 ZIP 只内置对应平台核心 |
+| 对应源码 | https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.57 |
+| 发布页 | https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.57 |
 | 许可证 | MIT，原文保存在 [`server/bin/LICENSE`](server/bin/LICENSE) |
 | 原程序名 | Windows：`cli-proxy-api.exe`；macOS/Linux：`cli-proxy-api` |
 | 修改情况 | 仅重命名文件，不修改二进制内容，不隐藏上游身份 |
-| 平台与来源清单 | [`server/bin/platforms.json`](server/bin/platforms.json)，保留原 `path` 字段标识；实际缓存仅使用其 basename |
+| 平台与来源清单 | [`server/bin/platforms.json`](server/bin/platforms.json)，`path` 为相对 `server/bin/` 的随包路径；用户缓存仅使用其 basename |
 
-插件 `0.3.0` 不分发以下二进制，只保留来源清单、上游文档与许可证。默认缓存为 `dataDir/runtimes/v8.0.55/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台准备核心，watchdog 不下载或自动重试下载；离线可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
+插件 `1.0.4` 按五个平台分别分发内置核心的安装 ZIP，源码仓库仅保留来源清单、上游文档与许可证，构建缓存和 ZIP 不提交到源码仓库。默认缓存为 `dataDir/runtimes/v8.0.57/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台校验随包核心并安装到缓存；随包文件不存在时才下载，文件无效或 SHA256 不符时明确报错，不回退网络。watchdog 不安装、下载或自动重试核心准备；高级用户仍可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动安装、下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
 
-固定二进制的清单标识与 SHA256（上游 `amd64` 对应 Node `x64`，`aarch64` 对应 `arm64`）：
+固定二进制的随包路径与 SHA256（上游 `amd64` 对应 Node `x64`，`aarch64` 对应 `arm64`）：
 
-| 平台/架构 | 清单 path（不是随包文件） | 二进制 SHA256 |
+| 平台/架构 | 随包路径（相对 `server/bin/`） | 二进制 SHA256 |
 | --- | --- | --- |
-| Windows x64 | `qoder-plugin-subscription-proxy.exe` | `01a72d524de3866700dbd1a47281957db546c37ecb0489818534ac45c4277f9f` |
-| macOS x64 | `darwin-x64/qoder-plugin-subscription-proxy` | `88d506dd337a6073af7e14aacefba30ebcef7fc8e13286899e87ae19378a893d` |
-| macOS arm64 | `darwin-arm64/qoder-plugin-subscription-proxy` | `5bb0e6ee55976852ab8c692a42f60370feb709be81e0431e8bf32823e82e589c` |
-| Linux x64 | `linux-x64/qoder-plugin-subscription-proxy` | `e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7` |
-| Linux arm64 | `linux-arm64/qoder-plugin-subscription-proxy` | `4a5b43cc3700d36c72b7c1953e9b11eca0888c13b789ea2f99471117504a7d5d` |
+| Windows x64 | `qoder-plugin-subscription-proxy.exe` | `49a597a0f8cea758dcf17e94d9468be62f4552b1a8f9c5d538045d8d2cdb7d80` |
+| macOS x64 | `darwin-x64/qoder-plugin-subscription-proxy` | `470e4387cefa28a67763c2d93054a5f9181be9fba41300bd40f2558a5fcc7f92` |
+| macOS arm64 | `darwin-arm64/qoder-plugin-subscription-proxy` | `eb0a918933eefd35c64eb86448d7e4d28ec677d2f1ca2826a158cc838ac09400` |
+| Linux x64 | `linux-x64/qoder-plugin-subscription-proxy` | `047e384525c93abe1c98cdf3769ed5b720f621030f9777254c2985c11904c985` |
+| Linux arm64 | `linux-arm64/qoder-plugin-subscription-proxy` | `adf8f2215159fdd3e9b7db3469a1428cb1691081c9d4bc90d02c585b447f4620` |
 
 官方归档与 `checksums.txt` 中的 SHA256：
 
 | 官方发布资产 | 归档 SHA256 |
 | --- | --- |
-| [CLIProxyAPI_8.0.55_windows_amd64.zip](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_windows_amd64.zip) | `137dde06f2e675f5be1b3ca7fecbaf2cec3c4d979e1930fa6016ea2777a03d13` |
-| [CLIProxyAPI_8.0.55_darwin_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_darwin_amd64.tar.gz) | `d7845ac6055a09eef02b871c86461b112912c3282a90e84b6da4ab04e975a0b8` |
-| [CLIProxyAPI_8.0.55_darwin_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_darwin_aarch64.tar.gz) | `ad4fac1948bba2310b8d4ef4b8d0f7983d06c1c8732b4ff1a889d31a718884e7` |
-| [CLIProxyAPI_8.0.55_linux_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_linux_amd64.tar.gz) | `4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123` |
-| [CLIProxyAPI_8.0.55_linux_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_linux_aarch64.tar.gz) | `62c136d7c6ee03cedebaad4be3e7fb9bcf14d095c96597fd92e68554c2a785c5` |
+| [CLIProxyAPI_8.0.57_windows_amd64.zip](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.57/CLIProxyAPI_8.0.57_windows_amd64.zip) | `45687b19ee71aad70236daefc31d33a8b9390b8ad1831c2c84acadc981a2964c` |
+| [CLIProxyAPI_8.0.57_darwin_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.57/CLIProxyAPI_8.0.57_darwin_amd64.tar.gz) | `428ad123451238972d208ba76d360df461517647e78bcb2ef8ab7cce5b3eebe1` |
+| [CLIProxyAPI_8.0.57_darwin_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.57/CLIProxyAPI_8.0.57_darwin_aarch64.tar.gz) | `dd620c0d24e000ffe908d0d8eeb4a6c7315a31d3776fa09f198856b09fd7821f` |
+| [CLIProxyAPI_8.0.57_linux_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.57/CLIProxyAPI_8.0.57_linux_amd64.tar.gz) | `1e7b31c4bdbfeb91947fbb686933c36234ffa84c1beb781c7c020c035763545e` |
+| [CLIProxyAPI_8.0.57_linux_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.57/CLIProxyAPI_8.0.57_linux_aarch64.tar.gz) | `62ec089e714af886b152e5eaf9010aaa5feb17b2a964d17b338b03316ed22144` |
 
-上述固定哈希沿用已核对的官方非 `no-plugin` 发布资产；归档 SHA256 对应 官方 checksums.txt，二进制 SHA256 对应其中原始核心内容。运行时下载器使用系统 `curl` 进行 HTTPS 下载，`QODER_HTTP_PROXY` 优先，否则使用常见代理环境变量。核心后台准备使用独立的 **10 分钟（600 秒）**预算，不阻塞 MCP 握手，不自动重试。先核验完整归档 SHA256，再安全提取核心并核验二进制 SHA256，成功后才发布当前平台缓存，不下载其他平台。后台准备失败时保留 MCP 连接，通过状态和安全 stderr 摘要报告原因；修复后可显式 `bridge_start` 或在宿主设置中重连。EOF、断管、退出信号或本会话的 `bridge_stop` 会中止在途准备并清理。临时归档不随插件分发。
+上述固定哈希沿用已核对的官方非 `no-plugin` 发布资产；归档 SHA256 对应官方 checksums.txt，二进制 SHA256 对应其中原始核心内容。构建期由 `scripts/fetch-core.mjs` 获取指定平台归档，先核验归档 SHA256，再安全提取核心并核验二进制 SHA256；`scripts/package-plugin.mjs` 再次校验二进制摘要，只将目标平台核心及分发白名单文件写入 ZIP，不打包下载归档或构建缓存。
+
+运行时优先核验随包二进制 SHA256 后安装到当前平台缓存，不连接下载服务。仅未随包时才通过系统 `curl` 回退 HTTPS 下载，沿用相同的归档及二进制两级校验；显式 `QODER_HTTP_PROXY` 优先，否则保留 HTTPS/ALL 代理环境变量（含显式空值），均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。核心后台准备使用独立的 **10 分钟（600 秒）**预算，不阻塞 MCP 握手，不自动重试，不下载其他平台。后台准备失败时保留 MCP 连接，通过状态和安全 stderr 摘要报告原因；修复后可显式 `bridge_start` 或在宿主设置中重连。EOF、断管、退出信号或本会话的 `bridge_stop` 会中止在途准备并清理。
 
 POSIX 默认缓存核心使用 `0755`（清单中的 `mode`），已有缓存仅经哈希验证后才恢复缺失执行位；配置解析本身不修改权限。自定义 `BRIDGE_BIN` 由用户负责来源、兼容性和权限，下载器不替换或 chmod 该文件。不提供 Windows ARM64 或其他平台/架构核心，`BRIDGE_BIN` 高级覆盖不扩展平台支持。
 
@@ -60,7 +62,7 @@ CLIProxyAPI 及其依赖仍受各自许可约束；MIT 不表示所有第三方�
 - 原资产：[management.html](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.26.7/management.html)，随包原样保存在 `server/panel/management.upstream.html`。
 - SHA256：`8c9c6b7d3fb311e6aad5d06e1993e53a2d28389e640448a1bc6304ed20b057b5`，已与该 release 提供的资产 digest 核对。
 - MIT 许可和 `Copyright (c) 2026 Router-For.ME` 声明全文见 [`server/panel/LICENSE`](server/panel/LICENSE)。
-- 修改由 [`server/management-panel.mjs`](server/management-panel.mjs) 可复现生成：仅 Antigravity 使用 `is_webui=false`、校验回调地址与当前 state、补充中英文手动回填说明。上游原资产和代理二进制不直接修改。
+- 修改由 [`server/management-panel.mjs`](server/management-panel.mjs) 可复现生成：Antigravity 优先使用 `is_webui=true` 自动接收回调，仅在核心明确返回回调监听启动失败时重试 `is_webui=false` 手动模式；保留取消信号、回调地址及当前 state 校验，并按实际模式显示中英文回填提示。上游原资产和代理二进制不直接修改。
 - 插件指令使用本地一次性票据进入管理页。入口和会话由插件实现，管理 API 和服务商授权由上游核心提供。
 - 生成页位于插件专属数据目录 `management-panel/<SHA256>/`，核心通过进程级 `MANAGEMENT_STATIC_PATH` 读取；周期自动更新被禁用，后续上游更新需同步来源、哈希、补丁和验证。
 

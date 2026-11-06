@@ -1,4 +1,4 @@
-/** 固定版本核心的按需缓存：不执行核心、不接触授权数据，下载与生命周期锁相互独立。 */
+/** 固定版本核心的按需缓存：优先安装随包核心，缺失时回退下载；不执行核心、不接触授权数据，准备与生命周期锁相互独立。 */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, createWriteStream } from "node:fs";
@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { gunzip, inflateRaw } from "node:zlib";
 import { crc32 } from "./crc32.mjs";
+import { readEffectiveProxyUrl } from "./system-proxy.mjs";
 
 /** 只从插件固定清单选择版本、官方 URL 与两级 SHA256，不接收环境变量覆盖来源。 */
 const MANIFEST = JSON.parse(await readFile(new URL("./bin/platforms.json", import.meta.url), "utf-8"));
@@ -40,6 +41,7 @@ const MESSAGES = Object.freeze({
   CORE_SIZE: "核心归档或解压内容超过安全大小限制；请更新插件或检查下载来源。",
   CORE_ARCHIVE_HASH: "核心归档 SHA256 不匹配，未安装；请检查代理或网络后手动重试。",
   CORE_BINARY_HASH: "核心文件 SHA256 不匹配，未安装；请更新插件或检查下载来源。",
+  CORE_BUNDLE: "随包核心文件无效或不可读，未安装；请重新安装对应平台的官方插件 ZIP。",
   CORE_ARCHIVE: "核心归档结构不受支持或不安全，未安装；请更新插件，不要手工绕过校验。",
   CORE_PATH: "核心缓存路径包含链接、特殊文件或插件安装目录；请改用独立的用户缓存目录。",
   CORE_CACHE: "无法读取核心缓存；请检查缓存目录权限后手动重试。",
@@ -129,7 +131,7 @@ async function checkDirectories(config, create = false) {
  * stdout 经字节计数管道写盘，stderr 丢弃；不使用 shell、不读取 curlrc、不自动重试。
  * spawnProcess/env 只供独立测试注入，生产调用沿用系统环境。
  */
-async function downloadWithCurl({ url, destination, signal, maxBytes }, spawnProcess, env) {
+async function downloadWithCurl({ url, destination, signal, maxBytes }, spawnProcess, env, readProxy) {
   checkCancelled(signal);
   const windowsRoot = env.SystemRoot ?? env.WINDIR ?? "C:\\Windows";
   if (process.platform === "win32" && !win32.isAbsolute(windowsRoot)) throw coreError("CORE_CURL");
@@ -138,6 +140,17 @@ async function downloadWithCurl({ url, destination, signal, maxBytes }, spawnPro
   const childEnv = { ...env };
   const proxy = env.QODER_HTTP_PROXY ?? env.https_proxy ?? env.HTTPS_PROXY;
   if (proxy !== undefined) childEnv.https_proxy = childEnv.HTTPS_PROXY = proxy;
+  // 显式空值也属于用户选择；只有未配置 HTTPS/ALL 代理时才回退到系统检测。
+  if ([env.QODER_HTTP_PROXY, env.https_proxy, env.HTTPS_PROXY, env.all_proxy, env.ALL_PROXY].every((value) => value === undefined)) {
+    const systemProxy = await readProxy();
+    checkCancelled(signal);
+    if (systemProxy === "direct") {
+      // 隧道路由已确认：仅让本次 curl 直连，不改宿主环境或 NO_PROXY 例外。
+      childEnv.https_proxy = childEnv.HTTPS_PROXY = childEnv.all_proxy = childEnv.ALL_PROXY = "";
+    } else if (typeof systemProxy === "string" && /^https?:\/\//i.test(systemProxy)) {
+      childEnv.https_proxy = childEnv.HTTPS_PROXY = systemProxy;
+    }
+  }
   const noProxy = env.no_proxy ?? env.NO_PROXY;
   if (noProxy !== undefined) childEnv.no_proxy = childEnv.NO_PROXY = noProxy;
   // 传输限时比总预算少一分钟，给校验和解压留出余量；等待锁也会消耗总预算。
@@ -462,11 +475,13 @@ async function acquireDownloadLock(path, signal) {
  * 构造隔离运行时；生产使用下方默认实例，测试可注入合成清单、下载函数及 curl 进程替身。
  * @param {object} [options] 仅程序化依赖注入，不从环境变量加载下载代码或替代清单。
  * @param {object} [options.manifest] 同官方清单结构；所有 URL 仍必须精确对应官方固定 Release。
+ * @param {string} [options.bundleDir] 随包核心所在目录，默认插件内 server/bin；仅供测试注入隔离目录。
  * @param {Function} [options.download] 接收 {url,destination,signal,maxBytes}，向独占临时路径写入归档。
  * @param {Function} [options.spawnProcess] 系统 curl 的 spawn 实现，用于无网络测试命令/环境传递。
  * @param {NodeJS.ProcessEnv} [options.env] curl 子进程环境；不用于决定核心版本、URL 或平台。
+ * @param {Function} [options.readProxy] 异步读取系统代理；返回 HTTP(S) URL、direct、空字符串或 null。
  */
-export function createCoreRuntime({ manifest = MANIFEST, download, spawnProcess = spawn, env = process.env } = {}) {
+export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN_ROOT, "server", "bin"), download, spawnProcess = spawn, env = process.env, readProxy = readEffectiveProxyUrl } = {}) {
   // 复制并冻结依赖清单，调用者后续修改对象不能绕过下载来源和摘要约束。
   const catalog = structuredClone(manifest);
   const releases = new Map();
@@ -488,7 +503,7 @@ export function createCoreRuntime({ manifest = MANIFEST, download, spawnProcess 
   /** 最近下载失败的安全原因，只用于可显示状态，不将失败自动重试。 */
   const failures = new Map();
   /** 默认下载依赖绑定环境和进程创建器，不改变公网 URL 约束。 */
-  const fetchArchive = download ?? ((options) => downloadWithCurl(options, spawnProcess, env));
+  const fetchArchive = download ?? ((options) => downloadWithCurl(options, spawnProcess, env, readProxy));
 
   /** 返回冻结的版本/平台元数据；自定义 BRIDGE_BIN 也不能扩展生命周期支持平台。 */
   function getCoreRelease({ platform = process.platform, arch = process.arch } = {}) {
@@ -541,7 +556,7 @@ export function createCoreRuntime({ manifest = MANIFEST, download, spawnProcess 
       return { state: "ready", reason: "核心缓存已通过 SHA256 校验。" };
     } catch (error) {
       checkCancelled(signal);
-      if (error.code === "ENOENT") return { state: "missing", reason: "核心尚未下载；首次启动订阅桥时下载当前平台核心。" };
+      if (error.code === "ENOENT") return { state: "missing", reason: "核心尚未安装；首次启动订阅桥时优先从随包核心安装，未随包时下载。" };
       return { state: "error", reason: MESSAGES[error.code] ?? MESSAGES.CORE_CACHE, replaceable: false };
     }
   }
@@ -560,7 +575,28 @@ export function createCoreRuntime({ manifest = MANIFEST, download, spawnProcess 
     return { state: status.state, version: config.core.version, platform: config.core.key, reason: status.reason };
   }
 
-  /** 完成一次下载事务：锁内重检、两级摘要、安全解压、权限、原子 rename，失败保留已有核心。 */
+  /**
+   * 读取随包核心并按固定清单校验 SHA256；文件不存在返回 null 交由下载回退。
+   * 链接、特殊文件、超限或读取失败一律报 CORE_BUNDLE，哈希不符报 CORE_BINARY_HASH，均不回退网络。
+   */
+  async function readBundledBinary(core, signal) {
+    const path = join(bundleDir, core.path);
+    let stat;
+    try { stat = await lstat(path, { bigint: true }); }
+    catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw coreError("CORE_BUNDLE");
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0n || stat.size > BigInt(MAX_BINARY_BYTES)) throw coreError("CORE_BUNDLE");
+    checkCancelled(signal);
+    let bytes;
+    try { bytes = await readFile(path); } catch { throw coreError("CORE_BUNDLE"); }
+    checkCancelled(signal);
+    if (sha256(bytes) !== core.binarySha256) throw coreError("CORE_BINARY_HASH");
+    return bytes;
+  }
+
+  /** 完成一次安装事务：锁内重检、随包优先、两级摘要、安全解压、权限、原子 rename，失败保留已有核心。 */
   async function install(config, signal) {
     let lock;
     let temporary;
@@ -574,17 +610,21 @@ export function createCoreRuntime({ manifest = MANIFEST, download, spawnProcess 
       if (current.replaceable === false) throw coreError(current.reason === MESSAGES.CORE_PATH ? "CORE_PATH" : "CORE_CACHE");
       await checkDirectories(config, true);
       temporary = await mkdtemp(join(dirname(config.binPath), ".core-download-"));
-      const archivePath = join(temporary, "archive");
-      await fetchArchive({ url: config.core.url, destination: archivePath, signal, maxBytes: MAX_ARCHIVE_BYTES });
-      checkCancelled(signal);
-      const archiveStat = await lstat(archivePath);
-      if (!archiveStat.isFile() || archiveStat.isSymbolicLink() || archiveStat.nlink !== 1) throw coreError("CORE_ARCHIVE");
-      if (!archiveStat.size || archiveStat.size > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
-      const archive = await readFile(archivePath);
-      if (archive.length > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
-      if (sha256(archive) !== config.core.archiveSha256) throw coreError("CORE_ARCHIVE_HASH");
-      const binary = await extractArchive(archive, config.core, signal);
-      if (sha256(binary) !== config.core.binarySha256) throw coreError("CORE_BINARY_HASH");
+      // 随包核心优先：官方 ZIP 已内置当前平台二进制，安装后无需联网；源码运行等未随包场景才回退下载。
+      let binary = await readBundledBinary(config.core, signal);
+      if (!binary) {
+        const archivePath = join(temporary, "archive");
+        await fetchArchive({ url: config.core.url, destination: archivePath, signal, maxBytes: MAX_ARCHIVE_BYTES });
+        checkCancelled(signal);
+        const archiveStat = await lstat(archivePath);
+        if (!archiveStat.isFile() || archiveStat.isSymbolicLink() || archiveStat.nlink !== 1) throw coreError("CORE_ARCHIVE");
+        if (!archiveStat.size || archiveStat.size > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
+        const archive = await readFile(archivePath);
+        if (archive.length > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
+        if (sha256(archive) !== config.core.archiveSha256) throw coreError("CORE_ARCHIVE_HASH");
+        binary = await extractArchive(archive, config.core, signal);
+        if (sha256(binary) !== config.core.binarySha256) throw coreError("CORE_BINARY_HASH");
+      }
       const staged = join(temporary, "core");
       const file = await open(staged, "wx", 0o600);
       try { await file.writeFile(binary); await file.sync(); } finally { await file.close(); }

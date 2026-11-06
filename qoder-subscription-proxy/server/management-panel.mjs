@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 export const PANEL_UPSTREAM_SHA256 = "8c9c6b7d3fb311e6aad5d06e1993e53a2d28389e640448a1bc6304ed20b057b5";
 // 插件版本可保持不变，运行中的页面修订仍必须明确区分。
-export const PANEL_REVISION = "antigravity-manual-v2";
+export const PANEL_REVISION = "antigravity-auto-fallback-v3";
 const upstreamPath = fileURLToPath(new URL("./panel/management.upstream.html", import.meta.url));
 
 // 此函数会嵌入浏览器代码，必须自包含；回调地址只能作为数据提交，不能导航或请求它。
@@ -30,6 +30,17 @@ export function validateAntigravityCallback(text, expectedState) {
   } catch { return null; }
 }
 
+// 嵌入浏览器后使用上游 ApiError 契约，只对监听失败重新创建手动授权会话。
+export async function startAntigravityAuth(request, signal) {
+  signal?.throwIfAborted();
+  try {
+    return { ...await request(true), callbackMode: "automatic" };
+  } catch (error) {
+    if (signal?.aborted || error?.status !== 500 || error?.data?.error !== "failed to start callback server") throw error;
+  }
+  return { ...await request(false), callbackMode: "manual" };
+}
+
 function replaceOnce(text, before, after) {
   if (text.split(before).length !== 2) throw new Error("管理页补丁与固定上游版本不匹配；未生成页面。");
   return text.replace(before, () => after);
@@ -41,9 +52,17 @@ export function patchManagementPanel(bytes) {
     throw new Error("随包管理页 SHA256 校验失败；请检查插件文件完整性。");
   }
   let text = bytes.toString("utf8");
-  text = replaceOnce(text, "Uee.has(n)&&(r.is_webui=!0)", "Uee.has(n)&&(r.is_webui=n!==`antigravity`)");
+  text = replaceOnce(text,
+    "startAuth:(e,t)=>{let n=by(e),r={provider:n};return Uee.has(n)&&(r.is_webui=!0),W.get(`/oauth/auth-url`,{params:r,...t?{signal:t}:{}})}",
+    `startAuth:(e,t)=>{let n=by(e),r={provider:n};return Uee.has(n)&&(r.is_webui=!0),n===\`antigravity\`?(${startAntigravityAuth.toString()})(r=>W.get(\`/oauth/auth-url\`,{params:{provider:n,is_webui:r},...t?{signal:t}:{}}),t):W.get(\`/oauth/auth-url\`,{params:r,...t?{signal:t}:{}})}`);
+  text = replaceOnce(text, "p(e,{url:void 0,userCode:void 0,state:void 0,status:`waiting`",
+    "p(e,{url:void 0,userCode:void 0,state:void 0,callbackMode:void 0,status:`waiting`");
+  text = replaceOnce(text, "p(e,{url:r.url,userCode:r.user_code,state:r.state,status:`waiting`,polling:!0})",
+    "p(e,{url:r.url,userCode:r.user_code,state:r.state,callbackMode:r.callbackMode,status:`waiting`,polling:!0})");
   text = replaceOnce(text, "aside:(0,V.jsx)(`span`,{className:q.optional,children:i(`auth_login.optional_step`)})",
-    "aside:e!==`antigravity`&&(0,V.jsx)(`span`,{className:q.optional,children:i(`auth_login.optional_step`)})");
+    "aside:(e!==`antigravity`||t.callbackMode!==`manual`)&&(0,V.jsx)(`span`,{className:q.optional,children:i(`auth_login.optional_step`)})");
+  text = replaceOnce(text, "className:q.stepHint,id:o,children:i(d)",
+    "className:q.stepHint,id:o,children:i(e===`antigravity`&&t.callbackMode===`manual`?`auth_login.antigravity_manual_callback_hint`:d)");
   text = replaceOnce(text, "placeholder:i(f),disabled:u,autoComplete:`off`",
     "placeholder:e===`antigravity`?`http://localhost:51121/oauth-callback?code=...&state=...`:i(f),disabled:u,autoComplete:`off`");
   text = replaceOnce(text, "Qne=(e,t,n)=>e===`xai`?Zne(t,n):t.trim()",
@@ -52,10 +71,10 @@ export function patchManagementPanel(bytes) {
     "r(e===`antigravity`?`auth_login.antigravity_callback_invalid`:e===`xai`?`auth_login.xai_callback_state_missing`:`auth_login.missing_state`)");
   text = replaceOnce(text,
     "antigravity_oauth_hint:`通过 OAuth 流程登录 Antigravity（Google 账号）服务，自动获取并保存认证文件。`",
-    "antigravity_callback_invalid:`请粘贴本次授权的完整 localhost:51121 回调地址，确认包含 code 和匹配的 state；取消或过期后请重新开始。`,antigravity_oauth_hint:`当前使用手动回调模式，不占用本机端口。打开链接并完成 Google 授权后，跳回 localhost:51121 显示无法访问是预期现象。请复制地址栏完整 URL，回到此窗口粘贴并提交，等待认证成功。请在 5 分钟内完成，不要分享回调地址。`");
+    "antigravity_callback_invalid:`请粘贴本次授权的完整 localhost:51121 回调地址，确认包含 code 和匹配的 state；取消或过期后请重新开始。`,antigravity_manual_callback_hint:`本机回调监听启动失败，已切换为手动回填。完成 Google 授权后，请复制地址栏完整的 localhost:51121 回调 URL，回到此处粘贴并提交；回调页无法访问不影响手动提交。请勿向其他页面提交授权信息或分享回调地址。`,antigravity_oauth_hint:`默认自动接收 Google 授权回调，无需手动粘贴；只有本机 51121 回调端口无法监听时才切换为手动回填。请在 5 分钟内完成授权，不要分享回调地址。`");
   text = replaceOnce(text,
     "antigravity_oauth_hint:`Login to Antigravity service (Google account) through OAuth flow, automatically obtain and save authentication files.`",
-    "antigravity_callback_invalid:`Paste the full localhost:51121 callback URL from this attempt, including code and matching state. Restart if cancelled or expired.`,antigravity_oauth_hint:`Manual callback mode: no local callback port is opened. Complete Google authorization using Open Link. The resulting localhost:51121 connection error is expected. Copy the full address, paste it here, submit, and wait for authentication success. Finish within five minutes and do not share the callback URL.`");
+    "antigravity_callback_invalid:`Paste the full localhost:51121 callback URL from this attempt, including code and matching state. Restart if cancelled or expired.`,antigravity_manual_callback_hint:`The local callback listener could not start, so manual callback mode is active. After Google authorization, copy the full localhost:51121 callback URL and submit it here, even if the callback page cannot be reached. Do not submit authorization details to another page or share the callback URL.`,antigravity_oauth_hint:`Google authorization callbacks are received automatically by default. Manual callback is used only when the local listener on port 51121 cannot start. Finish within five minutes and do not share the callback URL.`");
   return text;
 }
 

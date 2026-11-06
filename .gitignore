@@ -8,14 +8,15 @@
 **/*.paused
 **/*.log
 **/*.tmp
-# CLIProxyAPI 在 MCP 初始化时按当前平台下载；源码分发保留平台清单、文档和许可证。
-# 白名单也防止新平台目录、归档和未命名的本地核心被重新纳入。
-qoder-subscription-proxy/bridge/bin/*
-!qoder-subscription-proxy/bridge/bin/LICENSE
-!qoder-subscription-proxy/bridge/bin/README.md
-!qoder-subscription-proxy/bridge/bin/README_CN.md
-!qoder-subscription-proxy/bridge/bin/config.example.yaml
-!qoder-subscription-proxy/bridge/bin/platforms.json
+# CLIProxyAPI 核心按平台内置进安装 ZIP；源码仓库只保留平台清单、文档和许可证。
+# 构建期下载的核心放在 .core-build，白名单也防止新平台目录、归档和未命名的本地核心被纳入。
+qoder-subscription-proxy/.core-build/
+qoder-subscription-proxy/server/bin/*
+!qoder-subscription-proxy/server/bin/LICENSE
+!qoder-subscription-proxy/server/bin/README.md
+!qoder-subscription-proxy/server/bin/README_CN.md
+!qoder-subscription-proxy/server/bin/config.example.yaml
+!qoder-subscription-proxy/server/bin/platforms.json
 **/runtimes/
 node_modules/
 coverage/

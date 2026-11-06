@@ -1,7 +1,11 @@
 import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
+
+/** 与 server/bin/platforms.json 一致的五种平台键；每个 ZIP 只内置对应平台的核心。 */
+const PLATFORMS = ['win32-x64', 'darwin-x64', 'darwin-arm64', 'linux-x64', 'linux-arm64'];
 
 /** 从文件到根目录逐层拒绝符号链接，防止产物读写越过指定路径。 */
 function assertNoLinks(filename) {
@@ -11,10 +15,10 @@ function assertNoLinks(filename) {
   }
 }
 
-/** 按源码白名单生成指定平台的安装 ZIP。仅向已存在的目录发布全新的文件。 */
+/** 按源码白名单生成指定平台的安装 ZIP，并内置该平台已校验的核心二进制。仅向已存在的目录发布全新的文件。 */
 async function packagePlugin(platform, requested) {
-  if (!['windows', 'posix'].includes(platform) || !requested?.trim() || !requested.toLowerCase().endsWith('.zip')) {
-    throw new Error('用法：node package-plugin.mjs windows|posix <新.zip 路径>（父目录须存在）');
+  if (!PLATFORMS.includes(platform) || !requested?.trim() || !requested.toLowerCase().endsWith('.zip')) {
+    throw new Error(`用法：node package-plugin.mjs ${PLATFORMS.join('|')} <新.zip 路径>（父目录须存在）`);
   }
   // 校验入口、源目录与目标父目录，拒绝安装包覆盖插件源码或既有文件。
   assertNoLinks(process.argv[1]);
@@ -34,11 +38,31 @@ async function packagePlugin(platform, requested) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  // 两种平台共享发布清单。默认 MCP 入口另行选择，POSIX 包使用 mcp.posix.json 的内容。
+  // 两种入口共享发布清单。Windows 用默认 mcp.json，其余平台使用 mcp.posix.json 的内容。
   const manifest = path.join(root, 'scripts/distribution-files.txt');
   assertNoLinks(manifest);
   if (!lstatSync(manifest).isFile()) throw new Error('分发清单必须是常规文件');
-  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/)];
+  // 核心元数据只读固定清单；构建产物必须先由 fetch-core.mjs 下载并通过 SHA256 校验。
+  const platformsFile = path.join(root, 'server/bin/platforms.json');
+  assertNoLinks(platformsFile);
+  const release = JSON.parse(readFileSync(platformsFile, 'utf8')).platforms[platform];
+  if (!release || typeof release.path !== 'string' || !/^[a-f0-9]{64}$/.test(release.binarySha256)) {
+    throw new Error(`平台清单缺少 ${platform} 的有效条目`);
+  }
+  const coreEntry = `server/bin/${release.path}`;
+  const coreSource = path.join(root, '.core-build', platform, path.posix.basename(release.path));
+  let coreStat;
+  try { coreStat = lstatSync(coreSource); } catch (error) {
+    if (error.code === 'ENOENT') throw new Error(`缺少 ${platform} 构建核心，请先运行 node scripts/fetch-core.mjs ${platform}`);
+    throw error;
+  }
+  assertNoLinks(coreSource);
+  if (!coreStat.isFile()) throw new Error(`不是常规文件：${coreSource}`);
+  const coreData = readFileSync(coreSource);
+  if (createHash('sha256').update(coreData).digest('hex') !== release.binarySha256) {
+    throw new Error(`${platform} 构建核心 SHA256 与平台清单不一致，拒绝打包`);
+  }
+  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/), coreEntry];
   if (new Set(files).size !== files.length) throw new Error('分发清单包含重复路径');
   for (const name of files) {
     if (/[\\:\r\n]/.test(name) || name.split('/').some(part => !part || part === '.' || part === '..')) {
@@ -56,11 +80,12 @@ async function packagePlugin(platform, requested) {
   let offset = 0;
   let centralSize = 0;
   for (const name of files) {
-    const sourceName = name === 'mcp.json' && platform === 'posix' ? 'mcp.posix.json' : name;
-    const source = path.join(root, sourceName);
+    // 核心条目来自构建缓存，其余按白名单读源码；非 Windows 入口统一发布 POSIX MCP 清单。
+    const source = name === coreEntry ? coreSource
+      : path.join(root, name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name);
     assertNoLinks(source);
     if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);
-    const data = readFileSync(source);
+    const data = name === coreEntry ? coreData : readFileSync(source);
     const compressed = deflateRawSync(data, { level: 9 });
     const encoded = Buffer.from(name, 'utf8');
     if (data.length >= 0xffffffff || compressed.length >= 0xffffffff || encoded.length > 0xffff) {
@@ -82,7 +107,9 @@ async function packagePlugin(platform, requested) {
     entry.writeUInt32LE(0x02014b50, 0);
     entry.writeUInt16LE(0x0314, 4);
     local.copy(entry, 6, 4, 30);
-    entry.writeUInt32LE(((name.endsWith('.sh') ? 0o100755 : 0o100644) * 65536) >>> 0, 38);
+    // POSIX 核心与 shell 脚本需要执行位；Windows 核心及普通文件保持 0644。
+    const executable = name.endsWith('.sh') || (name === coreEntry && platform !== 'win32-x64');
+    entry.writeUInt32LE(((executable ? 0o100755 : 0o100644) * 65536) >>> 0, 38);
     entry.writeUInt32LE(offset, 42);
     locals.push(local, encoded, compressed);
     central.push(entry, encoded);
@@ -123,7 +150,7 @@ async function packagePlugin(platform, requested) {
 }
 
 try {
-  if (process.argv.length !== 4) throw new Error('用法：node package-plugin.mjs windows|posix <新.zip 路径>');
+  if (process.argv.length !== 4) throw new Error(`用法：node package-plugin.mjs ${PLATFORMS.join('|')} <新.zip 路径>`);
   console.log(`已生成插件 ZIP：${await packagePlugin(process.argv[2], process.argv[3])}`);
 } catch (error) {
   console.error(error.message);

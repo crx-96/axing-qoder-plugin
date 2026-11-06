@@ -107,7 +107,7 @@ function zipArchive(entries = [{ name: "cli-proxy-api.exe", data: binary }]) {
   return Buffer.concat([...locals, directoryBytes, end]);
 }
 
-async function fixture(t, { platform = "linux", arch = "x64", archive, expectedBinary = binary, download, spawnProcess, env } = {}) {
+async function fixture(t, { platform = "linux", arch = "x64", archive, expectedBinary = binary, bundle, download, spawnProcess, env = {}, readProxy = async () => "" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "qoder-core-test-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const bytes = archive ?? (platform === "win32" ? zipArchive() : tarArchive());
@@ -115,9 +115,20 @@ async function fixture(t, { platform = "linux", arch = "x64", archive, expectedB
   const entry = catalog.platforms[`${platform}-${arch}`];
   entry.archiveSha256 = hash(bytes);
   entry.binarySha256 = hash(expectedBinary);
+  // 随包目录与真实插件及数据目录隔离；未提供 bundle 时目录为空，安装走下载回退。
+  const bundleDir = `${root}-bundle`;
+  await mkdir(bundleDir, { recursive: true });
+  t.after(async () => { await rm(bundleDir, { recursive: true, force: true }); });
+  if (bundle !== undefined) {
+    const bundled = join(bundleDir, entry.path);
+    await mkdir(dirname(bundled), { recursive: true });
+    await writeFile(bundled, bundle);
+  }
   let calls = 0;
   const runtime = createCoreRuntime({
     manifest: catalog,
+    bundleDir,
+    readProxy,
     ...(spawnProcess ? { spawnProcess, env } : { download: async (options) => {
       calls++;
       if (download) return download(options, bytes);
@@ -129,7 +140,7 @@ async function fixture(t, { platform = "linux", arch = "x64", archive, expectedB
     core: runtime.getCoreRelease({ platform, arch }),
     binPath: runtime.resolveCoreBinaryPath({ dataDir: root, platform, arch }),
   };
-  return { runtime, config, root, archive: bytes, catalog, calls: () => calls };
+  return { runtime, config, root, bundleDir, archive: bytes, catalog, calls: () => calls };
 }
 
 async function assertClean(config) {
@@ -156,10 +167,10 @@ test("固定发行清单、五种平台选择和目标文件名一致，状态�
     assert.deepEqual(core, { ...entry, version: manifest.version, key, platform, arch });
     assert.equal(Object.isFrozen(core), true);
     const binPath = resolveCoreBinaryPath({ dataDir: root, platform, arch });
-    assert.equal(binPath, join(root, "runtimes", "v8.0.55", key, basename(entry.path)));
+    assert.equal(binPath, join(root, "runtimes", "v8.0.57", key, basename(entry.path)));
     const config = { core, dataDir: root, binPath };
     assert.deepEqual(await getCoreStatus(config), {
-      state: "missing", version: manifest.version, platform: key, reason: "核心尚未下载；首次启动订阅桥时下载当前平台核心。",
+      state: "missing", version: manifest.version, platform: key, reason: "核心尚未安装；首次启动订阅桥时优先从随包核心安装，未随包时下载。",
     });
     assert.equal((await ensureCore(config, { allowDownload: false })).available, false);
   }
@@ -217,6 +228,51 @@ for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin",
     if (process.platform !== "win32" && platform !== "win32") assert.equal(stamp.mode & 0o777, 0o755);
   });
 }
+
+for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"], ["win32", "x64"]]) {
+  test(`${platform}-${arch} 随包核心直接安装不联网，校验后复用缓存`, async (t) => {
+    const { runtime, config, calls } = await fixture(t, { platform, arch, bundle: binary, download() { throw new Error("must not download"); } });
+    assert.equal((await runtime.ensureCore(config)).state, "ready");
+    assert.deepEqual(await readFile(config.binPath), binary);
+    assert.equal(calls(), 0);
+    assert.deepEqual(await readdir(dirname(config.binPath)), [basename(config.binPath)]);
+    const stamp = await lstat(config.binPath);
+    for (let index = 0; index < 3; index++) {
+      assert.equal((await runtime.getCoreStatus(config)).state, "ready");
+      assert.equal((await runtime.ensureCore(config, { allowDownload: false })).available, true);
+    }
+    assert.equal((await lstat(config.binPath)).mtimeMs, stamp.mtimeMs);
+    if (process.platform !== "win32" && platform !== "win32") assert.equal(stamp.mode & 0o777, 0o755);
+    await assertClean(config);
+  });
+}
+
+test("随包核心 SHA256 不符直接报错，不回退下载也不发布", async (t) => {
+  const { runtime, config, calls } = await fixture(t, { bundle: Buffer.from("tampered bundle"), download() { throw new Error("must not download"); } });
+  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BINARY_HASH"));
+  assert.equal(calls(), 0);
+  assert.equal((await runtime.getCoreStatus(config)).state, "error");
+  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
+  await assertClean(config);
+});
+
+test("随包核心为空文件或符号链接时拒绝安装，不回退下载", async (t) => {
+  const { runtime, config, bundleDir, calls } = await fixture(t, { download() { throw new Error("must not download"); } });
+  const bundled = join(bundleDir, config.core.path);
+  await mkdir(dirname(bundled), { recursive: true });
+  await writeFile(bundled, Buffer.alloc(0));
+  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BUNDLE"));
+  await rm(bundled);
+  try { await symlink(join(bundleDir, "不存在的目标"), bundled); }
+  catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) return t.skip(`环境不支持链接：${error.code}`);
+    throw error;
+  }
+  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BUNDLE"));
+  assert.equal(calls(), 0);
+  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
+  await assertClean(config);
+});
 
 test("归档 hash 错误不发布；allowDownload=false 不重试也不抛恢复异常", async (t) => {
   const { runtime, config, calls } = await fixture(t, { download: (options) => writeFile(options.destination, "wrong", { flag: "wx" }) });
@@ -502,6 +558,120 @@ test("系统 curl 固定 HTTPS、禁用 curlrc/shell/retry；代理优先级正�
   assert.equal(options.env.no_proxy, env.NO_PROXY);
   assert.equal(env.https_proxy, "https://lower.invalid");
   assert.doesNotMatch(args.join(" "), /password|secret|other.invalid/);
+});
+
+test("无显式环境代理时仅向 curl 注入系统 HTTP(S) 代理，保留 NO_PROXY", async (t) => {
+  for (const systemProxy of ["http://127.0.0.1:7890", "https://127.0.0.1:7890"]) {
+    const archive = tarArchive();
+    const fake = mockCurl(archive);
+    const env = Object.freeze({ NO_PROXY: "localhost", no_proxy: "github.com" });
+    const hostEnv = { ...process.env };
+    let reads = 0;
+    const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, env,
+      readProxy: async () => { reads++; return systemProxy; } });
+    assert.equal((await runtime.ensureCore(config)).available, true);
+    assert.equal(reads, 1);
+    assert.deepEqual(fake.observed[0].options.env, { ...env, https_proxy: systemProxy, HTTPS_PROXY: systemProxy, NO_PROXY: "github.com" });
+    assert.equal(fake.observed[0].args.includes(systemProxy), false);
+    assert.deepEqual({ ...process.env }, hostEnv);
+    await assertClean(config);
+  }
+});
+
+test("真实 curl 的首次下载使用发现的系统代理，不连接外网上游", { timeout: 10000 }, async (t) => {
+  const requests = [];
+  const sockets = new Set();
+  const proxy = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    let header = "";
+    socket.on("data", (chunk) => {
+      header += chunk.toString();
+      if (!header.includes("\r\n\r\n")) return;
+      requests.push(header.split("\r\n", 1)[0]);
+      socket.removeAllListeners("data");
+      socket.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    });
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => proxy.close(resolve));
+  });
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(qoder_http_proxy|https?_proxy|all_proxy|no_proxy)$/i.test(name)));
+  const { runtime, config } = await fixture(t, { spawnProcess: spawn, env,
+    readProxy: async () => `http://127.0.0.1:${proxy.address().port}` });
+  await assert.rejects(runtime.ensureCore(config, { signal: AbortSignal.timeout(5000) }), expectSafeError("CORE_DOWNLOAD"));
+  assert.equal(requests.length, 1);
+  assert.match(requests[0], /^CONNECT github\.com:443 HTTP\/1\.[01]$/);
+  await assertClean(config);
+});
+
+test("显式 QODER/HTTPS/ALL 代理包括空值均不调用系统 reader", async (t) => {
+  for (const key of ["QODER_HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]) {
+    for (const value of ["http://127.0.0.1:1234", ""]) {
+      const archive = tarArchive();
+      const fake = mockCurl(archive);
+      const env = Object.freeze({ [key]: value, NO_PROXY: "localhost" });
+      let reads = 0;
+      const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, env,
+        readProxy: async () => { reads++; return "http://system.invalid:7890"; } });
+      assert.equal((await runtime.ensureCore(config)).available, true);
+      assert.equal(reads, 0, `${key}=${value}`);
+      const expected = { ...env, no_proxy: "localhost" };
+      if (!["all_proxy", "ALL_PROXY"].includes(key)) expected.https_proxy = expected.HTTPS_PROXY = value;
+      assert.deepEqual(fake.observed[0].options.env, expected);
+      await assertClean(config);
+    }
+  }
+});
+
+test("系统 direct 明确清空 curl HTTPS/ALL 代理而不取消 NO_PROXY", async (t) => {
+  const archive = tarArchive();
+  const fake = mockCurl(archive);
+  const env = Object.freeze({ NO_PROXY: "localhost" });
+  const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, env, readProxy: async () => "direct" });
+  assert.equal((await runtime.ensureCore(config)).available, true);
+  assert.deepEqual(fake.observed[0].options.env, { NO_PROXY: "localhost", no_proxy: "localhost", https_proxy: "", HTTPS_PROXY: "", all_proxy: "", ALL_PROXY: "" });
+  assert.equal(fake.observed[0].args.includes("direct"), false);
+  assert.equal(fake.observed[0].args.includes("--noproxy"), false);
+  await assertClean(config);
+});
+
+test("系统代理为空或读取失败时不产生代理且继续下载", async (t) => {
+  for (const state of ["", null]) {
+    const archive = tarArchive();
+    const fake = mockCurl(archive);
+    const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, readProxy: async () => state });
+    assert.equal((await runtime.ensureCore(config)).available, true);
+    assert.deepEqual(fake.observed[0].options.env, {});
+    await assertClean(config);
+  }
+});
+
+test("等待系统代理检测时取消不启动 curl，清理临时目录并允许重试", async (t) => {
+  const archive = tarArchive();
+  const fake = mockCurl(archive);
+  let entered;
+  let release;
+  const reading = new Promise((resolve) => { entered = resolve; });
+  const result = new Promise((resolve) => { release = resolve; });
+  const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation,
+    readProxy: () => { entered(); return result; } });
+  const controller = new AbortController();
+  const attempt = runtime.ensureCore(config, { signal: controller.signal });
+  const rejected = assert.rejects(attempt, expectSafeError("CORE_CANCELLED"));
+  await reading;
+  controller.abort();
+  release("http://127.0.0.1:7890");
+  await rejected;
+  assert.equal(fake.observed.length, 0);
+  await assertClean(config);
+  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
+  assert.equal((await runtime.ensureCore(config)).available, true);
+  assert.equal(fake.observed.length, 1);
+  await assertClean(config);
 });
 
 test("curl 启动和 HTTP 失败安全报告且不重试", async (t) => {

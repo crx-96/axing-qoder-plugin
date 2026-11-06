@@ -6,12 +6,17 @@
 
 ## 下载与安装
 
-本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.3**。
+本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.4**。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.0.3-windows.zip` |
-| macOS / Linux x64、ARM64 | `qoder-subscription-proxy-v1.0.3-posix.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.0.4-win32-x64.zip` |
+| macOS x64 | `qoder-subscription-proxy-v1.0.4-darwin-x64.zip` |
+| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.0.4-darwin-arm64.zip` |
+| Linux x64 | `qoder-subscription-proxy-v1.0.4-linux-x64.zip` |
+| Linux ARM64 | `qoder-subscription-proxy-v1.0.4-linux-arm64.zip` |
+
+每个安装包只内置对应平台的 CLIProxyAPI 核心，安装后无需再下载核心即可使用；请按本机系统与架构选择，不要混用。
 
 **不要选择 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`**，它们是整个仓库的源码，不是可直接导入的单插件安装包。用户无需克隆仓库或自行打包。
 
@@ -27,20 +32,25 @@
 
 ```sh
 mkdir dist
-node qoder-subscription-proxy/scripts/package-plugin.mjs windows dist/qoder-subscription-proxy-v1.0.3-windows.zip
-node qoder-subscription-proxy/scripts/package-plugin.mjs posix dist/qoder-subscription-proxy-v1.0.3-posix.zip
+# 先获取并校验各平台核心（复用生产下载与两级 SHA256 校验，产物在 .core-build，可重复运行跳过已校验缓存）
+node qoder-subscription-proxy/scripts/fetch-core.mjs all
+node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.0.4-win32-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs darwin-x64 dist/qoder-subscription-proxy-v1.0.4-darwin-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs darwin-arm64 dist/qoder-subscription-proxy-v1.0.4-darwin-arm64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs linux-x64 dist/qoder-subscription-proxy-v1.0.4-linux-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs linux-arm64 dist/qoder-subscription-proxy-v1.0.4-linux-arm64.zip
 ```
 
-若 `dist` 已存在，无需再次创建。目标父目录必须先存在；脚本拒绝覆盖已有 ZIP。发布时文件名中的版本须与插件清单一致，并上传两个 ZIP 到对应的 GitHub Release，而不是提交二进制安装包到源码仓库。
+若 `dist` 已存在，无需再次创建。目标父目录必须先存在；脚本拒绝覆盖已有 ZIP，并会核对构建核心 SHA256 与平台清单一致。重建前将旧产物移出待发布目录，尤其不要混入同版本的 `-windows.zip` / `-posix.zip` 旧包，它们不包含核心。发布时文件名中的版本须与插件清单一致，只显式选择上述五个平台 ZIP 上传到对应的 GitHub Release，不用 `dist/*.zip` 批量选择，也不将二进制安装包或 `.core-build` 缓存提交到源码仓库。
 
-ZIP 根目录直接是插件内容，不再套一层仓库或插件目录。POSIX 包会使用对应的 `mcp.posix.json` 内容发布为 `mcp.json`；源码默认 Windows 清单不能直接用于 macOS/Linux。
+ZIP 根目录直接是插件内容，不再套一层仓库或插件目录。非 Windows 包会使用对应的 `mcp.posix.json` 内容发布为 `mcp.json`，并为内置核心保留执行位；源码默认 Windows 清单不能直接用于 macOS/Linux。
 
 ## 分发与兼容边界
 
 - 插件清单为 `qoder-subscription-proxy/.qoder-plugin/plugin.json`；MCP 使用 `${QODER_PLUGIN_ROOT}` 和 `timeout: 660000`，与 Desktop 自带 `recordAndReplay` 资源一致，但不等于安装已验收。仓库 `.qoder-plugin/marketplace.json` 另按 Qoder CLI 市场规范保留，不据此承诺 Desktop 市场导入。
 - 当前核对环境为 **Qoder Desktop CN 0.4.11**，实际程序名 `Qoder CN.exe`（国际版为 `Qoder.exe`）；已实测其 Electron `43.1.1` / Node `24.18.0` 的 Node mode。本机独立开发命令 `node` 为 `26.4.0`。
-- 使用轻量 ZIP，不附带五平台核心二进制。首次 MCP 启动在后台下载固定 `v8.0.55` 的当前平台核心，校验归档与二进制 SHA256。此设计用于减少安装体积和网络耗时，**不是声称 Qoder 已禁止大包**；未确认官方 ZIP 大小上限。
-- 完全离线准备需自行提供可信且兼容的 `BRIDGE_BIN`，不提供一键离线包承诺。远程授权与模型服务仍需要网络。
+- 安装包按平台拆分，各自内置固定 `v8.0.57` 的当前平台 CLIProxyAPI 核心；首次 MCP 启动把随包核心校验 SHA256 后安装到本机缓存，无需联网下载。仅从源码直接运行（未随包）时才回退到官方 Release 下载，同样校验归档与二进制 SHA256。
+- 安装后即可离线准备核心；远程授权与模型服务仍需要网络。自定义 `BRIDGE_BIN` 仍不下载、不替换。
 - `prepare-posix-marketplace.sh` 仅保留给支持本地市场的高级兼容客户端；尚未确认 Qoder Desktop 提供自定义市场 UI，不将其作为 Desktop 安装步骤。
 - 默认端口 `19787`，数据位于 `~/.qoder/qoder-subscription-proxy/data`。CN 版也使用这个插件专属稳定目录，**不是 Qoder App 设置目录**。管道、缓存和锁与兄弟 Zcode 插件隔离，不复制真实账号或旧运行数据。
 

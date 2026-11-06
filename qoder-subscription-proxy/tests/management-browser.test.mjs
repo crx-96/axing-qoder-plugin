@@ -97,7 +97,7 @@ async function expectAuthorizedPanel(send, config, origin) {
   throw new Error("已兑换的管理页未显示真实 Codex 和 Antigravity 授权选项");
 }
 
-test("真实浏览器兑换一次性票据、挂载授权页并在刷新后保留会话", {
+test("真实浏览器保留管理会话、自动回调并在端口占用时提示手动回填", {
   skip: nativeCoreSkip || (!browser && "未设置 BRIDGE_TEST_BROWSER；跳过真实 Chromium 管理页"),
   timeout: 90000,
 }, async (t) => {
@@ -144,4 +144,49 @@ test("真实浏览器兑换一次性票据、挂载授权页并在刷新后保�
   await send("Runtime.evaluate", { expression: "window.testDocumentAboutToReload = true" });
   await send("Page.reload", { ignoreCache: true });
   await expectAuthorizedPanel(send, config, origin);
+  const blocker = createServer(connection => connection.destroy());
+  t.after(async () => {
+    if (blocker.listening) await new Promise(resolve => blocker.close(resolve));
+  });
+  for (const manual of [true, false]) {
+    if (manual) {
+      blocker.listen({ port: 51121, exclusive: true });
+      await once(blocker, "listening");
+    } else {
+      await new Promise(resolve => blocker.close(resolve));
+      await send("Runtime.evaluate", { expression: "window.testDocumentAboutToReload = true" });
+      await send("Page.reload", { ignoreCache: true });
+      await expectAuthorizedPanel(send, config, origin);
+    }
+    await send("Runtime.evaluate", { expression: `Array.from(document.querySelectorAll('button')).find(element => element.textContent.trim() === 'Antigravity').click()` });
+    const deadline = Date.now() + 10000;
+    let state;
+    while (Date.now() < deadline) {
+      const result = await send("Runtime.evaluate", { expression: `(() => {
+        const dialog = document.querySelector('.modal');
+        if (!dialog) return null;
+        const input = dialog.querySelector('input[placeholder^="http://localhost:51121/"]');
+        const open = Array.from(dialog.querySelectorAll('button')).find(element => element.textContent.trim() === '打开链接');
+        return {
+          ready: !!input && !input.disabled && !!open && !open.disabled,
+          manual: dialog.innerText.includes('本机回调监听启动失败，已切换为手动回填'),
+          optional: !!dialog.querySelector('[class*="optional"]')
+        };
+      })()`, returnByValue: true });
+      state = result.result.value;
+      if (state?.ready) break;
+      await delay(100);
+    }
+    assert.equal(state?.ready, true, "授权链接和回调输入应可用");
+    assert.equal(state.manual, manual);
+    assert.equal(state.optional, !manual, "仅手动降级时回填步骤才为必填");
+    await send("Runtime.evaluate", { expression: `(() => {
+      const input = document.querySelector('.modal input[placeholder^="http://localhost:51121/"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'http://localhost:51121/oauth-callback?code=synthetic-never-submit&state=wrong-state');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()` });
+    await send("Runtime.evaluate", { expression: `Array.from(document.querySelectorAll('.modal button')).find(element => element.textContent.trim() === '提交回调 URL').click()` });
+    const validation = await send("Runtime.evaluate", { expression: `document.querySelector('.modal').innerText.includes('请粘贴本次授权的完整 localhost:51121 回调地址')`, returnByValue: true });
+    assert.equal(validation.result.value, true, "不匹配的 state 必须在浏览器端拒绝");
+  }
 });

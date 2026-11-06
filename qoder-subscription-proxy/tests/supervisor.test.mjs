@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { PLUGIN_VERSION, loadConfig, renderConfigYaml } from "../server/config.mjs";
 import { ensureApprovalRouting } from "../server/approval-routing.mjs";
 import { requestLocal } from "../server/local-http.mjs";
+import { startAntigravityAuth } from "../server/management-panel.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
   probeBridge, sameProcess, processIdentity, withLifecycleLock, ensureDataDir,
@@ -569,15 +570,15 @@ test("隔离核心迁移旧公共密码后只接受当前安装管理密钥", { 
   await stopBridge(config);
 });
 
-test("隔离真实核心提供修复页面，Antigravity 不监听回调端口且拒绝未知会话", {
+test("隔离真实核心提供自动降级页面，Antigravity 手动模式拒绝未知会话", {
   skip: windowsOnly, timeout: 60000,
 }, async (t) => {
   const { config } = await realBridgeFixture(t);
   await ensureRunning(config);
   const page = await requestLocal(config, "/management.html", { maxBytes: 5 * 1024 * 1024 });
   assert.equal(page.status, 200);
-  assert.ok(page.text.includes("r.is_webui=n!==`antigravity`"));
-  assert.ok(page.text.includes("当前使用手动回调模式"));
+  assert.ok(page.text.includes("async function startAntigravityAuth"));
+  assert.ok(page.text.includes("默认自动接收 Google 授权回调"));
   const management = { ...config, apiKey: config.mgmtKey };
   const initialized = await requestLocal(management, "/v8/management/oauth/auth-url?provider=antigravity&is_webui=false", { authenticated: true });
   assert.equal(initialized.status, 200);
@@ -617,6 +618,76 @@ test("隔离真实核心提供修复页面，Antigravity 不监听回调端口�
   assert.ok(await processIdentity(record.pid), "旧修订不能被自动终止");
   const log = await readFile(join(config.dataDir, "bridge.log"), "utf8");
   assert.doesNotMatch(log, /callback forwarder for antigravity|failed to start antigravity callback forwarder/);
+  await stopBridge(config);
+});
+
+test("真实核心自动接收 Antigravity 回调，端口占用时仅降级一次并保留手动会话", {
+  skip: windowsOnly, timeout: 60000,
+}, async (t) => {
+  let unexpectedCallbacks = 0;
+  const blocker = http.createServer((request, response) => { unexpectedCallbacks++; response.writeHead(409).end(); });
+  t.after(async () => {
+    if (blocker.listening) await new Promise(resolve => blocker.close(resolve));
+  });
+  try {
+    blocker.listen({ port: 51121, exclusive: true });
+    await once(blocker, "listening");
+  } catch (error) {
+    if (!["EACCES", "EADDRINUSE"].includes(error.code)) throw error;
+    t.skip(`本机 51121 不可用于隔离自动回调测试：${error.code}`);
+    return;
+  }
+  await new Promise(resolve => blocker.close(resolve));
+  const { config } = await realBridgeFixture(t);
+  await ensureRunning(config);
+  const management = { ...config, apiKey: config.mgmtKey };
+  const attempts = [];
+  const requestAuth = async isWebUI => {
+    attempts.push(isWebUI);
+    const response = await requestLocal(management, `/v8/management/oauth/auth-url?provider=antigravity&is_webui=${isWebUI}`, { authenticated: true });
+    const data = JSON.parse(response.text);
+    if (response.status !== 200) throw Object.assign(new Error(data.error), { status: response.status, data });
+    return data;
+  };
+  const automatic = await startAntigravityAuth(requestAuth);
+  assert.deepEqual(attempts, [true]);
+  assert.equal(automatic.callbackMode, "automatic");
+  assert.equal(new URL(automatic.url).searchParams.get("redirect_uri"), "http://localhost:51121/oauth-callback");
+  const callback = new URL("http://localhost:51121/oauth-callback");
+  callback.searchParams.set("error", "access_denied");
+  callback.searchParams.set("state", automatic.state);
+  const received = await fetch(callback, { redirect: "manual", signal: AbortSignal.timeout(5000) });
+  await received.text();
+  assert.equal(received.status, 302);
+  const forwarded = new URL(received.headers.get("location"));
+  assert.equal(forwarded.origin, `http://${config.host}:${config.port}`);
+  assert.equal(forwarded.searchParams.get("state"), automatic.state);
+  assert.equal(forwarded.searchParams.get("error"), "access_denied");
+  assert.equal((await requestLocal(config, forwarded.pathname + forwarded.search)).status, 200);
+  await waitUntil(async () => {
+    const status = await requestLocal(management, `/v8/management/oauth/status?state=${encodeURIComponent(automatic.state)}`, { authenticated: true });
+    return JSON.parse(status.text).status === "error";
+  }, 5000);
+  blocker.listen({ port: 51121, exclusive: true });
+  await once(blocker, "listening");
+  attempts.length = 0;
+  const manual = await startAntigravityAuth(requestAuth);
+  assert.deepEqual(attempts, [true, false]);
+  assert.equal(manual.callbackMode, "manual");
+  assert.notEqual(manual.state, automatic.state);
+  const waiting = await requestLocal(management, `/v8/management/oauth/status?state=${encodeURIComponent(manual.state)}`, { authenticated: true });
+  assert.equal(JSON.parse(waiting.text).status, "wait");
+  const cancelled = await requestLocal(management, "/v8/management/oauth/callback", {
+    method: "POST", authenticated: true,
+    body: { provider: "antigravity", redirect_url: `http://localhost:51121/oauth-callback?error=access_denied&state=${encodeURIComponent(manual.state)}` },
+  });
+  assert.equal(cancelled.status, 200);
+  await waitUntil(async () => {
+    const status = await requestLocal(management, `/v8/management/oauth/status?state=${encodeURIComponent(manual.state)}`, { authenticated: true });
+    return JSON.parse(status.text).status === "error";
+  }, 5000);
+  assert.equal(unexpectedCallbacks, 0);
+  assert.equal((await getStatus(config)).authCount, 0);
   await stopBridge(config);
 });
 

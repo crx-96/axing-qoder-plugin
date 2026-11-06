@@ -97,7 +97,7 @@ async function replacePrivateFile(path, text, original) {
 /**
  * 按 Windows 系统代理同步 requests.proxy-url；核心不读系统代理设置，只在冷启动时由插件写入。
  * 读取失败或平台无系统代理概念时保持现有配置，用户自管的代理值不接管也不改写。
- * 系统代理地址不可达且检测到隧道网卡在用时按直连处理，避免核心反复拨号失效地址。
+ * 系统代理不可达且路由确认隧道出口时写入显式 direct，避免遗留环境代理覆盖回退决策。
  * @param {string} text 已通过安全字段校验的 config.yaml 文本
  * @param {object} config loadConfig 返回的运行配置
  * @param {Function} readProxy 系统代理读取实现

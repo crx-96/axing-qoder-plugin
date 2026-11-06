@@ -13,30 +13,109 @@ const patched = patchManagementPanel(upstream);
 const state = "test-state-123";
 const callback = `http://localhost:51121/oauth-callback?code=sample-code&state=${state}`;
 
-function authClient(html) {
+function authClient(html, get = (path, options) => ({ path, ...options })) {
   const fragment = html.match(/startAuth:\(e,t\)=>\{let n=by\(e\),r=\{provider:n\};return [\s\S]*?W\.get\(`\/oauth\/auth-url`,\{params:r,\.\.\.t\?\{signal:t\}:\{\}\}\)\}/)?.[0];
   assert.ok(fragment, "固定版本应包含唯一授权客户端");
   return vm.runInNewContext(`({${fragment}})`, {
     by: (provider) => provider === "anthropic" ? "claude" : provider,
     Uee: new Set(["codex", "claude", "antigravity", "xai", "devin"]),
-    W: { get: (path, options) => ({ path, ...options }) },
+    W: { get },
   });
 }
 
-test("实际管理页的授权客户端只对 Antigravity 禁用监听，保留取消信号", () => {
+test("实际管理页优先自动回调，保留其他提供商行为与取消信号", async () => {
   const original = authClient(upstream.toString());
   assert.equal(original.startAuth("antigravity").params.is_webui, true);
   const client = authClient(patched);
   const signal = new AbortController().signal;
   for (const provider of ["antigravity", "codex", "anthropic", "xai", "devin"]) {
-    const result = client.startAuth(provider, signal);
-    assert.equal(result.params.is_webui, provider !== "antigravity");
+    const result = await client.startAuth(provider, signal);
+    assert.equal(result.params.is_webui, true);
     assert.equal(result.signal, signal);
     assert.equal(result.path, "/oauth/auth-url");
+    assert.equal(result.callbackMode, provider === "antigravity" ? "automatic" : undefined);
   }
   assert.equal(Object.hasOwn(client.startAuth("kimi").params, "is_webui"), false);
-  assert.match(patched, /当前使用手动回调模式/);
-  assert.match(patched, /Manual callback mode/);
+  assert.equal((await client.startAuth("antigravity")).signal, undefined);
+  assert.match(patched, /默认自动接收 Google 授权回调/);
+  assert.match(patched, /Google authorization callbacks are received automatically/);
+  assert.ok(patched.includes("callbackMode:r.callbackMode"));
+  assert.ok(patched.includes("t.callbackMode!==`manual`"));
+  assert.ok(patched.includes("t.callbackMode===`manual`?`auth_login.antigravity_manual_callback_hint`:d"));
+});
+
+test("仅 Antigravity 的明确监听失败降级一次，使用新会话并传递同一取消信号", async () => {
+  const attempts = [];
+  const signal = new AbortController().signal;
+  const failure = Object.assign(new Error("failed to start callback server"), {
+    status: 500, data: { error: "failed to start callback server" },
+  });
+  const client = authClient(patched, async (path, options) => {
+    attempts.push(options.params.is_webui);
+    assert.equal(path, "/oauth/auth-url");
+    assert.equal(options.params.provider, "antigravity");
+    assert.equal(options.signal, signal);
+    if (options.params.is_webui) throw failure;
+    return { status: "ok", state: "fresh-manual-state", url: "test-auth-url" };
+  });
+  const result = await client.startAuth("antigravity", signal);
+  assert.deepEqual(attempts, [true, false]);
+  assert.equal(result.state, "fresh-manual-state");
+  assert.equal(result.url, "test-auth-url");
+  assert.equal(result.callbackMode, "manual");
+});
+
+test("网络、鉴权、取消及其他服务端错误不重试或吞错", async () => {
+  const errors = [
+    new Error("Network Error"),
+    Object.assign(new Error("cancelled"), { code: "ERR_CANCELED" }),
+    ...[401, 403, 502].map(status => ({ status, data: { error: "failed to start callback server" } })),
+    { status: 500, data: { error: "callback server unavailable" } },
+    { status: 500, data: { error: "failed to generate state parameter" } },
+    { status: 500, message: "failed to start callback server" },
+  ];
+  for (const failure of errors) {
+    let attempts = 0;
+    const client = authClient(patched, async () => { attempts++; throw failure; });
+    await assert.rejects(client.startAuth("antigravity"), error => error === failure);
+    assert.equal(attempts, 1);
+  }
+  const failure = { status: 500, data: { error: "failed to start callback server" } };
+  for (const provider of ["codex", "anthropic", "xai", "devin"]) {
+    let attempts = 0;
+    const client = authClient(patched, async () => { attempts++; throw failure; });
+    await assert.rejects(client.startAuth(provider), error => error === failure);
+    assert.equal(attempts, 1);
+  }
+});
+
+test("已取消的授权不发送请求，监听失败时取消也不会创建手动会话", async () => {
+  for (const initiallyAborted of [true, false]) {
+    const controller = new AbortController();
+    const failure = { status: 500, data: { error: "failed to start callback server" } };
+    let attempts = 0;
+    if (initiallyAborted) controller.abort();
+    const client = authClient(patched, async () => {
+      attempts++;
+      controller.abort();
+      throw failure;
+    });
+    await assert.rejects(client.startAuth("antigravity", controller.signal), error =>
+      error === (initiallyAborted ? controller.signal.reason : failure));
+    assert.equal(attempts, initiallyAborted ? 0 : 1);
+  }
+});
+
+test("手动重试失败原样上报，不再次重试", async () => {
+  const attempts = [];
+  const manualFailure = new Error("manual request failed");
+  const client = authClient(patched, async (path, options) => {
+    attempts.push(options.params.is_webui);
+    if (options.params.is_webui) throw { status: 500, data: { error: "failed to start callback server" } };
+    throw manualFailure;
+  });
+  await assert.rejects(client.startAuth("antigravity"), error => error === manualFailure);
+  assert.deepEqual(attempts, [true, false]);
 });
 
 test("嵌入页面的回调校验可独立执行，不影响其他提供商", () => {

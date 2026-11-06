@@ -80,5 +80,5 @@ owned=
 # 仅提示手动安装入口；本脚本不读写用户全局配置或 Qoder 已安装缓存。
 printf '已生成 macOS/Linux 独立本地市场：%s\n' "$target"
 printf '市场 ID：axing-qoder-plugins；插件：qoder-subscription-proxy。\n'
-printf '此目录供支持自定义市场的客户端使用；Qoder Desktop 请从源码用 package-plugin.mjs posix 生成 ZIP，再在扩展 → 插件中上传。\n'
+printf '此目录供支持自定义市场的客户端使用；Qoder Desktop 请从源码用 package-plugin.mjs 按平台键（darwin-x64/darwin-arm64/linux-x64/linux-arm64）生成内置核心的 ZIP，再在扩展 → 插件中上传。\n'
 printf '未自动注册、安装或启用；若已存在同 ID 市场，请在界面确认市场来源。源目录和已安装缓存未修改，未复制真实 data。\n'
