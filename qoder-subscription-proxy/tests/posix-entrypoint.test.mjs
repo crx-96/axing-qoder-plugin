@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:net";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -338,17 +341,46 @@ for (const platform of ["linux", "darwin"]) {
       { jsonrpc: "2.0", id: "初始化", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "posix-test", version: "1" } } },
       { jsonrpc: "2.0", id: "中文 ping", method: "ping" },
     ];
-    const env = { ...process.env, BRIDGE_DATA_DIR: join(directory, "不应创建的数据"), BRIDGE_PORT: "invalid" };
+    const server = createServer();
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const port = server.address().port;
+    await new Promise(resolve => server.close(resolve));
+    const dataDir = join(directory, "暂停的数据");
+    await put(join(dataDir, "bridge.paused"), "isolated protocol test\n");
+    const env = { ...process.env, BRIDGE_DATA_DIR: dataDir, BRIDGE_PORT: String(port),
+      BRIDGE_HOST: "127.0.0.1", BRIDGE_BIN: join(directory, "missing-core"),
+      BRIDGE_API_KEY: "isolated-native-protocol", BRIDGE_MGMT_KEY: "123456" };
     const result = execute(shell, [join(root, "scripts", "start-mcp.sh")], { env, timeout: 15000 });
-    result.child.stdin.end(request.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const lines = createInterface({ input: result.child.stdout });
+    for (const message of request) {
+      const response = once(lines, "line");
+      result.child.stdin.write(JSON.stringify(message) + "\n");
+      await response;
+    }
+    lines.close();
+    result.child.stdin.end();
     const { stdout, stderr } = await result;
     const responses = stdout.trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(responses.length, 2);
-    assert.equal(responses[0].id, "初始化");
-    assert.equal(responses[0].result.protocolVersion, "2025-06-18");
-    assert.deepEqual(responses[1], { jsonrpc: "2.0", id: "中文 ping", result: {} });
+    assert.equal(responses.find(response => response.id === "初始化")?.result.protocolVersion, "2025-06-18");
+    assert.deepEqual(responses.find(response => response.id === "中文 ping"), { jsonrpc: "2.0", id: "中文 ping", result: {} });
     assert.equal(stderr, "");
-    await assert.rejects(access(env.BRIDGE_DATA_DIR), { code: "ENOENT" });
+    assert.equal(await readFile(join(dataDir, "bridge.paused"), "utf8"), "isolated protocol test\n");
+    await access(join(dataDir, "launcher-secrets.json"));
+    await assert.rejects(access(join(dataDir, "bridge.pid")), { code: "ENOENT" });
+    const invalid = execute(shell, [join(root, "scripts", "start-mcp.sh")], {
+      env: { ...env, BRIDGE_DATA_DIR: join(directory, "不应创建的数据"), BRIDGE_PORT: "invalid" }, timeout: 15000,
+    });
+    invalid.child.stdin.write(JSON.stringify(request[0]) + "\n");
+    await assert.rejects(invalid, error => {
+      assert.equal(error.code, 1);
+      const responses = error.stdout.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+      assert.ok(responses.every(response => response.error?.code === -32001 && response.result === undefined));
+      assert.match(error.stderr, /配置不可用/);
+      return true;
+    });
+    await assert.rejects(access(join(directory, "不应创建的数据")), { code: "ENOENT" });
     t.diagnostic("已验证当前测试运行时下的原生启动；独立 Qoder Desktop Electron 祖先场景仍需目标桌面环境验证。");
   });
 }

@@ -436,9 +436,13 @@ export async function stopBridge(config) {
     if (!tracked?.identity) {
       // 仅在端口确认离线时报告幂等成功；外部服务或无法确定的端点都不接管或终止。
       const probe = await probeBridge(config);
-      return probe.state === "offline"
-        ? { stopped: true, reason: "本版本订阅桥已经停止，自动恢复已暂停" }
-        : { stopped: false, reason: "端口上服务的归属无法确认；已暂停自动恢复，未停止其他进程" };
+      if (probe.state !== "offline") return { stopped: false, reason: "端口上服务的归属无法确认；已暂停自动恢复，未停止其他进程" };
+      // 取消启动可能先回收核心再进入这里；仅清理本路径已确认离线的记录，不动其他版本记录。
+      if (tracked && typeof tracked.record.binPath === "string" && typeof tracked.record.configPath === "string" &&
+          canonical(tracked.record.binPath) === canonical(config.binPath) && canonical(tracked.record.configPath) === canonical(config.configPath)) {
+        await unlink(config.pidPath);
+      }
+      return { stopped: true, reason: "本版本订阅桥已经停止，自动恢复已暂停" };
     }
     if (!tracked.owned) return { stopped: false, reason: "进程归属校验失败；未停止其他版本或外部进程" };
     if (process.platform !== "win32") {

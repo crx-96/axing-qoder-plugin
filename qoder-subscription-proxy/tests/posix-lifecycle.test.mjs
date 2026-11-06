@@ -11,6 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../server/config.mjs";
 import { resolveCoreBinaryPath } from "../server/core-runtime.mjs";
+import { replaceConfigScalar } from "../server/config-yaml.mjs";
 import { copyTestCore, nativeCoreSkip, testCorePath } from "./helpers/native-core.mjs";
 import { ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../server/supervisor.mjs";
 import { queryPosixSupervisor } from "../server/posix-supervisor.mjs";
@@ -342,6 +343,15 @@ test("POSIX 控制端点消失时仅确认 PID 不存在才恢复陈旧记录", 
   } finally { await saveRecord(stale); }
   assert.equal(processGone(stale.pid), true);
   assert.equal(await queryPosixSupervisor(stale, f.config), null);
+  const otherBin = join(dirname(f.config.binPath), "其他版本核心");
+  const otherRecord = { ...stale, binPath: otherBin, executablePath: otherBin,
+    commandLine: JSON.stringify([otherBin, "-config", f.config.configPath]) };
+  await saveRecord(otherRecord);
+  assert.equal((await stopBridge(f.config)).stopped, true);
+  assert.deepEqual(await readPid(f.config), otherRecord);
+  await saveRecord(stale);
+  assert.equal((await stopBridge(f.config)).stopped, true);
+  assert.equal(await readPid(f.config), null);
   const recovered = await ensureRunning(f.config);
   assert.equal(recovered.started, true);
   assert.equal(recovered.ready, true);
@@ -362,11 +372,14 @@ test("POSIX 升级核心路径时不接管存活旧实例，owner EOF 保留旧�
   for (const key of ["dataDir", "authDir", "configPath", "pidPath", "pausedPath", "port", "apiKey"]) {
     assert.equal(newConfig[key], f.config[key], `升级仅改变核心路径，不改变 ${key}`);
   }
-  const dataPaths = [f.config.configPath, join(f.config.dataDir, "launcher-secrets.json")];
-  const originalData = await Promise.all(dataPaths.map((path) => readFile(path)));
+  const readData = async () => [
+    replaceConfigScalar(await readFile(f.config.configPath, "utf8"), ["management", "secret-key"], "managed-secret"),
+    await readFile(join(f.config.dataDir, "launcher-secrets.json")),
+  ];
+  const originalData = await readData();
   const originalAuths = await readdir(f.config.authDir);
   async function assertDataUnchanged() {
-    assert.deepEqual(await Promise.all(dataPaths.map((path) => readFile(path))), originalData);
+    assert.deepEqual(await readData(), originalData);
     assert.deepEqual(await readdir(newConfig.authDir), originalAuths);
     await assert.rejects(readFile(newConfig.pausedPath), { code: "ENOENT" });
   }
@@ -418,7 +431,7 @@ test("POSIX 默认缓存核心丢失执行位时只恢复隔离 dataDir 内副�
   assert.notEqual(f.config.binPath, testCorePath);
   assert.equal((await stat(f.config.binPath)).mode & 0o777, 0o644);
   const client = await mcpClient(f);
-  assert.equal((await getStatus(f.config)).ready, true, "默认缓存应在 initialize 前自动校验、恢复执行位并启动");
+  await waitUntil(async () => (await getStatus(f.config)).ready, "握手后后台校验缓存、恢复执行位并启动", 30000);
   assert.equal((await stat(f.config.binPath)).mode & 0o777, 0o755);
   assert.equal((await stat(testCorePath)).mode, sourceMode, "预先准备的测试核心不得被 chmod");
   const record = await assertIdentity(f.config);

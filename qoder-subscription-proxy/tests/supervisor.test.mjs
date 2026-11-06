@@ -12,6 +12,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { PLUGIN_VERSION, loadConfig, renderConfigYaml } from "../server/config.mjs";
 import { ensureApprovalRouting } from "../server/approval-routing.mjs";
 import { requestLocal } from "../server/local-http.mjs";
+import { connectOwned } from "../server/owned-http.mjs";
+import { createConnection } from "node:net";
 import { startAntigravityAuth } from "../server/management-panel.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
@@ -371,6 +373,45 @@ test("ensureDataDir 并发发布完整配置并保留既有内容", async (t) =>
   await ensureDataDir(config, noSystemProxy);
   assert.equal((await readFile(config.configPath, "utf8")).startsWith(marker), true);
   assert.ok(!(await readdir(config.dataDir)).some((name) => name.endsWith(".tmp")));
+});
+
+test("Windows 真实核心的进程身份和零字节连接归属保持一致", { skip: windowsOnly, timeout: 30000 }, async (t) => {
+  const { config, beforeCleanup } = await realBridgeFixture(t);
+  await ensureDataDir(config, noSystemProxy);
+  const child = spawn(config.binPath, ["-config", config.configPath], {
+    cwd: config.dataDir, windowsHide: true, stdio: "ignore",
+    env: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")),
+  });
+  const exited = once(child, "exit");
+  beforeCleanup.push(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+  });
+  await waitUntil(async () => (await probeBridge(config)).state === "bridge");
+  const first = await processIdentity(child.pid);
+  const second = await processIdentity(child.pid);
+  const record = { ...first, binPath: config.binPath, configPath: config.configPath };
+  t.diagnostic(JSON.stringify({ node: process.version, pidMatches: first?.pid === child.pid,
+    creationStable: first?.creationDate === second?.creationDate,
+    commandStable: first?.commandLine === second?.commandLine,
+    executableMatches: first?.executablePath && resolve(first.executablePath).toLowerCase() === resolve(config.binPath).toLowerCase(),
+    identityMatches: sameProcess(record, second, config) }));
+  const raw = createConnection({ host: config.host, port: config.port, family: 4 });
+  try {
+    await once(raw, "connect");
+    const { stdout } = await execFileAsync(join(process.env.SystemRoot || "C:\\Windows", "System32", "netstat.exe"), ["-ano", "-p", "TCP"], {
+      windowsHide: true, timeout: 4000, maxBuffer: 8 * 1024 * 1024,
+    });
+    t.diagnostic(JSON.stringify({ expectedPid: child.pid, serverPort: config.port, clientPort: raw.localPort,
+      rows: stdout.split(/\r?\n/).map(row => row.trim().split(/\s+/)).filter(fields =>
+        fields[0] === "TCP" && [fields[1], fields[2]].includes(`127.0.0.1:${config.port}`)).slice(0, 8) }));
+  } finally { raw.destroy(); }
+  assert.equal(sameProcess(record, second, config), true);
+  const socket = await connectOwned(config, async () => second);
+  try {
+    const reply = await requestLocal(config, "/v1/models", { socket, authenticated: true });
+    assert.equal(reply.status, 200);
+  } finally { socket.destroy(); }
 });
 
 test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建时间精度不会误拒绝停止", {
