@@ -373,16 +373,15 @@ async function extractArchive(bytes, release, signal) {
   }
 }
 
-/**
- * Windows 命名管道避开系统保留端口；POSIX 使用回环独占监听，碰撞明确失败不旁路。
- * 胜者把最终结果发给等待者，失败不会诱发等待者再次下载；进程崩溃由 OS 关闭监听，无僵尸锁文件。
- */
+/** Windows 命名管道、Linux 抽象 socket 避免 TCP 端口竞争；macOS 保留回环锁，均由 OS 在退出时释放。 */
 async function acquireDownloadLock(path, signal) {
   checkCancelled(signal);
   const key = sha256(cacheKey(path));
   const address = process.platform === "win32"
     ? `\\\\.\\pipe\\qoder-core-download-${key}`
-    : { host: "127.0.0.1", port: 20_000 + (Number.parseInt(key.slice(0, 8), 16) % 40_000), exclusive: true };
+    : process.platform === "linux"
+      ? `\0qoder-core-download-${key}`
+      : { host: "127.0.0.1", port: 20_000 + (Number.parseInt(key.slice(0, 8), 16) % 40_000), exclusive: true };
   const sockets = new Set();
   let outcome;
   const server = createServer((socket) => {

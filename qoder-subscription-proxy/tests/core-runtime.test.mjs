@@ -772,7 +772,9 @@ function lockAddress(config) {
   const key = hash(keyPath);
   return process.platform === "win32"
     ? `\\\\.\\pipe\\qoder-core-download-${key}`
-    : { host: "127.0.0.1", port: 20_000 + Number.parseInt(key.slice(0, 8), 16) % 40_000, exclusive: true };
+    : process.platform === "linux"
+      ? `\0qoder-core-download-${key}`
+      : { host: "127.0.0.1", port: 20_000 + Number.parseInt(key.slice(0, 8), 16) % 40_000, exclusive: true };
 }
 
 test("等待者尚未发送握手时下载完成，身份帧仍先于最终结果", async (t) => {
@@ -794,6 +796,28 @@ test("等待者尚未发送握手时下载完成，身份帧仍先于最终结�
   assert.equal(messages[0].key, messages[1].key);
   assert.equal((await value.runtime.ensureCore(value.config)).available, true);
   assert.equal(value.calls(), 0);
+});
+
+test("Linux 下载锁不受同哈希 TCP 端口占用影响", { skip: process.platform !== "linux" }, async (t) => {
+  const value = await fixture(t);
+  const key = hash(resolve(value.config.binPath));
+  const server = createServer((socket) => {
+    socket.on("error", () => {});
+    socket.end("unrelated TCP service\n");
+  });
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen({ host: "127.0.0.1", port: 20_000 + Number.parseInt(key.slice(0, 8), 16) % 40_000, exclusive: true }, resolveListen);
+    });
+  } catch (error) {
+    if (error.code !== "EADDRINUSE") throw error;
+  }
+  t.after(async () => { if (server.listening) await new Promise((resolveClose) => server.close(resolveClose)); });
+  assert.equal((await value.runtime.ensureCore(value.config)).available, true);
+  assert.equal(value.calls(), 1);
+  assert.deepEqual(await readFile(value.config.binPath), binary);
+  await assertClean(value.config);
 });
 
 test("下载锁地址碰撞时明确报错，不绕过并发保护或使用生命周期锁", async (t) => {
