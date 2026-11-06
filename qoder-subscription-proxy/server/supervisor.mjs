@@ -2,7 +2,7 @@ import { connectOwned } from "./owned-http.mjs";
 import { parseConfigYaml, appendConfigBlock, replaceConfigScalar } from "./config-yaml.mjs";
 import { spawn, execFile } from "node:child_process";
 import { mkdir, readFile, writeFile, readdir, unlink, rename, link, access, chmod } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withLifecycleLock } from "./lifecycle-lock.mjs";
@@ -159,13 +159,21 @@ export async function processIdentity(pid) {
 
 const canonical = (path) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
 
+function sameExecutablePath(actual, expected) {
+  if (canonical(actual) === canonical(expected)) return true;
+  if (process.platform !== "win32") return false;
+  // .NET Framework 会展开 8.3 短路径；比较实际文件路径，不能把同名文件或未知路径当作同一核心。
+  try { return canonical(realpathSync.native(actual)) === canonical(realpathSync.native(expected)); }
+  catch { return false; }
+}
+
 export function sameProcess(record, identity, config) {
   return Boolean(record && identity && record.pid === identity.pid &&
     record.creationDate === identity.creationDate && record.commandLine === identity.commandLine &&
     typeof record.binPath === "string" && typeof record.configPath === "string" &&
     canonical(record.binPath) === canonical(config.binPath) &&
     canonical(record.configPath) === canonical(config.configPath) &&
-    canonical(identity.executablePath) === canonical(config.binPath));
+    sameExecutablePath(identity.executablePath, config.binPath));
 }
 
 async function trackedProcess(config) {

@@ -97,8 +97,10 @@ async function loadSecrets(dataDir, port) {
       if (!previous.mgmtKey || previous.mgmtKey === LEGACY_MGMT_KEY) await publishSecrets(file, previous.apiKey, true);
       return readSecrets(file);
     });
-  } catch {
-    throw new Error("无法安全加载 launcher-secrets.json；请检查文件格式、访问权限及文件系统硬链接支持。");
+  } catch (error) {
+    throw Object.assign(new Error("无法安全加载 launcher-secrets.json；请检查文件格式、访问权限及文件系统硬链接支持。"), {
+      code: error.code, syscall: error.syscall,
+    });
   }
 }
 

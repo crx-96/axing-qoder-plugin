@@ -6,14 +6,13 @@ import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { PLUGIN_VERSION, loadConfig, renderConfigYaml } from "../server/config.mjs";
 import { ensureApprovalRouting } from "../server/approval-routing.mjs";
 import { requestLocal } from "../server/local-http.mjs";
 import { connectOwned } from "../server/owned-http.mjs";
-import { createConnection } from "node:net";
 import { startAntigravityAuth } from "../server/management-panel.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
@@ -391,27 +390,35 @@ test("Windows 真实核心的进程身份和零字节连接归属保持一致", 
   const first = await processIdentity(child.pid);
   const second = await processIdentity(child.pid);
   const record = { ...first, binPath: config.binPath, configPath: config.configPath };
-  t.diagnostic(JSON.stringify({ node: process.version, pidMatches: first?.pid === child.pid,
-    creationStable: first?.creationDate === second?.creationDate,
-    commandStable: first?.commandLine === second?.commandLine,
-    executableMatches: first?.executablePath && resolve(first.executablePath).toLowerCase() === resolve(config.binPath).toLowerCase(),
-    identityMatches: sameProcess(record, second, config) }));
-  const raw = createConnection({ host: config.host, port: config.port, family: 4 });
-  try {
-    await once(raw, "connect");
-    const { stdout } = await execFileAsync(join(process.env.SystemRoot || "C:\\Windows", "System32", "netstat.exe"), ["-ano", "-p", "TCP"], {
-      windowsHide: true, timeout: 4000, maxBuffer: 8 * 1024 * 1024,
-    });
-    t.diagnostic(JSON.stringify({ expectedPid: child.pid, serverPort: config.port, clientPort: raw.localPort,
-      rows: stdout.split(/\r?\n/).map(row => row.trim().split(/\s+/)).filter(fields =>
-        fields[0] === "TCP" && [fields[1], fields[2]].includes(`127.0.0.1:${config.port}`)).slice(0, 8) }));
-  } finally { raw.destroy(); }
+  assert.equal(first?.pid, child.pid);
   assert.equal(sameProcess(record, second, config), true);
   const socket = await connectOwned(config, async () => second);
   try {
     const reply = await requestLocal(config, "/v1/models", { socket, authenticated: true });
     assert.equal(reply.status, 200);
   } finally { socket.destroy(); }
+});
+
+test("Windows 8.3 短路径经托管器展开后仍认证同一核心，不接管其他可执行文件", { skip: windowsOnly, timeout: 60000 }, async (t) => {
+  const fixture = await realBridgeFixture(t);
+  const encoded = Buffer.from(fixture.directory).toString("base64");
+  const { stdout } = await execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-Command",
+    `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')); (New-Object -ComObject Scripting.FileSystemObject).GetFolder($p).ShortPath`], { windowsHide: true, timeout: 5000 });
+  const shortDirectory = stdout.trim();
+  if (resolve(shortDirectory).toLowerCase() === resolve(fixture.directory).toLowerCase()) return t.skip("测试卷未提供不同的 8.3 短路径");
+  const config = await loadConfig({ pluginRoot, env: { ...fixture.env,
+    BRIDGE_BIN: join(shortDirectory, basename(fixture.config.binPath)),
+    BRIDGE_DATA_DIR: join(shortDirectory, basename(fixture.config.dataDir)),
+  } });
+  fixture.beforeCleanup.push(() => stopBridge(config));
+  assert.equal((await ensureRunning(config)).ready, true);
+  const record = await readPid(config);
+  assert.notEqual(resolve(record.executablePath).toLowerCase(), resolve(config.binPath).toLowerCase());
+  assert.equal(sameProcess(record, await processIdentity(record.pid), config), true);
+  assert.equal(sameProcess(record, { ...record, executablePath: process.execPath }, config), false);
+  assert.equal((await getStatus(config)).ready, true);
+  assert.equal((await stopBridge(config)).stopped, true);
+  assert.equal(await readPid(config), null);
 });
 
 test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建时间精度不会误拒绝停止", {
