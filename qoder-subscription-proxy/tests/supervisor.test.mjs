@@ -4,7 +4,7 @@ import http from "node:http";
 import { once } from "node:events";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,7 +129,7 @@ async function cleanupBridgeFixture(config, directory) {
 }
 
 async function realBridgeFixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), "subscription-bridge-real-中文 路径-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "subscription-bridge-real-中文 路径-")));
   const port = await unusedPort();
   const binPath = join(directory, "隔离 订阅代理.exe");
   const env = {
