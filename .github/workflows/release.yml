@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的标签，例如 v1.0.5"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "标签必须形如 v1.2.3：$tag" >&2; exit 1 ;;
+          esac
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate tag matches plugin version
+        shell: bash
+        run: |
+          node --input-type=module - <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const manifest = JSON.parse(await readFile("qoder-subscription-proxy/.qoder-plugin/plugin.json", "utf8"));
+          const expected = `v${manifest.version}`;
+          if (process.env.TAG !== expected) {
+            console.error(`标签 ${process.env.TAG} 与插件版本 ${expected} 不一致`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Fetch and verify CLIProxyAPI cores
+        shell: bash
+        run: node qoder-subscription-proxy/scripts/fetch-core.mjs all
+
+      - name: Test current platform core
+        shell: bash
+        env:
+          BRIDGE_TEST_BIN: ${{ github.workspace }}/qoder-subscription-proxy/.core-build/linux-x64/qoder-plugin-subscription-proxy
+        run: |
+          chmod +x "$BRIDGE_TEST_BIN"
+          node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
+
+      - name: Package five platform ZIPs
+        shell: bash
+        run: |
+          mkdir -p dist
+          for platform in win32-x64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
+            node qoder-subscription-proxy/scripts/package-plugin.mjs \
+              "$platform" "dist/qoder-subscription-proxy-${TAG}-${platform}.zip"
+          done
+          ls -lh dist
+
+      - name: Create release if missing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          fi
+
+      - name: Upload release assets with retries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in dist/*.zip; do
+            uploaded=false
+            for attempt in 1 2 3; do
+              if gh release upload "$TAG" "$file" --clobber; then
+                uploaded=true
+                break
+              fi
+              echo "上传失败：$file（第 $attempt 次），准备重试" >&2
+              sleep $((attempt * 10))
+            done
+            if [ "$uploaded" != true ]; then
+              echo "上传最终失败：$file" >&2
+              exit 1
+            fi
+          done

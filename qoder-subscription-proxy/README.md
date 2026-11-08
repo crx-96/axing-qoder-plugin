@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.4
+# qoder订阅代理 · 1.0.5
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。安装包按平台拆分并内置对应核心：Windows x64 为 `qoder-subscription-proxy-v1.0.4-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。安装包按平台拆分并内置对应核心：Windows x64 为 `qoder-subscription-proxy-v1.0.5-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -14,7 +14,7 @@
 | 内置运行时 | Electron 内置 Node mode 或系统 Node 22+；Windows 启动器依赖 PowerShell 5.1、.NET Framework 与 Job Object |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh` 与系统进程工具；尚未实机验证 |
-| 核心 | 固定 CLIProxyAPI `v8.0.57`，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
+| 核心 | 固定 CLIProxyAPI `v8.0.60`，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
 | 不支持 | Windows 32 位、原生 Windows ARM64 及其他平台/架构 |
 
 ## 连接器与管理页按钮

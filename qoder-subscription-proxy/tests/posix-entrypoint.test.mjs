@@ -126,7 +126,7 @@ async function sourceFixture(t) {
   await put(join(plugin, "scripts", "start-mcp.sh"), launcherText);
   const prepare = join(plugin, "scripts", "prepare-posix-marketplace.sh");
   await put(prepare, prepareText);
-  for (const file of ["data/auth.json", "server/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "server/unknown.tmp", "server/local-debug-only.mjs", "commands/private.md", "server/bin/unknown.tmp", "server/bin/CLIProxyAPI_8.0.57_windows_amd64.zip", "server/bin/CLIProxyAPI_8.0.57_linux_amd64.tar.gz", "server/bin/linux-x64/unknown.tmp", "server/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
+  for (const file of ["data/auth.json", "server/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "server/unknown.tmp", "server/local-debug-only.mjs", "commands/private.md", "server/bin/unknown.tmp", "server/bin/CLIProxyAPI_8.0.60_windows_amd64.zip", "server/bin/CLIProxyAPI_8.0.60_linux_amd64.tar.gz", "server/bin/linux-x64/unknown.tmp", "server/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
     await put(join(plugin, file), "must-not-copy-private-fixture\n");
   }
   return { directory, repository, plugin, target, prepare, catalog };
