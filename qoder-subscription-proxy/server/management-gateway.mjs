@@ -270,16 +270,21 @@ export function createManagementLogin(config, { launchBrowser = openSystemBrowse
     }
   }
 
+  function listen() {
+    if (closed) return Promise.reject(Error("MCP 会话已关闭。"));
+    if (!starting) starting = start().catch(error => { starting = undefined; throw error; });
+    return starting;
+  }
+
   return {
     /** MCP 会话期常驻监听：连接器授权元数据、免密管理入口与管理 API 代理共用固定端口。 */
-    listen: start,
+    listen,
     /** 先验证核心管理接口，成功才签发票据。URL 仅交给本机浏览器，不作为工具结果。 */
     async open(signal) {
       const ready = await requestOwned(config, "/v8/management/config",
         { management: true, signal, statusOnly: true });
       if (ready.status !== 200) throw Object.assign(Error(), { safeMessage: "管理接口未就绪，请先检查桥状态。" });
-      if (!starting) starting = start().catch(error => { starting = undefined; throw error; });
-      await starting;
+      await listen();
       signal?.throwIfAborted();
       if (closed) throw Error("MCP 会话已关闭。");
       const ticket = issue(tickets, TICKET_MS);

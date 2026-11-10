@@ -13,8 +13,9 @@ import { loadConfig } from "../server/config.mjs";
 import { resolveCoreBinaryPath } from "../server/core-runtime.mjs";
 import { replaceConfigScalar } from "../server/config-yaml.mjs";
 import { copyTestCore, nativeCoreSkip, testCorePath } from "./helpers/native-core.mjs";
-import { ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../server/supervisor.mjs";
-import { queryPosixSupervisor } from "../server/posix-supervisor.mjs";
+import { ensureDataDir, ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../server/supervisor.mjs";
+import { queryPosixSupervisor, spawnPosixSupervisor } from "../server/posix-supervisor.mjs";
+import { PANEL_REVISION, prepareManagementPanel } from "../server/management-panel.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const native = {
@@ -227,6 +228,31 @@ async function assertIdentity(config) {
   assert.equal((await stat(config.pidPath)).mode & 0o777, 0o600);
   return record;
 }
+
+test("POSIX 外层托管器强杀后回收原生核心，停止及重新启动可恢复", native, async (t) => {
+  const f = await fixture(t);
+  await ensureDataDir(f.config);
+  const child = spawnPosixSupervisor(f.config, await prepareManagementPanel(f.config));
+  child.stderr.resume();
+  child.stdin.on("error", () => {});
+  const lines = createInterface({ input: child.stdout });
+  f.clients.push({ async close() {
+    if (child.exitCode === null && child.signalCode === null) child.stdin.end();
+    await waitUntil(() => child.exitCode !== null || child.signalCode !== null, "外层托管器退出");
+    lines.close();
+  } });
+  const [line] = await once(lines, "line", { signal: AbortSignal.timeout(10000) });
+  const record = { ...JSON.parse(line), binPath: f.config.binPath, configPath: f.config.configPath, panelRevision: PANEL_REVISION };
+  await writeFile(f.config.pidPath, JSON.stringify(record), { mode: 0o600 });
+  await waitUntil(async () => (await probeBridge(f.config)).state === "bridge", "原生核心就绪");
+  assert.equal(child.kill("SIGKILL"), true);
+  await waitUntil(() => child.signalCode === "SIGKILL", "外层托管器强杀退出");
+  await assertReleased(f.config, record);
+  assert.equal((await stopBridge(f.config)).stopped, true);
+  assert.equal((await ensureRunning(f.config)).ready, true);
+  const recovered = await assertIdentity(f.config);
+  assert.notEqual(recovered.creationDate, record.creationDate);
+});
 
 test("POSIX 隔离原生核心并发 start/status/stop，暂停自动恢复且显式 start 创建新实例", native, async (t) => {
   const { config } = await fixture(t);

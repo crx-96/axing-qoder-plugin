@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONTROL_MESSAGE_LIMIT, CONTROL_REQUEST_TIMEOUT_MS, encodePosixMessage,
-  createPosixControlMessage, posixSupervisorError, validatePosixControlMessage, validatePosixPaths,
+  createPosixControlMessage, posixSupervisorError, validatePosixControlMessage, validatePosixIdentity, validatePosixPaths,
 } from "../server/posix-supervisor.mjs";
 
 /** 优先给核心五秒完成正常退出；SIGKILL 后仍须观察 exit，不能凭 kill 返回值宣称成功。 */
@@ -25,12 +25,8 @@ async function waitForExit(exited, timeoutMs) {
   } finally { clearTimeout(timer); }
 }
 
-/**
- * 只持有本实例创建的 ChildProcess，不枚举进程或按记录 PID 发终止信号。
- * spawnChild 注入点仅用于隔离测试：测试仍必须返回真实 ChildProcess，不启动真实代理。
- * stdin 是创建者存活租约；supervisor 自身被 SIGKILL 时无法执行清理，不具有 Job 的内核保证。
- */
-export async function runPosixSupervisor(config, panelDirectory, { spawnChild = spawn } = {}) {
+// 私有租约让存活 guardian 回收被强杀的外层 supervisor 的核心，不承诺全进程强杀回收。
+export async function runCoreGuardian(config, panelDirectory, { spawnChild = spawn } = {}) {
   validatePosixPaths(config, panelDirectory);
   let child;
   let childExited = true;
@@ -87,6 +83,7 @@ export async function runPosixSupervisor(config, panelDirectory, { spawnChild = 
         process.stdin.off("error", onOwnerGone);
         for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, onSignal);
         process.stdout.off("error", onOutputError);
+        process.stdout.off("close", onOutputError);
         finishRun(exitCode);
       }
     })();
@@ -143,6 +140,7 @@ export async function runPosixSupervisor(config, panelDirectory, { spawnChild = 
   if (process.stdin.readableEnded || process.stdin.destroyed) closing = true;
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, onSignal);
   process.stdout.on("error", onOutputError);
+  process.stdout.on("close", onOutputError);
 
   try {
     // 文件描述符直接传给核心，stdout/stderr 不可能混进 supervisor 的单行协议。
@@ -199,12 +197,99 @@ export async function runPosixSupervisor(config, panelDirectory, { spawnChild = 
   return finished;
 }
 
-// 仅直接执行时读 argv；导入测试不启动托管器，不读取用户配置正文。
+// 外层只转发身份并持有私有租约，guardian 保留真实核心句柄和既有认证控制端点。
+export async function runPosixSupervisor(config, panelDirectory, { spawnGuardian = spawn } = {}) {
+  validatePosixPaths(config, panelDirectory);
+  let guardian;
+  let closing = false;
+  let failed = false;
+  let announced = false;
+  let buffer = Buffer.alloc(0);
+  let deadline;
+
+  /** 所有取消/失败只关闭租约，绝不杀 guardian；其 exit 才证明托管清理已结束。 */
+  function closeLease(error = false) {
+    closing = true;
+    failed ||= error;
+    clearTimeout(deadline);
+    guardian?.stdin.end();
+  }
+  /** owner 租约断开或可捕获信号都先等待 guardian 回收核心。 */
+  function onOwnerGone() { closeLease(); }
+  /** 公告输出失败意味着实例不能交付，仍必须等待真实回收。 */
+  function onOutputError() { closeLease(true); }
+  /** 始终消费输出，但只允许一个受字节上限和固定身份约束的公告。 */
+  function onAnnouncement(chunk) {
+    if (closing) return;
+    if (announced || buffer.length + chunk.length > CONTROL_MESSAGE_LIMIT) return closeLease(true);
+    buffer = Buffer.concat([buffer, chunk]);
+    const newline = buffer.indexOf(10);
+    if (newline < 0) return;
+    try {
+      if (newline !== buffer.length - 1) throw posixSupervisorError();
+      const identity = validatePosixIdentity(JSON.parse(buffer.subarray(0, newline).toString("utf8")), config);
+      announced = true;
+      buffer = Buffer.alloc(0);
+      clearTimeout(deadline);
+      process.stdout.write(encodePosixMessage(identity), (error) => { if (error) onOutputError(); });
+    } catch { closeLease(true); }
+  }
+
+  // 在首次异步让步前监听关闭，避免 owner 在准备窗口退出后仍启动新 guardian。
+  process.stdin.once("end", onOwnerGone);
+  process.stdin.once("error", onOwnerGone);
+  process.stdin.resume();
+  if (process.stdin.readableEnded || process.stdin.destroyed) closing = true;
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, onOwnerGone);
+  process.stdout.on("error", onOutputError);
+  process.stdout.on("close", onOutputError);
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!closing) {
+      guardian = spawnGuardian(process.execPath, [fileURLToPath(import.meta.url), "--core-guardian",
+        config.binPath, config.configPath, config.dataDir, panelDirectory], {
+        cwd: config.dataDir, env: process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+      });
+      guardian.stdin.on("error", onOutputError);
+      guardian.stdout.on("data", onAnnouncement);
+      guardian.stdout.on("error", onOutputError);
+      guardian.stdout.once("end", () => { if (!closing) closeLease(!announced); });
+      // guardian 仅有固定诊断；不把其输出当作可公开的认证或身份数据。
+      guardian.stderr.resume();
+      guardian.stderr.on("error", onOutputError);
+      deadline = setTimeout(() => closeLease(true), 8000);
+      await new Promise((resolve) => {
+        guardian.once("exit", (code) => { failed ||= code !== 0 || !announced && !closing; resolve(); });
+        guardian.on("error", () => {
+          closeLease(true);
+          // spawn 失败无 exit；已启动的进程即使报错也必须等待 exit。
+          if (!guardian.pid) resolve();
+        });
+      });
+    }
+  } catch { closeLease(true); }
+  finally {
+    clearTimeout(deadline);
+    process.stdin.pause();
+    process.stdin.off("end", onOwnerGone);
+    process.stdin.off("error", onOwnerGone);
+    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, onOwnerGone);
+    process.stdout.off("error", onOutputError);
+    process.stdout.off("close", onOutputError);
+  }
+  if (failed) process.stderr.write("POSIX supervisor initialization failed.\n");
+  return failed ? 1 : 0;
+}
+
+// 仅直接执行时读 argv；内部模式不再 spawn guardian，导入测试不读取用户配置正文。
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [binPath, configPath, dataDir, panelDirectory, ...extra] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const guardianMode = args[0] === "--core-guardian";
+  if (guardianMode) args.shift();
+  const [binPath, configPath, dataDir, panelDirectory, ...extra] = args;
   try {
     if (extra.length) throw posixSupervisorError();
-    process.exitCode = await runPosixSupervisor({ binPath, configPath, dataDir }, panelDirectory);
+    process.exitCode = await (guardianMode ? runCoreGuardian : runPosixSupervisor)({ binPath, configPath, dataDir }, panelDirectory);
   } catch {
     process.stderr.write("POSIX supervisor initialization failed.\n");
     process.exitCode = 1;

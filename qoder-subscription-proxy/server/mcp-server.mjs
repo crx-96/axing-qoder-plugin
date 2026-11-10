@@ -69,6 +69,17 @@ async function prepareBridge(signal) {
   }
 }
 
+async function listenManagement() {
+  managementLogin ??= createManagementLogin(ctx.config);
+  try {
+    await managementLogin.listen();
+    ctx.gatewayError = null;
+  } catch (error) {
+    ctx.gatewayError = typeof error?.safeMessage === "string" ? error.safeMessage
+      : "管理网关固定端口监听失败；连接器授权按钮与免密管理页不可用。";
+  }
+}
+
 /** 握手只等待本地配置；启动后台任务后立即返回，不等待网络、核心校验或代理就绪。 */
 async function prepare(signal) {
   sessionSignal = signal;
@@ -80,11 +91,7 @@ async function prepare(signal) {
   }
   signal.throwIfAborted();
   // 网关随会话常驻监听：连接器授权按钮与免密管理页共用固定端口；占用失败只记录诊断，不阻塞握手。
-  managementLogin ??= createManagementLogin(ctx.config);
-  await managementLogin.listen().catch((error) => {
-    ctx.gatewayError = typeof error?.safeMessage === "string" ? error.safeMessage
-      : "管理网关固定端口监听失败；连接器授权按钮与免密管理页不可用。";
-  });
+  await listenManagement();
   // 保存任务用于退出收尾；异步故障由 prepareBridge 接住，不拒绝本次 initialize。
   backgroundPreparation = prepareBridge(signal);
 }
@@ -95,6 +102,7 @@ const handlers = {
   async openManagement(config, { signal }) {
     managementLogin ??= createManagementLogin(config);
     await managementLogin.open(signal);
+    ctx.gatewayError = null;
   },
   /** 查询实际代理与核心状态；MCP 已连接不代表 ready 为 true。 */
   async getStatus() {
@@ -107,6 +115,7 @@ const handlers = {
     const result = await ensureRunning(ctx.config, options);
     if (result.ready) {
       ctx.startupError = null;
+      await listenManagement();
       ensureWatchdog();
     }
     return result;

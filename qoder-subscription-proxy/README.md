@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.5
+# qoder订阅代理 · 1.0.6
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,15 +6,15 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。安装包按平台拆分并内置对应核心：Windows x64 为 `qoder-subscription-proxy-v1.0.5-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。安装包按平台拆分并内置对应核心：Windows x64 为 `qoder-subscription-proxy-v1.0.6-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
-| Qoder | 本机核对 Desktop CN `0.5.1`；程序为 `Qoder CN.exe`，国际版为 `Qoder.exe` |
+| Qoder | 已核对 Qoder Desktop `0.5.7`；CN 版程序为 `Qoder CN.exe`，国际版为 `Qoder.exe`；本轮未重新核对 Electron / 内置 Node 版本 |
 | 内置运行时 | Electron 内置 Node mode 或系统 Node 22+；Windows 启动器依赖 PowerShell 5.1、.NET Framework 与 Job Object |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh` 与系统进程工具；尚未实机验证 |
-| 核心 | 固定 CLIProxyAPI `v8.0.60`，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
+| 核心 | 固定 CLIProxyAPI `v8.0.63`，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
 | 不支持 | Windows 32 位、原生 Windows ARM64 及其他平台/架构 |
 
 ## 连接器与管理页按钮
@@ -67,7 +67,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 系统代理关闭时不探测地址或网卡，空配置沿用环境代理；要明确禁用环境代理可手填 `direct`/`none`。PAC 自动配置脚本和仅 SOCKS 的系统代理不自动转换为 HTTP(S) 地址，需要固定出口时手工配置。macOS/Linux 不读取 Windows 注册表，沿用核心环境代理。
 
-正常安装无需下载核心；仅从源码直接运行等未随包场景才回退下载，并复用上述系统代理发现。下载优先保留显式 `QODER_HTTP_PROXY`、`https_proxy`、`HTTPS_PROXY`、`all_proxy`、`ALL_PROXY`（含显式空值）；这些变量均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。下载代理只注入该次 curl 子进程，不修改宿主环境或 Windows 设置。
+正常安装无需下载核心；仅从源码直接运行等未随包场景才回退下载，并复用上述系统代理发现。下载优先保留显式 `QODER_HTTP_PROXY`、`https_proxy`、`HTTPS_PROXY`、`all_proxy`、`ALL_PROXY`（含显式空值）；这些变量均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。下载代理只注入该次 curl 子进程，不修改宿主环境或 Windows 设置。下载失败不自动重试；仅当其他进程的核心准备被取消时，仍有效的等待者会接续获取准备锁，这不属于下载失败重试。
 
 ## MCP 工具与生图
 
@@ -112,8 +112,8 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 ## 自动启动与退出清理
 
 - 自动启动以宿主已拉起 stdio 连接器为前提，不注册系统服务、计划任务或开机启动项。
-- Windows 启动器查找实际 `Qoder.exe` / `Qoder CN.exe` 祖先进程，Job Object 在宿主退出或包装器被强杀时回收 MCP 与核心；POSIX 沿用独立 Node supervisor 与 stdin/EOF 租约，先 TERM 超时再 KILL。
-- `bridge_stop` 持久暂停自动恢复；`bridge_start` 解除暂停并重试下载或启动。多任务可复用代理，非创建者结束不主动杀共享代理。
+- Windows 启动器查找实际 `Qoder.exe` / `Qoder CN.exe` 祖先进程，Job Object 在宿主退出或包装器被强杀时回收 MCP 与核心；POSIX 由 supervisor 持有 guardian 的私有 stdin/EOF 租约，guardian 持有核心并先 TERM、超时再 KILL。外层 supervisor 被强杀时，存活的 guardian 仍会回收核心；这不等于 guardian 也被强杀时的内核回收保证。
+- `bridge_stop` 持久暂停自动恢复并关闭本会话管理网关；`bridge_start` 解除暂停并重试下载或启动，核心就绪后恢复网关，监听成功时清除旧诊断。多任务可复用代理，非创建者结束不主动杀共享代理。
 - 启停与凭据发送前验证进程归属，不按进程名批量杀进程。
 
 ## 故障排查
@@ -132,7 +132,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 仓库根目录使用 Node 22+ 运行：
 
 ```sh
-node --test qoder-subscription-proxy/tests/*.test.mjs
+node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
 ```
 
 普通测试不联网下载核心；原生核心测试需显式设置 `BRIDGE_TEST_BIN` 指向匹配固定 SHA256 的核心。设置 `BRIDGE_TEST_BROWSER` 可运行管理页浏览器交接测试。Windows Job 与 POSIX 生命周期测试须在对应系统执行。

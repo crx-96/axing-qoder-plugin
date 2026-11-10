@@ -7,39 +7,39 @@
 | 项目 | 值 |
 | --- | --- |
 | 上游仓库 | https://github.com/router-for-me/CLIProxyAPI |
-| 固定核心版本 | `v8.0.60`；支持 Windows x64、macOS x64/arm64、Linux x64/arm64，每个安装 ZIP 只内置对应平台核心 |
-| 对应源码 | https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.60 |
-| 发布页 | https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.60 |
+| 固定核心版本 | `v8.0.63`；支持 Windows x64、macOS x64/arm64、Linux x64/arm64，每个安装 ZIP 只内置对应平台核心 |
+| 对应源码 | https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.63 |
+| 发布页 | https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.63 |
 | 许可证 | MIT，原文保存在 [`server/bin/LICENSE`](server/bin/LICENSE) |
 | 原程序名 | Windows：`cli-proxy-api.exe`；macOS/Linux：`cli-proxy-api` |
 | 修改情况 | 仅重命名文件，不修改二进制内容，不隐藏上游身份 |
 | 平台与来源清单 | [`server/bin/platforms.json`](server/bin/platforms.json)，`path` 为相对 `server/bin/` 的随包路径；用户缓存仅使用其 basename |
 
-插件 `1.0.5` 按五个平台分别分发内置核心的安装 ZIP，源码仓库仅保留来源清单、上游文档与许可证，构建缓存和 ZIP 不提交到源码仓库。默认缓存为 `dataDir/runtimes/v8.0.60/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台校验随包核心并安装到缓存；随包文件不存在时才下载，文件无效或 SHA256 不符时明确报错，不回退网络。watchdog 不安装、下载或自动重试核心准备；高级用户仍可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动安装、下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
+插件 `1.0.6` 按五个平台分别分发内置核心的安装 ZIP，源码仓库仅保留来源清单、上游文档与许可证，构建缓存和 ZIP 不提交到源码仓库。默认缓存为 `dataDir/runtimes/v8.0.63/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台校验随包核心并安装到缓存；随包文件不存在时才下载，文件无效或 SHA256 不符时明确报错，不回退网络。watchdog 不安装、下载或自动重试核心准备；高级用户仍可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动安装、下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
 
 固定二进制的随包路径与 SHA256（上游 `amd64` 对应 Node `x64`，`aarch64` 对应 `arm64`）：
 
 | 平台/架构 | 随包路径（相对 `server/bin/`） | 二进制 SHA256 |
 | --- | --- | --- |
-| Windows x64 | `qoder-plugin-subscription-proxy.exe` | `9740e396a97eb7d6b7a7e65bc3ea681cce1114a888e39213cafa0175151cde0f` |
-| macOS x64 | `darwin-x64/qoder-plugin-subscription-proxy` | `c2d3379393e983cda72fd52dc363bf066c3de8fde168d9b27599ad56e4635704` |
-| macOS arm64 | `darwin-arm64/qoder-plugin-subscription-proxy` | `2a7a43305a0907d9d9959c6d628a6206f2304b6b2069338135300a0442152672` |
-| Linux x64 | `linux-x64/qoder-plugin-subscription-proxy` | `bf1b39243401f60086fbee58f36f158d2f84c3ef915e035a0bab13fd174b85aa` |
-| Linux arm64 | `linux-arm64/qoder-plugin-subscription-proxy` | `79806c610d8495d6aad6cc147b21e2b67880cf2d8a0c5314d1b7b937f8e7068a` |
+| Windows x64 | `qoder-plugin-subscription-proxy.exe` | `167119451351dac1b63331e781b1f96810f84755275b3352cdccfac070e05de0` |
+| macOS x64 | `darwin-x64/qoder-plugin-subscription-proxy` | `beab0ccec3b1ca68745d6e43c14e9d5c015b0d0c040754446de9beb44277f7e1` |
+| macOS arm64 | `darwin-arm64/qoder-plugin-subscription-proxy` | `6f408592dbd635bc25c71c38bc71bde024d25bc24611268087c6171081c8b74b` |
+| Linux x64 | `linux-x64/qoder-plugin-subscription-proxy` | `1d681a08041dace3bc754133f7bf3df38019e862ea0b9eeb203967c1b7ca8fdd` |
+| Linux arm64 | `linux-arm64/qoder-plugin-subscription-proxy` | `7faed9a938d80383dfb73984f973b4fb682913c93d0c28da5f56c3c1cc6906a6` |
 
 官方归档与 `checksums.txt` 中的 SHA256：
 
 | 官方发布资产 | 归档 SHA256 |
 | --- | --- |
-| [CLIProxyAPI_8.0.60_windows_amd64.zip](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.60/CLIProxyAPI_8.0.60_windows_amd64.zip) | `c81a2c51aeab819c6e4840ad62f8d8f4143706b9fa7682f4a769683e0044fff1` |
-| [CLIProxyAPI_8.0.60_darwin_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.60/CLIProxyAPI_8.0.60_darwin_amd64.tar.gz) | `8892224d75f3d29a33efd0e4b8a00bb97505266cf2b9bc80d1adb3a787d89910` |
-| [CLIProxyAPI_8.0.60_darwin_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.60/CLIProxyAPI_8.0.60_darwin_aarch64.tar.gz) | `9be68e64fc614a5474b98d310bb9057d6bdecb619cedec01febbb4073fdb19df` |
-| [CLIProxyAPI_8.0.60_linux_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.60/CLIProxyAPI_8.0.60_linux_amd64.tar.gz) | `34720cd10deef235481e80625e0c02dee934eefdd03dc8bc4f327156fa766211` |
-| [CLIProxyAPI_8.0.60_linux_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.60/CLIProxyAPI_8.0.60_linux_aarch64.tar.gz) | `1c45a42770b5307a52599a2668645face8fb95c0f2dc6ee610e0992592c643d8` |
+| [CLIProxyAPI_8.0.63_windows_amd64.zip](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.63/CLIProxyAPI_8.0.63_windows_amd64.zip) | `5d8c7a093580c25cace076344dd650c9318ecb9990d9e2147bcee0c515a24b2a` |
+| [CLIProxyAPI_8.0.63_darwin_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.63/CLIProxyAPI_8.0.63_darwin_amd64.tar.gz) | `1dd6eb617e3be3a34b3395c8fa6b57e71ea298c7816eadd4e6ce0f025d1234d5` |
+| [CLIProxyAPI_8.0.63_darwin_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.63/CLIProxyAPI_8.0.63_darwin_aarch64.tar.gz) | `1336299530082d655fbdfdae866836d070aeec9379a77ef1c5cc25c432b6653a` |
+| [CLIProxyAPI_8.0.63_linux_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.63/CLIProxyAPI_8.0.63_linux_amd64.tar.gz) | `bce20e7eb3f985f9f03b72be21d99f0427c25247248d4e614493ed57ce71e9e5` |
+| [CLIProxyAPI_8.0.63_linux_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.63/CLIProxyAPI_8.0.63_linux_aarch64.tar.gz) | `f32091a2281be9170861ec81bb70f3541b5c1c8659f10baa70d015e1c1a93aed` |
 
-上述固定哈希沿用已核对的官方非 `no-plugin` 发布资产；归档 SHA256 对应官方 checksums.txt，二进制 SHA256 对应其中原始核心内容。构建期由 `scripts/fetch-core.mjs` 获取指定平台归档，先核验归档 SHA256，再安全提取核心并核验二进制 SHA256；`scripts/package-plugin.mjs` 再次校验二进制摘要，只将目标平台核心及分发白名单文件写入 ZIP，不打包下载归档或构建缓存。
+上述固定哈希来自通过 `gh release download` 获取的官方 `v8.0.63` 非 `no-plugin` 发布资产；五个平台归档 SHA256 均同时核对官方 `checksums.txt` 和 GitHub Release 资产 digest，二进制 SHA256 由通过校验的归档中原始核心内容计算。`checksums.txt` 自身也已核对 Release 资产 digest（`8d5f7d1c2f5c353af32393722918c7461b79d229e8c5875153357c88b68cf521`）。构建期由 `scripts/fetch-core.mjs` 获取指定平台归档，先核验归档 SHA256，再安全提取核心并核验二进制 SHA256；`scripts/package-plugin.mjs` 再次校验二进制摘要，只将目标平台核心及分发白名单文件写入 ZIP，不打包下载归档或构建缓存。
 
-运行时优先核验随包二进制 SHA256 后安装到当前平台缓存，不连接下载服务。仅未随包时才通过系统 `curl` 回退 HTTPS 下载，沿用相同的归档及二进制两级校验；显式 `QODER_HTTP_PROXY` 优先，否则保留 HTTPS/ALL 代理环境变量（含显式空值），均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。核心后台准备使用独立的 **10 分钟（600 秒）**预算，不阻塞 MCP 握手，不自动重试，不下载其他平台。后台准备失败时保留 MCP 连接，通过状态和安全 stderr 摘要报告原因；修复后可显式 `bridge_start` 或在宿主设置中重连。EOF、断管、退出信号或本会话的 `bridge_stop` 会中止在途准备并清理。
+运行时优先核验随包二进制 SHA256 后安装到当前平台缓存，不连接下载服务。仅未随包时才通过系统 `curl` 回退 HTTPS 下载，沿用相同的归档及二进制两级校验；显式 `QODER_HTTP_PROXY` 优先，否则保留 HTTPS/ALL 代理环境变量（含显式空值），均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。核心后台准备使用独立的 **10 分钟（600 秒）**预算，不阻塞 MCP 握手，不对下载失败自动重试，不下载其他平台；仅当其他进程的核心准备被取消时，仍有效的等待者会接续获取准备锁，这不属于下载失败重试。后台准备失败时保留 MCP 连接，通过状态和安全 stderr 摘要报告原因；修复后可显式 `bridge_start` 或在宿主设置中重连。EOF、断管、退出信号或本会话的 `bridge_stop` 会中止在途准备并清理。
 
 POSIX 默认缓存核心使用 `0755`（清单中的 `mode`），已有缓存仅经哈希验证后才恢复缺失执行位；配置解析本身不修改权限。自定义 `BRIDGE_BIN` 由用户负责来源、兼容性和权限，下载器不替换或 chmod 该文件。不提供 Windows ARM64 或其他平台/架构核心，`BRIDGE_BIN` 高级覆盖不扩展平台支持。
 

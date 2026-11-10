@@ -233,7 +233,7 @@ async function closeSupervisor(child) {
     if (process.platform === "win32") {
       if (!child.kill()) finish(bridgeError("无法停止本会话的代理托管进程"));
     } else {
-      // EOF 让托管器先等待代理退出；直接强杀托管器会绕过 POSIX 的清理逻辑。
+      // 通过 EOF 等待 guardian 回收确认，不把外层托管器退出当作核心已经退出。
       child.stdin.end();
     }
   });

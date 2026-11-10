@@ -62,7 +62,7 @@ async function closeLease(child) {
   await waitUntil(() => child.exitCode !== null || child.signalCode !== null);
 }
 
-async function fixture(t, { ignoreTerm = false, owner = false } = {}) {
+async function fixture(t, { ignoreTerm = false, owner = false, announcement = "normal" } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "posix-supervisor-中文 空格-")));
   const dataDir = join(directory, "数据 data");
   const panelDirectory = join(directory, "受控 panel");
@@ -82,13 +82,26 @@ async function fixture(t, { ignoreTerm = false, owner = false } = {}) {
     ${ignoreTerm ? "process.on('SIGTERM',()=>{});" : "process.on('SIGTERM',()=>{writeFileSync('term-seen','yes');process.exit(0)});"}
     setInterval(()=>{if(existsSync(${JSON.stringify(trigger)}))process.exit(0)},20);
   `);
+  const guardianPath = join(directory, "测试 guardian.mjs");
+  const guardianPidPath = join(dataDir, "guardian.pid");
+  await writeFile(guardianPath, `
+    import {spawn} from 'node:child_process';
+    import {writeFileSync} from 'node:fs';
+    import {runCoreGuardian} from ${JSON.stringify(supervisorUrl)};
+    writeFileSync(${JSON.stringify(guardianPidPath)},String(process.pid));
+    ${announcement === "held" ? "process.stdout.write=()=>true;" : ""}
+    const config=${JSON.stringify(config)};
+    process.exitCode=await runCoreGuardian(config,${JSON.stringify(panelDirectory)},{
+      spawnChild:(bin,args,options)=>spawn(process.execPath,[bin,...args],options)
+    });
+  `);
   const runner = join(directory, "测试 supervisor.mjs");
   await writeFile(runner, `
     import {spawn} from 'node:child_process';
     import {runPosixSupervisor} from ${JSON.stringify(supervisorUrl)};
     const config=${JSON.stringify(config)};
     process.exitCode=await runPosixSupervisor(config,${JSON.stringify(panelDirectory)},{
-      spawnChild:(bin,args,options)=>spawn(process.execPath,[bin,...args],options)
+      spawnGuardian:(bin,args,options)=>spawn(process.execPath,[${JSON.stringify(guardianPath)}],options)
     });
   `);
   let target = runner;
@@ -120,22 +133,25 @@ async function fixture(t, { ignoreTerm = false, owner = false } = {}) {
   child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
   child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   child.stdin.on("error", () => {});
-  let identity;
+  let identity, guardianPid;
   t.after(async () => {
     await closeLease(child);
     if (identity) {
       await waitUntil(() => exited(identity.pid));
       if (identity.supervisorPid) await waitUntil(() => exited(identity.supervisorPid));
     }
+    if (guardianPid) await waitUntil(() => exited(guardianPid));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  identity = await firstLine(child);
-  const record = { ...identity, binPath: config.binPath, configPath: config.configPath };
-  await waitUntil(async () => {
+  if (announcement !== "held") identity = await firstLine(child);
+  const observed = await waitUntil(async () => {
     try { return JSON.parse(await readFile(observedPath, "utf8")); }
     catch (error) { if (error.code === "ENOENT" || error instanceof SyntaxError) return false; throw error; }
   });
-  return { config, record, child, directory, panelDirectory, observedPath, trigger, stdout: () => stdout, stderr: () => stderr };
+  identity ??= { pid: observed.pid };
+  guardianPid = Number(await readFile(guardianPidPath, "utf8"));
+  const record = { ...identity, binPath: config.binPath, configPath: config.configPath };
+  return { config, record, child, guardianPid, directory, panelDirectory, observedPath, trigger, stdout: () => stdout, stderr: () => stderr };
 }
 
 async function rawRequest(record, message) {
@@ -258,6 +274,20 @@ test("强杀独立 owner 后租约关闭，supervisor 回收 fake 核心并退�
   await waitUntil(() => exited(f.record.supervisorPid));
   assert.equal(await queryPosixSupervisor(f.record, f.config), null);
 });
+
+for (const announcement of ["normal", "held"]) {
+  test(`外层 supervisor 在${announcement === "held" ? "公告前" : "公告后"}被强杀，guardian 仍回收核心`, { timeout: 15000 }, async (t) => {
+    const f = await fixture(t, { announcement });
+    assert.equal(exited(f.record.pid), false);
+    assert.equal(exited(f.guardianPid), false);
+    assert.equal(f.child.kill("SIGKILL"), true);
+    await waitUntil(() => f.child.exitCode !== null || f.child.signalCode !== null);
+    await waitUntil(() => exited(f.record.pid));
+    await waitUntil(() => exited(f.guardianPid));
+    if (announcement === "normal") assert.equal(await queryPosixSupervisor(f.record, f.config), null);
+    else assert.equal(f.stdout(), "");
+  });
+}
 
 test("核心自然退出可认证离线，supervisor 退出后的 stale 记录可恢复", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);

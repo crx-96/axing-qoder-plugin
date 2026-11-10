@@ -1,7 +1,7 @@
 /** 固定版本核心的按需缓存：优先安装随包核心，缺失时回退下载；不执行核心、不接触授权数据，准备与生命周期锁相互独立。 */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, createWriteStream } from "node:fs";
+import { constants, createWriteStream, realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from "node:path";
@@ -79,9 +79,23 @@ function fingerprint(stat) {
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode, stat.nlink].join(":");
 }
 
-/** 规范化同一 Windows 路径的大小写，确保进程间及进程内锁使用相同键。 */
-function cacheKey(path) {
+/** 配置契约按字面路径比较，不用真实路径放宽链接或目标路径校验。 */
+function pathKey(path) {
   return process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+}
+
+/** 最近现存祖先的真实路径统一长短路径别名；不替换用于安全检查和写入的原始路径。 */
+function cacheKey(path) {
+  let ancestor = resolve(path);
+  const suffix = [];
+  while (true) {
+    try { return pathKey(join(realpathSync.native(ancestor), ...suffix)); }
+    catch (error) {
+      if (error.code !== "ENOENT" || dirname(ancestor) === ancestor) throw coreError("CORE_CACHE");
+      suffix.unshift(basename(ancestor));
+      ancestor = dirname(ancestor);
+    }
+  }
 }
 
 /** 检查路径位于安装目录内；只读取路径，不扫描用户目录。 */
@@ -91,19 +105,8 @@ function insidePlugin(path) {
 }
 
 /** 将尚未创建的后缀接在最近现存祖先的真实路径上，防止父目录别名把缓存导向插件内部。 */
-async function checkCacheLocation(path) {
-  let ancestor = resolve(path);
-  const suffix = [];
-  while (true) {
-    try {
-      if (insidePlugin(join(await realpath(ancestor), ...suffix))) throw coreError("CORE_PATH");
-      return;
-    } catch (error) {
-      if (error.code !== "ENOENT" || dirname(ancestor) === ancestor) throw error;
-      suffix.unshift(basename(ancestor));
-      ancestor = dirname(ancestor);
-    }
-  }
+function checkCacheLocation(path) {
+  if (insidePlugin(cacheKey(path))) throw coreError("CORE_PATH");
 }
 
 /**
@@ -374,9 +377,9 @@ async function extractArchive(bytes, release, signal) {
 }
 
 /** Windows 命名管道、Linux 抽象 socket 避免 TCP 端口竞争；macOS 保留回环锁，均由 OS 在退出时释放。 */
-async function acquireDownloadLock(path, signal) {
+async function acquireDownloadLock(cacheIdentity, signal) {
   checkCancelled(signal);
-  const key = sha256(cacheKey(path));
+  const key = sha256(cacheIdentity);
   const address = process.platform === "win32"
     ? `\\\\.\\pipe\\qoder-core-download-${key}`
     : process.platform === "linux"
@@ -418,17 +421,19 @@ async function acquireDownloadLock(path, signal) {
     return {
       /** 持锁者负责下载；等待者只接收结果。 */
       leader: true,
-      /** 发布固定成功/错误码后关闭所有连接及监听，保证下次可重新获取锁。 */
+      /** 停止监听后发布固定结果并关闭连接，保证取消接续可以重新获取锁。 */
       async finish(errorCode) {
         outcome = { protocol: LOCK_PROTOCOL, key, state: errorCode ? "error" : "ready", code: errorCode };
-        for (const socket of sockets) socket.end(JSON.stringify(outcome) + "\n");
+        // 先停止接受连接再广播，接续者不能重新连上已取消的领导者。
         const closing = new Promise((resolveClose) => server.close(resolveClose));
+        for (const socket of sockets) socket.end(JSON.stringify(outcome) + "\n");
         for (const socket of sockets) socket.destroySoon();
         await closing;
       },
     };
   }
   // 连接现有持有者，仅与当前路径的相同协议实例共享下载；无响应/不相关服务立即失败。
+  let cancelledLeader = false;
   await new Promise((resolveWait, rejectWait) => {
     const socket = createConnection(address);
     let buffer = "";
@@ -449,7 +454,7 @@ async function acquireDownloadLock(path, signal) {
     socket.setTimeout(2_000, () => finish(coreError("CORE_LOCK")));
     socket.on("connect", () => socket.write(`${LOCK_PROTOCOL}:${key}\n`));
     socket.on("error", () => finish(coreError("CORE_LOCK")));
-    socket.on("close", () => finish(coreError("CORE_LOCK")));
+    socket.on("close", () => finish(cancelledLeader ? undefined : coreError("CORE_LOCK")));
     socket.on("data", (chunk) => {
       buffer += chunk;
       if (buffer.length > 2048) { finish(coreError("CORE_LOCK")); return; }
@@ -461,13 +466,18 @@ async function acquireDownloadLock(path, signal) {
         if (message?.protocol !== LOCK_PROTOCOL || message.key !== key) { finish(coreError("CORE_LOCK")); return; }
         if (message.state === "downloading") { confirmed = true; socket.setTimeout(OPERATION_TIMEOUT_MS); }
         else if (confirmed && message.state === "ready") finish();
+        else if (confirmed && message.state === "error" && message.code === "CORE_CANCELLED") {
+          cancelledLeader = true;
+          // Windows 管道的已连接句柄也持有名字，等双向关闭后再竞争。
+          socket.end();
+        }
         else if (confirmed && message.state === "error") finish(coreError(message.code));
         else finish(coreError("CORE_LOCK"));
       }
     });
     if (signal.aborted) cancel();
   });
-  return { leader: false };
+  return { leader: false, cancelledLeader };
 }
 
 /**
@@ -526,7 +536,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     if (config.core == null) return;
     const release = getCoreRelease({ platform: config.core.platform, arch: config.core.arch });
     for (const field of Object.keys(release)) if (config.core[field] !== release[field]) throw coreError("CORE_CONFIG");
-    if (typeof config.binPath !== "string" || cacheKey(config.binPath) !== cacheKey(resolveCoreBinaryPath({ dataDir: config.dataDir, ...release }))) throw coreError("CORE_CONFIG");
+    if (typeof config.binPath !== "string" || pathKey(config.binPath) !== pathKey(resolveCoreBinaryPath({ dataDir: config.dataDir, ...release }))) throw coreError("CORE_CONFIG");
   }
 
   /** 读取并校验文件描述符前后指纹，拒绝链接、并发改写和过大缓存。绝不修权限或删除缓存。 */
@@ -564,12 +574,11 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
   async function getCoreStatus(config) {
     validateConfig(config);
     if (config.core == null) return { state: "custom", version: null, platform: null, reason: "使用自定义 BRIDGE_BIN；不下载、不校验发行摘要、不修改权限。" };
-    const key = cacheKey(config.binPath);
-    let status;
-    if (jobs.has(key)) status = { state: "downloading", reason: "正在准备当前平台核心，请稍候。" };
-    else {
-      status = await inspect(config);
-      if (status.state !== "ready" && failures.has(key)) status = { state: "error", reason: failures.get(key) };
+    let status = await inspect(config);
+    if (status.replaceable !== false) {
+      const key = cacheKey(config.binPath);
+      if (jobs.has(key)) status = { state: "downloading", reason: "正在准备当前平台核心，请稍候。" };
+      else if (status.state !== "ready" && failures.has(key)) status = { state: "error", reason: failures.get(key) };
     }
     return { state: status.state, version: config.core.version, platform: config.core.key, reason: status.reason };
   }
@@ -596,12 +605,16 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
   }
 
   /** 完成一次安装事务：锁内重检、随包优先、两级摘要、安全解压、权限、原子 rename，失败保留已有核心。 */
-  async function install(config, signal) {
+  async function install(config, signal, key) {
     let lock;
     let temporary;
     let failure;
     try {
-      lock = await acquireDownloadLock(config.binPath, signal);
+      // 只接续远端正常取消；共用原有总预算，本地取消和其他失败不重试。
+      do {
+        lock = await acquireDownloadLock(key, signal);
+        checkCancelled(signal);
+      } while (lock.cancelledLeader);
       checkCancelled(signal);
       const current = await inspect(config, signal);
       if (current.state === "ready") return;
@@ -634,7 +647,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
       const previous = await inspect(config, signal);
       if (previous.replaceable === false) throw coreError("CORE_PATH");
       try { await rename(staged, config.binPath); } catch { throw coreError("CORE_PUBLISH"); }
-      verified.delete(cacheKey(config.binPath));
+      verified.delete(key);
       const published = await inspect(config, signal);
       if (published.state !== "ready") throw coreError("CORE_CACHE");
     } catch (error) {
@@ -648,13 +661,13 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
       if (temporary) {
         try { await rm(temporary, { recursive: true, force: true }); } catch { cleanupError = coreError("CORE_CLEANUP"); }
       }
-      if (lock?.leader) await lock.finish((failure ?? cleanupError)?.code);
+      if (lock?.leader) await lock.finish((cleanupError ?? failure)?.code);
       if (cleanupError && !failure) throw cleanupError;
     }
   }
 
   /** 订阅共享任务；单个等待者取消不影响其他等待者，最后一个取消才中止实际下载。 */
-  function joinJob(job, signal) {
+  function joinJob(job, signal, config) {
     checkCancelled(signal);
     job.waiters++;
     return new Promise((resolveResult, rejectResult) => {
@@ -678,7 +691,11 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
         else finish(coreError("CORE_CANCELLED"));
       };
       signal?.addEventListener("abort", cancel, { once: true });
-      job.promise.then((value) => finish(null, value), (error) => finish(error));
+      // 先登记订阅再异步检查原始路径，避免其他订阅者此时取消误杀共享任务。
+      const checked = config ? checkDirectories(config).catch((error) => {
+        throw coreError(error.code === "CORE_PATH" ? "CORE_PATH" : "CORE_CACHE");
+      }) : Promise.resolve();
+      Promise.all([job.promise, checked]).then(([value]) => finish(null, value), (error) => finish(error));
       if (signal?.aborted) cancel();
     });
   }
@@ -692,17 +709,25 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     validateConfig(config);
     if (config.core == null) return { available: true, state: "custom", reason: "使用自定义 BRIDGE_BIN，由生命周期检查权限。" };
     checkCancelled(signal);
-    const key = cacheKey(config.binPath);
+    let key;
+    try { key = cacheKey(config.binPath); }
+    catch (error) {
+      if (!allowDownload) return { available: false, state: "error", reason: error.safeMessage };
+      throw error;
+    }
     if (jobs.has(key)) {
-      if (!allowDownload) return { available: false, state: "downloading", reason: "正在准备当前平台核心，请稍候。" };
-      return joinJob(jobs.get(key), signal);
+      if (!allowDownload) {
+        const status = await getCoreStatus(config);
+        return { available: status.state === "ready", state: status.state, reason: status.reason };
+      }
+      return joinJob(jobs.get(key), signal, config);
     }
     const current = await inspect(config, signal);
     if (current.state === "ready") return { available: true, state: "ready", reason: current.reason };
     if (!allowDownload) return { available: false, state: current.state, reason: failures.get(key) ?? current.reason };
     checkCancelled(signal);
     // inspect 是异步边界，必须再次检查单飞任务，防止同时缺失时启动两个下载。
-    if (jobs.has(key)) return joinJob(jobs.get(key), signal);
+    if (jobs.has(key)) return joinJob(jobs.get(key), signal, config);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(coreError("CORE_TIMEOUT")), OPERATION_TIMEOUT_MS);
     const job = {
@@ -717,7 +742,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     };
     failures.delete(key);
     jobs.set(key, job);
-    job.promise = install(config, controller.signal).then(() => ({ available: true, state: "ready", reason: "核心缓存已通过 SHA256 校验。" }), (error) => {
+    job.promise = install(config, controller.signal, key).then(() => ({ available: true, state: "ready", reason: "核心缓存已通过 SHA256 校验。" }), (error) => {
       failures.set(key, error.safeMessage);
       throw error;
     }).finally(() => {

@@ -25,9 +25,9 @@ async function unusedPort() {
   return port;
 }
 
-async function connectBrowser(profile, child) {
+async function connectBrowser(profile) {
   const deadline = Date.now() + 15000;
-  while (Date.now() < deadline && child.exitCode === null) {
+  while (Date.now() < deadline) {
     let text;
     try { text = await readFile(join(profile, "DevToolsActivePort"), "utf8"); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -57,7 +57,14 @@ function cdpClient(socket) {
     if (response.error) settle.reject(new Error("浏览器调试接口调用失败"));
     else settle.resolve(response.result);
   });
+  const disconnected = () => {
+    for (const settle of pending.values()) settle.reject(new Error("浏览器调试连接已关闭"));
+    pending.clear();
+  };
+  socket.addEventListener("close", disconnected, { once: true });
+  socket.addEventListener("error", disconnected, { once: true });
   return (method, params = {}) => {
+    if (socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("浏览器调试连接未就绪"));
     const id = ++next;
     const signal = AbortSignal.timeout(10000);
     return new Promise((resolve, reject) => {
@@ -71,6 +78,42 @@ function cdpClient(socket) {
     });
   };
 }
+
+async function stopBrowser(child, exited, send, timeoutMs = 3000) {
+  if (send) await send("Browser.close").catch(() => {});
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  async function waitForExit() {
+    let timer;
+    try {
+      return await Promise.race([exited.then(() => true), new Promise(resolve => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  if (await waitForExit()) return;
+  child.kill();
+  assert.ok(await waitForExit(), "测试浏览器未在清理期限内退出");
+}
+
+test("浏览器调试连接关闭时立即拒绝尚未响应的请求", async () => {
+  const socket = new EventTarget();
+  socket.readyState = WebSocket.OPEN;
+  socket.send = () => queueMicrotask(() => socket.dispatchEvent(new Event("close")));
+  await assert.rejects(cdpClient(socket)("Runtime.evaluate"), /连接已关闭/);
+});
+
+test("浏览器启动器已退出时仍通过调试会话关闭实际浏览器", async () => {
+  const commands = [];
+  await stopBrowser({ pid: 1, exitCode: 0, signalCode: null }, Promise.resolve(), async method => commands.push(method));
+  assert.deepEqual(commands, ["Browser.close"]);
+});
+
+test("浏览器退出失败时清理有界，不无限等待初始进程", async () => {
+  let killed = false;
+  await assert.rejects(stopBrowser({ pid: 1, exitCode: null, signalCode: null, kill() { killed = true; } },
+    new Promise(() => {}), undefined, 10), /清理期限/);
+  assert.equal(killed, true);
+});
 
 async function expectAuthorizedPanel(send, config, origin) {
   const deadline = Date.now() + 15000;
@@ -108,11 +151,7 @@ test("真实浏览器保留管理会话、自动回调并在端口占用时提�
   t.after(async () => {
     login?.close();
     try {
-      if (child?.pid && child.exitCode === null && child.signalCode === null) {
-        if (send) await send("Browser.close").catch(() => {});
-        if (!(await Promise.race([exited.then(() => true), delay(3000, false, { ref: false })]))) child.kill();
-        await exited;
-      }
+      await stopBrowser(child, exited, send);
     } finally {
       socket?.close();
       await shutdownOwnedBridges();
@@ -127,10 +166,14 @@ test("真实浏览器保留管理会话、自动回调并在端口占用时提�
   assert.equal((await ensureRunning(config)).ready, true);
   child = spawn(browser, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-sync",
     "--disable-background-networking", "--disable-extensions", "--remote-debugging-port=0",
+    ...(process.platform === "win32" && /msedge\.exe$/i.test(browser) ? ["--edge-skip-compat-layer-relaunch"] : []),
     "--user-data-dir=" + profile, "about:blank"], { stdio: "ignore", windowsHide: true });
+  exited = new Promise(resolve => {
+    child.once("exit", resolve);
+    child.once("error", resolve);
+  });
   await once(child, "spawn");
-  exited = once(child, "exit");
-  socket = await connectBrowser(profile, child);
+  socket = await connectBrowser(profile);
   send = cdpClient(socket);
   let origin;
   login = createManagementLogin(config, { port: await unusedPort(), async launchBrowser(url) {

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, win32 } from "node:path";
@@ -167,7 +167,7 @@ test("固定发行清单、五种平台选择和目标文件名一致，状态�
     assert.deepEqual(core, { ...entry, version: manifest.version, key, platform, arch });
     assert.equal(Object.isFrozen(core), true);
     const binPath = resolveCoreBinaryPath({ dataDir: root, platform, arch });
-    assert.equal(binPath, join(root, "runtimes", "v8.0.60", key, basename(entry.path)));
+    assert.equal(binPath, join(root, "runtimes", manifest.version, key, basename(entry.path)));
     const config = { core, dataDir: root, binPath };
     assert.deepEqual(await getCoreStatus(config), {
       state: "missing", version: manifest.version, platform: key, reason: "核心尚未安装；首次启动订阅桥时优先从随包核心安装，未随包时下载。",
@@ -703,13 +703,16 @@ async function childRuntime(fixtureValue, mode = "ok") {
   const script = `
     import { writeFile } from 'node:fs/promises';
     import { createCoreRuntime } from ${JSON.stringify(moduleUrl)};
-    const runtime = createCoreRuntime({manifest: ${JSON.stringify(catalog)}, download: async ({destination,signal}) => {
+    const controller = new AbortController();
+    const runtime = createCoreRuntime({manifest: ${JSON.stringify(catalog)}, bundleDir: ${JSON.stringify(fixtureValue.bundleDir)}, download: async ({destination,signal}) => {
       process.send({type:'downloading'});
       await new Promise(resolve => process.once('message', resolve));
+      if (${JSON.stringify(mode)} === 'cancel') controller.abort();
+      if (${JSON.stringify(mode)} === 'timeout') throw Object.assign(new Error('timeout'), {code:'CORE_TIMEOUT'});
       if (${JSON.stringify(mode)} === 'fail') throw new Error('secret provider body');
       await writeFile(destination, Buffer.from(${JSON.stringify(archive.toString("base64"))}, 'base64'), {flag:'wx'});
     }});
-    try { await runtime.ensureCore(${JSON.stringify(config)}); process.send({type:'done'}); }
+    try { await runtime.ensureCore(${JSON.stringify(config)}, {signal:controller.signal}); process.send({type:'done'}); }
     catch (error) { process.send({type:'error',code:error.code}); }
     process.disconnect();
   `;
@@ -752,6 +755,150 @@ test("跨进程失败由等待者共享，不再下载重试", async (t) => {
   await running.exited;
   assert.equal(value.calls(), 0);
   await assertClean(value.config);
+});
+
+test("跨进程领导者取消后，有效等待者接续且只下载一次", { timeout: 10000 }, async (t) => {
+  const value = await fixture(t);
+  const running = await childRuntime(value, "cancel");
+  t.after(() => { if (running.child.exitCode === null) running.child.kill(); });
+  const controller = new AbortController();
+  const follower = value.runtime.ensureCore(value.config, { signal: controller.signal });
+  let otherCalls = 0;
+  const other = createCoreRuntime({ manifest: value.catalog, bundleDir: value.bundleDir, download: async ({ destination }) => {
+    otherCalls++;
+    await writeFile(destination, value.archive, { flag: "wx" });
+  } });
+  const otherFollower = other.ensureCore(value.config);
+  const completed = assert.doesNotReject(async () => {
+    const results = await Promise.all([follower, otherFollower]);
+    assert.equal(results.every((result) => result.available), true);
+  });
+  await delay(100);
+  assert.equal(value.calls(), 0);
+  running.child.send("continue");
+  await completed;
+  assert.equal((await running.exited)[0], 0);
+  assert.deepEqual(running.messages.at(-1), { type: "error", code: "CORE_CANCELLED" });
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(value.calls() + otherCalls, 1);
+  assert.deepEqual(await readFile(value.config.binPath), binary);
+  await assertClean(value.config);
+});
+
+test("跨进程超时错误不触发等待者重新下载", { timeout: 10000 }, async (t) => {
+  const value = await fixture(t);
+  const running = await childRuntime(value, "timeout");
+  t.after(() => { if (running.child.exitCode === null) running.child.kill(); });
+  const rejected = assert.rejects(value.runtime.ensureCore(value.config), expectSafeError("CORE_TIMEOUT"));
+  await delay(100);
+  running.child.send("continue");
+  await rejected;
+  await running.exited;
+  assert.equal(value.calls(), 0);
+  await assertClean(value.config);
+});
+
+test("跨进程等待者本地取消不接续也不取消领导者", { timeout: 10000 }, async (t) => {
+  const value = await fixture(t);
+  const running = await childRuntime(value);
+  t.after(() => { if (running.child.exitCode === null) running.child.kill(); });
+  const controller = new AbortController();
+  const rejected = assert.rejects(value.runtime.ensureCore(value.config, { signal: controller.signal }), expectSafeError("CORE_CANCELLED"));
+  await delay(100);
+  controller.abort();
+  await rejected;
+  running.child.send("continue");
+  await running.exited;
+  assert.deepEqual(running.messages.at(-1), { type: "done" });
+  assert.equal(value.calls(), 0);
+  await assertClean(value.config);
+});
+
+async function shortPath(t, path) {
+  if (process.platform !== "win32") { t.skip("仅 Windows 支持 8.3 路径实测"); return; }
+  let short;
+  try {
+    short = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:QODER_TEST_LONG_PATH).ShortPath"],
+    { encoding: "utf8", windowsHide: true, env: { ...process.env, QODER_TEST_LONG_PATH: path } }).trim();
+  } catch (error) { t.skip(`无法查询 8.3 路径：${error.code ?? error.status}`); return; }
+  if (!short || short.toLowerCase() === path.toLowerCase()) { t.skip("当前卷未生成独立的 8.3 短路径"); return; }
+  assert.equal((await realpath(short)).toLowerCase(), (await realpath(path)).toLowerCase());
+  return short;
+}
+
+test("Windows 长短路径独立进程同目录只下载一次，未创建后缀使用同一锁", { timeout: 10000 }, async (t) => {
+  const value = await fixture(t);
+  const short = await shortPath(t, value.root);
+  if (!short) return;
+  const alias = { ...value.config, dataDir: join(short, "not-created"),
+    binPath: value.runtime.resolveCoreBinaryPath({ dataDir: join(short, "not-created"), ...value.config.core }) };
+  const config = { ...value.config, dataDir: join(value.root, "not-created"),
+    binPath: value.runtime.resolveCoreBinaryPath({ dataDir: join(value.root, "not-created"), ...value.config.core }) };
+  const running = await childRuntime({ ...value, config });
+  t.after(() => { if (running.child.exitCode === null) running.child.kill(); });
+  const follower = value.runtime.ensureCore(alias);
+  const completed = assert.doesNotReject(async () => assert.equal((await follower).available, true));
+  await delay(100);
+  running.child.send("continue");
+  await completed;
+  assert.equal((await running.exited)[0], 0);
+  assert.deepEqual(running.messages.at(-1), { type: "done" });
+  assert.equal(value.calls(), 0);
+  assert.deepEqual(await readFile(alias.binPath), binary);
+  await assertClean(config);
+});
+
+test("Windows 长短路径共享本地任务、失败状态和缓存校验", { timeout: 10000 }, async (t) => {
+  const started = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const value = await fixture(t, { download: async () => {
+    started.resolve();
+    await release.promise;
+    throw new Error("synthetic failure");
+  } });
+  const short = await shortPath(t, value.root);
+  if (!short) return;
+  const alias = { ...value.config, dataDir: short,
+    binPath: value.runtime.resolveCoreBinaryPath({ dataDir: short, ...value.config.core }) };
+  const first = assert.rejects(value.runtime.ensureCore(value.config), expectSafeError("CORE_DOWNLOAD"));
+  await started.promise;
+  assert.equal((await value.runtime.getCoreStatus(alias)).state, "downloading");
+  const second = assert.rejects(value.runtime.ensureCore(alias), expectSafeError("CORE_DOWNLOAD"));
+  release.resolve();
+  await Promise.all([first, second]);
+  assert.equal(value.calls(), 1);
+  assert.equal((await value.runtime.getCoreStatus(alias)).state, "error");
+  await writeFile(value.config.binPath, binary);
+  assert.equal((await value.runtime.getCoreStatus(value.config)).state, "ready");
+  assert.equal((await value.runtime.getCoreStatus(alias)).state, "ready");
+  await writeFile(alias.binPath, "corrupt");
+  assert.equal((await value.runtime.ensureCore(value.config, { allowDownload: false })).available, false);
+  assert.equal(value.calls(), 1);
+});
+
+test("真实路径键相同也不能通过 junction 订阅有效任务", { timeout: 10000 }, async (t) => {
+  const started = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const value = await fixture(t, { download: async (options, bytes) => {
+    started.resolve();
+    await release.promise;
+    await writeFile(options.destination, bytes, { flag: "wx" });
+  } });
+  const aliasDir = join(value.root, "alias");
+  const target = join(value.root, "data");
+  await mkdir(target);
+  await symlink(target, aliasDir, process.platform === "win32" ? "junction" : "dir");
+  const config = { ...value.config, dataDir: target,
+    binPath: value.runtime.resolveCoreBinaryPath({ dataDir: target, ...value.config.core }) };
+  const alias = { ...config, dataDir: aliasDir,
+    binPath: value.runtime.resolveCoreBinaryPath({ dataDir: aliasDir, ...value.config.core }) };
+  const leader = value.runtime.ensureCore(config);
+  await started.promise;
+  try { await assert.rejects(value.runtime.ensureCore(alias), expectSafeError("CORE_PATH")); }
+  finally { release.resolve(); }
+  assert.equal((await leader).available, true);
+  assert.equal(value.calls(), 1);
 });
 
 test("持锁进程退出后 OS 释放独占锁，新显式尝试可下载", async (t) => {

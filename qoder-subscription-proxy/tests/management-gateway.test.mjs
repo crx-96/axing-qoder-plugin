@@ -57,6 +57,7 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
     await assert.rejects(login.open(), error => error.safeMessage?.includes(String(port)));
     assert.equal(launch, undefined);
   } finally { await new Promise(resolve => occupied.close(resolve)); }
+  await Promise.all([login.listen(), login.listen(), login.listen()]);
   const ticket = await open();
   assert.equal(launch.port, String(port));
   const { origin } = launch;
@@ -123,6 +124,7 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
   assert.equal((await request(route, { headers: other })).status, 401);
   assert.equal((await request(route, { headers })).status, 200, "其他标签页的独立会话仍然有效");
   login.close();
+  await assert.rejects(login.listen(), /会话已关闭/);
   await assert.rejects(request(route, { headers }), TypeError);
   login = createLogin();
   await open();
