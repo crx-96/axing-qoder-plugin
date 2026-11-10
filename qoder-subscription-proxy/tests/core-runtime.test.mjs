@@ -108,7 +108,7 @@ function zipArchive(entries = [{ name: "cli-proxy-api.exe", data: binary }]) {
 }
 
 async function fixture(t, { platform = "linux", arch = "x64", archive, expectedBinary = binary, bundle, download, spawnProcess, env = {}, readProxy = async () => "" } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "qoder-core-test-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "qoder-core-test-")));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const bytes = archive ?? (platform === "win32" ? zipArchive() : tarArchive());
   const catalog = structuredClone(manifest);
