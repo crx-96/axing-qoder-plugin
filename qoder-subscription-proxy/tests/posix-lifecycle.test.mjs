@@ -16,6 +16,7 @@ import { copyTestCore, nativeCoreSkip, testCorePath } from "./helpers/native-cor
 import { ensureDataDir, ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../server/supervisor.mjs";
 import { queryPosixSupervisor, spawnPosixSupervisor } from "../server/posix-supervisor.mjs";
 import { PANEL_REVISION, prepareManagementPanel } from "../server/management-panel.mjs";
+import { readApprovalArtifact } from "../scripts/build-approval-router.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const native = {
@@ -87,7 +88,21 @@ async function copyRuntime(root) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await copyFile(join(pluginRoot, path), join(root, path));
   }
+  for (const [path, bytes] of readApprovalArtifact(pluginRoot, `${process.platform}-${process.arch}`)) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), bytes);
+  }
 }
+
+test("隔离运行副本包含已校验的当前平台审批扩展", { skip: nativeCoreSkip }, async (t) => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "isolated-runtime-")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await copyRuntime(directory);
+  const expected = readApprovalArtifact(pluginRoot, `${process.platform}-${process.arch}`);
+  for (const [path, bytes] of expected) assert.deepEqual(await readFile(join(directory, path)), bytes);
+  assert.deepEqual((await readdir(join(directory, "server/approval-router"))).sort(),
+    [...expected.keys()].map(path => path.split("/").at(-1)).sort());
+});
 
 async function fixture(t, { cached = false } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "posix-bridge-中文 路径-")));

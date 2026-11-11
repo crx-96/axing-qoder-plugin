@@ -201,7 +201,10 @@ test("中文空格路径的身份协议、日志隔离、cwd、受控面板及 E
   assert.deepEqual(observed.args, ["-config", f.config.configPath]);
   assert.equal(observed.panel, f.panelDirectory);
   assert.equal(observed.electron, "1");
-  const log = await readFile(join(f.config.dataDir, "bridge.log"), "utf8");
+  const log = await waitUntil(async () => {
+    const content = await readFile(join(f.config.dataDir, "bridge.log"), "utf8");
+    return content.includes("fake-core stdout") && content.includes("fake-core stderr") ? content : false;
+  });
   assert.match(log, /fake-core stdout/);
   assert.match(log, /fake-core stderr/);
   assert.ok(!log.includes(identity.controlToken));
