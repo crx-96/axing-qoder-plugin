@@ -323,7 +323,7 @@ test("syncProxyUrl 不改写用户自管的代理值与结构", () => {
 /** 隔离数据目录与配置；reader 注入系统代理状态，避免测试依赖宿主真实设置。 */
 async function fixture(t, name = "qoder-system-proxy-", port = "1") {
   const root = await mkdtemp(join(tmpdir(), name));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const env = { BRIDGE_DATA_DIR: root, BRIDGE_PORT: port, BRIDGE_API_KEY: "isolated-proxy-api" };
   const config = await loadConfig({ pluginRoot, env });
   return { config, reader: (value) => async () => value };
