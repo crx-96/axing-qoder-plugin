@@ -11,6 +11,9 @@
 # CLIProxyAPI 核心按平台内置进安装 ZIP；源码仓库只保留平台清单、文档和许可证。
 # 构建期下载的核心放在 .core-build，白名单也防止新平台目录、归档和未命名的本地核心被纳入。
 qoder-subscription-proxy/.core-build/
+# 审批路由平台产物及 Cargo 缓存；Cargo.lock 保留版本控制。
+qoder-subscription-proxy/.approval-build/
+qoder-subscription-proxy/native/approval-router/target/
 qoder-subscription-proxy/server/bin/*
 !qoder-subscription-proxy/server/bin/LICENSE
 !qoder-subscription-proxy/server/bin/README.md

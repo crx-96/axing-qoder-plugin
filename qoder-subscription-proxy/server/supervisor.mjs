@@ -16,6 +16,7 @@ import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.m
 import { requestLocal, httpFailure } from "./local-http.mjs";
 import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
 import { ensureApprovalRouting } from "./approval-routing.mjs";
+import { prepareApprovalRouter, inspectApprovalRouter, ensureApprovalPluginConfig, assertApprovalPluginRegistered } from "./approval-plugin.mjs";
 import { readEffectiveProxyUrl, syncProxyUrl } from "./system-proxy.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -251,7 +252,18 @@ async function prepareExecutable(config) {
   }
 }
 
-/** 在已持有生命周期锁时启动本机代理；新装在首次发布配置后登记重试策略版本。 */
+/** 通过已认证连接验证实际注册；request 只用于隔离测试，生产始终沿用 requestOwned。 */
+export async function probeApprovalRouter(config, directory, { request = requestOwned } = {}) {
+  const response = await request(config, "/v0/management/plugins", { management: true });
+  if (response.status !== 200) throw httpFailure(response.status, "审批扩展加载检查");
+  let body;
+  try { body = JSON.parse(response.text); }
+  catch { throw bridgeError("核心返回的审批扩展加载状态不是 JSON。"); }
+  assertApprovalPluginRegistered(body, directory);
+  // 能力由已校验 SHA256 的专用库固定提供；官方接口只公开其实际注册和启用状态。
+}
+
+/** 在已持有生命周期锁时启动本机代理；先安装并配置原生审批扩展，再启动核心。 */
 async function launch(config, signal) {
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
@@ -259,7 +271,13 @@ async function launch(config, signal) {
   if (previous) await closeSupervisor(previous);
   await prepareExecutable(config);
   await ensureDataDir(config);
+  const approvalRouter = await prepareApprovalRouter(config);
   const panelDirectory = await prepareManagementPanel(config);
+  // 配置迁移留在 launch 内，纯 ensureDataDir 不依赖编译产物；发布前仍核对并发写入。
+  const original = await readFile(config.configPath, "utf8");
+  const updated = ensureApprovalPluginConfig(original, config, approvalRouter.directory);
+  validateExistingConfig(config, updated);
+  if (updated !== original) await replacePrivateFile(config.configPath, updated, original);
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
   const child = process.platform !== "win32" ? spawnPosixSupervisor(config, panelDirectory) : spawn(powerShell, [
@@ -316,7 +334,7 @@ async function launch(config, signal) {
       ? await processIdentity(launched.pid)
       : await queryPosixSupervisor({ ...launched, binPath: config.binPath, configPath: config.configPath }, config);
     if (!identity) throw bridgeError("代理在启动时退出，请检查 data/bridge.log");
-    await savePid(config, { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION });
+    await savePid(config, { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION, approvalRouterSha256: approvalRouter.sha256 });
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
       signal?.throwIfAborted();
@@ -324,6 +342,7 @@ async function launch(config, signal) {
       const probe = await probeBridge(config);
       if (probe.state === "bridge") {
         await probeModels(config);
+        await probeApprovalRouter(config, approvalRouter.directory);
         signal?.throwIfAborted();
         return { started: true, ready: true, reason: "qoder 订阅代理已启动并受进程生命周期托管" };
       }
@@ -354,7 +373,12 @@ async function inspectRunning(config) {
     if (tracked.record.panelRevision !== PANEL_REVISION) {
       throw bridgeError("当前进程尚未加载网页授权修复；请先 bridge_stop，再 bridge_start。不会自动中断正在进行的请求。");
     }
+    const approvalRouter = await inspectApprovalRouter(config);
+    if (tracked.record.approvalRouterSha256 !== approvalRouter.sha256) {
+      throw bridgeError("当前进程尚未加载本版本审批扩展；请先 bridge_stop，再 bridge_start。不会自动中断正在进行的请求。");
+    }
     await probeModels(config);
+    await probeApprovalRouter(config, approvalRouter.directory);
     return { started: false, ready: true, reason: "复用本版本已验证的桥进程" };
   }
   if (probe.state !== "offline") throw bridgeError(probe.reason);
@@ -489,7 +513,12 @@ export async function getStatus(config) {
       if (tracked.record.panelRevision !== PANEL_REVISION) {
         throw bridgeError("当前进程尚未加载网页授权修复；请先 bridge_stop，再 bridge_start。");
       }
+      const approvalRouter = await inspectApprovalRouter(config);
+      if (tracked.record.approvalRouterSha256 !== approvalRouter.sha256) {
+        throw bridgeError("当前进程尚未加载本版本审批扩展；请先 bridge_stop，再 bridge_start。");
+      }
       const ids = await probeModels(config);
+      await probeApprovalRouter(config, approvalRouter.directory);
       // 核心可能提供大量模型，状态只返回总数与有限样例。
       modelState = { count: ids.length, sample: ids.slice(0, 40) };
       ready = true;

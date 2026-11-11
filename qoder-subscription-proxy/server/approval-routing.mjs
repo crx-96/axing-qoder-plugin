@@ -19,12 +19,9 @@ const terminalGuidance = [
   "If authorization, scope, or effects remain uncertain, block and state the concrete uncertainty. Otherwise do not invent a hazard merely because a terminal is used. Return only the original JSON object with boolean shouldBlock and string reason; give a concise reason tied to the actual action and policy.",
 ].join("\n\n");
 
-/** 按目标缩进生成当前内置规则，也可重建历史规则以识别可安全迁移的配置。 */
-export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], targetModel = "codex-auto-review",
-  efforts = ["none", "low"], includeGuidance = true, classifier = classifierPath) {
-  const pad = " ".repeat(indent);
-  // match 列表是 AND；快速检查与复核必须使用独立的模型选择器。
-  const models = sourceModels.flatMap((model) => ["developer", "system"].flatMap((role) => efforts.flatMap(effort => [
+/** 生成审批选择器；每个角色与思考档位独立匹配，避免 AND 条件互斥。 */
+function renderApprovalModels(pad, sourceModels, efforts, classifier) {
+  return sourceModels.flatMap((model) => ["developer", "system"].flatMap((role) => efforts.flatMap(effort => [
     `${pad}    - name: ${JSON.stringify(model)}`,
     `${pad}      protocol: "codex"`,
     `${pad}      from-protocol: "responses"`,
@@ -34,9 +31,15 @@ export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], tar
     `${pad}          "input.0.content.#": 1`,
     `${pad}          ${JSON.stringify(classifier)}: "input_text"`,
   ])));
+}
+
+/** 仅重建历史模型切换规则，用于精确签名迁移及测试，不再生成当前配置。 */
+export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], targetModel = "codex-auto-review",
+  efforts = ["none", "low"], includeGuidance = true, classifier = classifierPath) {
+  const pad = " ".repeat(indent);
   return [
     `${pad}- models:`,
-    ...models,
+    ...renderApprovalModels(pad, sourceModels, efforts, classifier),
     `${pad}  params:`,
     `${pad}    model: ${JSON.stringify(targetModel)}`,
     `${pad}    "reasoning.effort": "low"`,
@@ -44,6 +47,18 @@ export function renderApprovalOverride(indent = 6, sourceModels = ["gpt-*"], tar
       `${pad}    "input.0.content.1.type": "input_text"`,
       `${pad}    "input.0.content.1.text": ${JSON.stringify(terminalGuidance)}`,
     ] : []),
+  ].join("\n");
+}
+
+/** 只为专用审核模型追加完整终端指引；模型选择与 low 档位由原生 ModelRouter 负责。 */
+export function renderApprovalGuidance(indent = 6) {
+  const pad = " ".repeat(indent);
+  return [
+    `${pad}- models:`,
+    ...renderApprovalModels(pad, ["codex-auto-review"], ["low"], classifierPath),
+    `${pad}  params:`,
+    `${pad}    "input.0.content.1.type": "input_text"`,
+    `${pad}    "input.0.content.1.text": ${JSON.stringify(terminalGuidance)}`,
   ].join("\n");
 }
 
@@ -75,13 +90,14 @@ function renderedSignature(rule) {
   return ruleSignatures(parseConfigYaml("override:\n" + rule + "\n"), ["override"])[0];
 }
 
-/** 当前规则签名用于幂等检测；仅以下三版完整历史签名有自动替换资格。 */
-const policySignature = renderedSignature(renderApprovalOverride(2));
-/** 已分发的三版旧规则签名：Luna 单档、纯模型路由、仅 CN 措辞的带指引规则；均使用旧选择器重建。 */
+/** 当前指引规则签名用于幂等检测。 */
+const policySignature = renderedSignature(renderApprovalGuidance(2));
+/** 仅迁移四版完整历史规则：Luna、纯模型路由、CN 指引及通配措辞指引。 */
 const legacySignatures = new Set([
   renderApprovalOverride(2, ["gpt-6-astra", "gpt-6.1-sol"], "gpt-6-luna", ["none"], false, legacyClassifierPath),
   renderApprovalOverride(2, ["gpt-*"], "codex-auto-review", ["none", "low"], false, legacyClassifierPath),
   renderApprovalOverride(2, ["gpt-*"], "codex-auto-review", ["none", "low"], true, legacyClassifierPath),
+  renderApprovalOverride(2),
 ].map(renderedSignature));
 
 /** 保留用户自定义规则，仅迁移完整匹配的旧版审批规则并补入当前规则。 */
@@ -105,5 +121,5 @@ export function ensureApprovalRouting(text) {
   }
   if (signatures.includes(policySignature)) return text;
 
-  return appendConfigBlock(parsed, activePath, "list", renderApprovalOverride);
+  return appendConfigBlock(parsed, activePath, "list", renderApprovalGuidance);
 }

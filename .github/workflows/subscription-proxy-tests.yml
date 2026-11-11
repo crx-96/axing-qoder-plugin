@@ -33,6 +33,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+      # 安装只发生在一次性 runner；通过环境选择固定工具链，不修改开发者宿主。
+      - name: Prepare Rust 1.95.0
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          echo "RUSTUP_TOOLCHAIN=1.95.0" >> "$GITHUB_ENV"
+      - name: Check native approval router
+        shell: bash
+        run: |
+          cargo fmt --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml --check
+          cargo test --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml
+          cargo clippy --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml -- -D warnings
+      - name: Build current-platform approval router
+        shell: bash
+        run: node qoder-subscription-proxy/scripts/build-approval-router.mjs
       # 仅此步骤联网下载当前 runner 核心；测试默认离线，各 fixture 再复制隔离。
       - name: Prepare verified current-platform test core
         shell: bash

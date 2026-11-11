@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.6
+# qoder订阅代理 · 1.0.7
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。安装包按平台拆分并内置对应核心：Windows x64 为 `qoder-subscription-proxy-v1.0.6-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生审批路由扩展，普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.7-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -14,7 +14,8 @@
 | 内置运行时 | Electron 内置 Node mode 或系统 Node 22+；Windows 启动器依赖 PowerShell 5.1、.NET Framework 与 Job Object |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh` 与系统进程工具；尚未实机验证 |
-| 核心 | 固定 CLIProxyAPI `v8.0.63`，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
+| 核心 | 固定 CLIProxyAPI `v8.0.67` 原样不改，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
+| 审批扩展 | Rust `native/approval-router` cdylib，通过核心 `ModelRouter` 接口加载；随包提供当前平台库，不支持运行时下载/编译 |
 | 不支持 | Windows 32 位、原生 Windows ARM64 及其他平台/架构 |
 
 ## 连接器与管理页按钮
@@ -41,7 +42,7 @@
 
 ## 首次使用
 
-1. 安装、启用插件并确认 stdio 连接器已连接。握手只等待本地配置，随包核心在后台校验安装并自动启动代理，无需联网下载，也无需先有聊天模型。
+1. 安装、启用插件并确认 stdio 连接器已连接。握手只等待本地配置，随包核心与原生扩展在后台校验安装并自动启动代理，无需联网下载，也无需先有聊天模型。扩展必须被核心真实注册并启用，否则不能进入就绪状态。
 2. 在插件详情页点击 `management-page` 连接器的 **授权** 按钮，浏览器打开免密管理页；首次接入订阅时在该页选择服务商，由本人登录并同意授权。
 3. 在 Qoder 模型/供应商设置中添加 OpenAI 兼容服务：
    - **Base URL**：`http://127.0.0.1:19787/v1`
@@ -59,7 +60,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 插件生成的 `config.yaml` 只包含本机安全必需字段：回环监听与固定端口、仅本机管理（`allow-remote: false`）、固定随包管理页、客户端 API Key、授权目录。**重试、冷却、流式心跳、启动缓冲等请求参数一律沿用 CLIProxyAPI 上游默认值**，插件不写入、不复位、不迁移；如需调整请在管理页或 `config.yaml` 中自行设置。
 
-第一个功能性例外是终端自动审批兼容：冷启动会在 `requests.payload.override` 补齐定向规则，把宿主自动权限模式的安全分类请求（CN 与国际版两种提示措辞）路由到 `codex-auto-review` 并附加终端风险判断指引。该规则只匹配独立审批检查请求，不影响普通对话；识别条件变化时需重新核对。规则补齐幂等，用户修改过的规则保留。
+第一个功能性例外是终端自动审批兼容：模型切换统一交给原生 `ModelRouter`，在协议翻译前完成；`requests.payload.override` 现在只为审核模型附加原有 `terminalGuidance` 终端风险判断指引，不再承担模型切换。冷启动启用 `plugins.enabled`，仅配置 `qoder-approval-router`，并将 `plugins.dir` 指向经校验的扩展独立目录，不扫描其他目录。已有自定义 `plugins.dir` 或其他扩展配置会明确报冲突，不覆盖用户配置。路由识别与失败边界见下节。
 
 第二个例外是上游出口代理：核心只读取 `requests.proxy-url` 与 `HTTPS_PROXY` 等环境变量，**不读取 Windows 的「系统代理」设置**。冷启动会读取 `HKCU` 的 Internet Settings，把启用中的 HTTP(S) 系统代理写入 `requests.proxy-url`，包括默认端口 80/443；系统代理关闭时写回空值，**空值仍允许核心使用环境代理，不代表强制直连**。同步只改写插件上次写入的值（记录在数据目录 `bridge.proxy`），或用户已清空/删除的代理字段；你自行设置的非空代理（含 `direct`、`none` 或任意自定义地址）原样保留，没有归属记录时即使与系统代理相同也不接管。清空或删除该字段即可恢复跟随。切换代理模式或端口后需 `bridge_stop` 再 `bridge_start`；只调用 `bridge_start` 会复用正在运行的桥，多会话下重连一个连接器也不保证重启共享桥。
 
@@ -68,6 +69,19 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 系统代理关闭时不探测地址或网卡，空配置沿用环境代理；要明确禁用环境代理可手填 `direct`/`none`。PAC 自动配置脚本和仅 SOCKS 的系统代理不自动转换为 HTTP(S) 地址，需要固定出口时手工配置。macOS/Linux 不读取 Windows 注册表，沿用核心环境代理。
 
 正常安装无需下载核心；仅从源码直接运行等未随包场景才回退下载，并复用上述系统代理发现。下载优先保留显式 `QODER_HTTP_PROXY`、`https_proxy`、`HTTPS_PROXY`、`all_proxy`、`ALL_PROXY`（含显式空值）；这些变量均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。下载代理只注入该次 curl 子进程，不修改宿主环境或 Windows 设置。下载失败不自动重试；仅当其他进程的核心准备被取消时，仍有效的等待者会接续获取准备锁，这不属于下载失败重试。
+
+## 原生审批路由
+
+扩展只读取宿主模型目录中的 provider 和 model 索引识别模型来源，不读取 Token。同名模型属于多个 provider 时不猜测，保留原路由。Antigravity 只匹配已知 CN/国际版安全分类器的独立系统提示，普通对话、引用提示或混合历史不匹配；Codex 保留原有首条系统/developer 提示、单个文本块及 `none` / `low` 的识别条件。
+
+| 来源 | 匹配范围 | 翻译前的目标路由 |
+| --- | --- | --- |
+| Antigravity | 独立审批，包含 Claude、Gemini、GPT-OSS；支持 Responses、Chat Completions、Claude Messages、Gemini 原生入口 | `gemini-3.8-flash-high`，推理级别 `low` |
+| Codex | 仅 `gpt-*`、Responses，且为原有 `none` / `low` 审批识别范围 | `codex-auto-review`，推理级别 `low` |
+
+正常切换只记录 **INFO**，含渠道、源模型、目标模型和 `low`，不记录提示正文或凭据；真实调用失败仍正常报错。审核输出不改，不伪造允许。已选定路由后，目标模型无权限或不可用时返回错误，不自动回到昂贵模型。未匹配、来源不唯一时保留原路由；如果扩展无法读取模型目录或自身运行异常，核心也可能保留原路由并记录异常，因此这些异常情况下不保证节省额度，但不会跳过宿主审批。
+
+ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approval-router.dll` / `.dylib` / `.so` 经平台、ABI 和 SHA256 校验后安装到 `dataDir/approval-router/<sha256>/`。扩展缺失、损坏、未被核心真实注册启用都会阻止就绪，不能跳过校验或在线补编译。升级不会自动重启正在处理请求的旧桥；等待请求结束后调用 `bridge_stop`，再 `bridge_start` 才会加载新版扩展，仅重连 MCP 不保证重启共享桥。现有端口和 API 不变。
 
 ## MCP 工具与生图
 
@@ -93,6 +107,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 | `bridge.pid`、`bridge.paused` | 归属记录与持久暂停状态 |
 | `bridge.proxy` | 插件上次同步进 `requests.proxy-url` 的系统代理值，用于区分用户自管代理 |
 | `runtimes/` | 经校验的固定版本、当前平台核心 |
+| `approval-router/<sha256>/` | 经平台、ABI 和摘要校验的原生审批扩展，核心只扫描此独立目录 |
 | `management-panel/`、`generated/` | 生成的管理页与生图工具输出 |
 
 保持 `management.allow-remote: false`，仅在可信本机使用；不要通过代理或隧道公开管理服务。Windows 权限由用户目录 ACL 决定，POSIX 新建私有目录用 `0700`、敏感文件用 `0600`。卸载不自动删除授权、密钥、日志和图片，也不等于撤销服务商授权。
@@ -124,15 +139,23 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 - **管理页登录失败**：重新点击连接器按钮；手动登录时核对 `mgmtKey` 与端口。
 - **403 / 429 / 5xx**：先检查权限、配额、网络和上游异常，不反复重启本机进程。
 - **随包核心校验失败**：提示 SHA256 不匹配或随包核心无效时，重新下载对应平台的官方 ZIP 并重装；哈希不匹配不得跳过校验。
-- **下载失败（仅未随包的源码运行）**：检查 curl、HTTPS、代理与目录权限后重试。
+- **审批扩展缺失 / 损坏 / 未启用**：安装包用户重新获取匹配平台的可信 ZIP；源码用户先构建本平台扩展。核对平台、ABI、SHA256 与核心实际注册状态，不绕过就绪检查。自定义 `BRIDGE_BIN` 也须支持此扩展。
+- **扩展配置冲突**：已有自定义 `plugins.dir` 或其他扩展时会停止准备，不覆盖；先由用户协调配置归属，不把其他扩展复制进审批扩展目录。
+- **审批目标模型报错**：核对对应渠道权限、模型可用性及上游错误；不会伪造审批通过，也不自动切回原昂贵模型。
+- **下载失败（仅未随包的源码运行）**：检查 curl、HTTPS、代理与目录权限后重试；此下载回退仅适用于核心，不适用于原生扩展。
 - **切换 TUN / 系统代理后出口不符合预期**：同步只发生在冷启动，`bridge_stop` 再 `bridge_start`；系统代理不可达且默认路由确认由隧道承载时才写入显式 `direct`。空值仍可能使用环境代理，需要固定出口请自行填写 `requests.proxy-url`，清空或删除可恢复跟随。
 
 ## 开发验证
 
-仓库根目录使用 Node 22+ 运行：
+源码启动和打包前，须先构建本平台扩展。开发者需要 Node 22+、Rust/Cargo（crate 声明最低 Rust 1.85，工具链须支持锁定依赖）以及宿主本地链接工具链：Windows MSVC Build Tools/Windows SDK、macOS Xcode Command Line Tools 或 Linux C 编译/链接工具链。在仓库根目录运行：
 
 ```sh
+# 默认当前宿主平台；内部执行 cargo build --locked --release
+node qoder-subscription-proxy/scripts/build-approval-router.mjs
+cargo test --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml
 node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
 ```
+
+`Cargo.lock` 固定扩展依赖；输出位于插件目录 `.approval-build/<platform>/`。脚本拒绝在单个宿主伪跨编译其他平台；五平台 Release 由对应 GitHub 原生 runner 分别构建、测试、打各自 ZIP，再汇总上传。完整的本平台 build → fetch → package 命令见[从源码打包](../README.md#从源码打包)。普通安装者不需要这些工具。
 
 普通测试不联网下载核心；原生核心测试需显式设置 `BRIDGE_TEST_BIN` 指向匹配固定 SHA256 的核心。设置 `BRIDGE_TEST_BROWSER` 可运行管理页浏览器交接测试。Windows Job 与 POSIX 生命周期测试须在对应系统执行。

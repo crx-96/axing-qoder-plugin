@@ -1,0 +1,122 @@
+Third-party licenses for qoder-approval-router
+=============================================
+
+Scope: the normal/build dependency graph of native/approval-router/Cargo.lock,
+verified with cargo tree --locked --offline -e normal,build.
+Registry source: https://github.com/rust-lang/crates.io-index (crates.io).
+The LICENSE-MIT texts below are copied verbatim from the downloaded crate
+packages. For packages offering alternative licenses, this distribution elects
+MIT. This does not change the licenses offered by their upstream authors.
+The router's own MIT license is provided in the plugin's LICENSE file.
+
+Included dependencies:
+- base64 0.22.1: MIT OR Apache-2.0; MIT selected.
+  https://crates.io/crates/base64/0.22.1
+  https://github.com/marshallpierce/rust-base64
+- serde_json 1.0.154: MIT OR Apache-2.0; MIT selected.
+  https://crates.io/crates/serde_json/1.0.154
+  https://github.com/serde-rs/json
+- itoa 1.0.19: MIT OR Apache-2.0; MIT selected.
+  https://crates.io/crates/itoa/1.0.19
+  https://github.com/dtolnay/itoa
+- memchr 2.8.3: Unlicense OR MIT; MIT selected.
+  https://crates.io/crates/memchr/2.8.3
+  https://github.com/BurntSushi/memchr
+- serde_core 1.0.229: MIT OR Apache-2.0; MIT selected.
+  https://crates.io/crates/serde_core/1.0.229
+  https://github.com/serde-rs/serde
+- zmij 1.0.23: MIT.
+  https://crates.io/crates/zmij/1.0.23
+  https://github.com/dtolnay/zmij
+
+No separate build-only dependency crate is selected in this graph. Packages
+appearing only in Cargo.lock but not selected by this build are not represented
+as linked dependencies. Recheck this inventory when dependencies or features
+change; do not infer copyright holders from package author metadata.
+
+base64 0.22.1 -- LICENSE-MIT (verbatim)
+--------------------------------------
+The MIT License (MIT)
+
+Copyright (c) 2015 Alice Maz
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+memchr 2.8.3 -- LICENSE-MIT (verbatim)
+-------------------------------------
+The MIT License (MIT)
+
+Copyright (c) 2015 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+serde_json 1.0.154, itoa 1.0.19, serde_core 1.0.229, zmij 1.0.23
+-- identical LICENSE-MIT text in all four downloaded packages (verbatim)
+-----------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+Additional source notice: serde_json 1.0.154/src/lexical/mod.rs (verbatim)
+-----------------------------------------------------------------------
+// The code in this module is derived from the `lexical` crate by @Alexhuszagh
+// which the author condensed into this minimal subset for use in serde_json.
+// For the serde_json use case we care more about reliably round tripping all
+// possible floating point values than about parsing any arbitrarily long string
+// of digits with perfect accuracy, as the latter would take a high cost in
+// compile time and performance.
+//
+// Dual licensed as MIT and Apache 2.0 just like the rest of serde_json, but
+// copyright Alexander Huszagh.

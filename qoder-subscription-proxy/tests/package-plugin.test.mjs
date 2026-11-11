@@ -80,7 +80,7 @@ function unpack(filename, platform, coreEntry) {
 // 源码夹具附带合成构建核心，并把平台清单摘要改为合成值；测试不依赖真实下载产物。
 function fixture(directory, platform) {
   const source = path.join(directory, '源码 插件');
-  for (const name of [...expected, 'scripts/package-plugin.mjs']) {
+  for (const name of [...expected, 'scripts/package-plugin.mjs', 'scripts/build-approval-router.mjs']) {
     const destination = path.join(source, name);
     mkdirSync(path.dirname(destination), { recursive: true });
     copyFileSync(path.join(root, name), destination);
@@ -94,21 +94,33 @@ function fixture(directory, platform) {
   const patched = structuredClone(manifest);
   patched.platforms[platform].binarySha256 = createHash('sha256').update(fake).digest('hex');
   writeFileSync(path.join(source, 'server/bin/platforms.json'), JSON.stringify(patched, null, 2));
-  return { source, coreEntry, fake, build, entry: path.join(source, 'scripts/package-plugin.mjs') };
+  const approvalFile = `qoder-approval-router.${platform.startsWith('win32') ? 'dll' : platform.startsWith('darwin') ? 'dylib' : 'so'}`;
+  const approvalBuild = path.join(source, '.approval-build', platform);
+  const approvalBytes = Buffer.from(`synthetic approval library ${platform}`);
+  const approvalManifest = { abiVersion: 1, platform, file: approvalFile, sha256: createHash('sha256').update(approvalBytes).digest('hex') };
+  mkdirSync(approvalBuild, { recursive: true });
+  writeFileSync(path.join(approvalBuild, approvalFile), approvalBytes);
+  writeFileSync(path.join(approvalBuild, 'manifest.json'), JSON.stringify(approvalManifest));
+  const approvalEntries = ['server/approval-router/manifest.json', `server/approval-router/${approvalFile}`];
+  return { source, coreEntry, fake, build, approvalFile, approvalBuild, approvalManifest, approvalEntries, entry: path.join(source, 'scripts/package-plugin.mjs') };
 }
 
 for (const platform of platforms) {
   test(`${platform}: 根清单、真实内容、CRC、仅内置本平台核心及可重复产物`, t => {
     const directory = temporary(t);
-    const { source, coreEntry, fake, entry } = fixture(directory, platform);
+    const { source, coreEntry, fake, entry, approvalEntries, approvalBuild } = fixture(directory, platform);
     const target = path.join(directory, '产物 有空格.zip');
     const result = run([platform, path.basename(target)], directory, entry);
     assert.equal(result.status, 0, result.stderr);
     const entries = unpack(target, platform, coreEntry);
-    assert.deepEqual([...entries.keys()], [...expected, coreEntry].sort());
+    assert.deepEqual([...entries.keys()], [...expected, coreEntry, ...approvalEntries].sort());
     for (const [name, data] of entries) {
       if (name === coreEntry) {
         assert.deepEqual(data, fake, name);
+        continue;
+      }
+      if (approvalEntries.includes(name)) {
+        assert.deepEqual(data, readFileSync(path.join(approvalBuild, path.posix.basename(name))));
         continue;
       }
       const sourceName = name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name;
@@ -134,11 +146,13 @@ for (const platform of platforms) {
 
 test('白名单排除测试、数据、凭据、日志、其他平台核心及未知脚本', t => {
   const directory = temporary(t);
-  const { source, coreEntry, entry } = fixture(directory, 'win32-x64');
+  const { source, coreEntry, entry, approvalEntries } = fixture(directory, 'win32-x64');
   for (const name of ['tests/private.test.mjs', 'server/data/token.json', 'server/bin/core.exe',
     'server/bin/core.tar.gz', 'server/panel/secret.json', 'server/debug.log', '.env',
     'scripts/prepare-test-core.mjs', 'scripts/fetch-core.mjs', 'scripts/unknown.mjs',
-    'server/local-debug-only.mjs', 'commands/private.md', '.core-build/linux-x64/qoder-plugin-subscription-proxy']) {
+    'server/local-debug-only.mjs', 'commands/private.md', '.core-build/linux-x64/qoder-plugin-subscription-proxy',
+    '.approval-build/linux-x64/manifest.json', '.approval-build/linux-x64/qoder-approval-router.so',
+    'native/approval-router/src/lib.rs']) {
     const filename = path.join(source, name);
     mkdirSync(path.dirname(filename), { recursive: true });
     writeFileSync(filename, 'must not be packaged');
@@ -146,7 +160,105 @@ test('白名单排除测试、数据、凭据、日志、其他平台核心及�
   const target = path.join(directory, '白名单.zip');
   const result = run(['win32-x64', target], directory, entry);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual([...unpack(target, 'win32-x64', coreEntry).keys()], [...expected, coreEntry].sort());
+  assert.deepEqual([...unpack(target, 'win32-x64', coreEntry).keys()], [...expected, coreEntry, ...approvalEntries].sort());
+});
+
+for (const failure of ['missing-manifest', 'missing-library', 'json', 'null', 'abi', 'platform', 'file', 'sha-format', 'sha-mismatch', 'extra', 'directory']) {
+  test(`审批扩展 ${failure}：拒绝错误产物且不留下 ZIP`, t => {
+    const directory = temporary(t);
+    const { entry, approvalBuild, approvalFile, approvalManifest } = fixture(directory, 'linux-x64');
+    const manifestFile = path.join(approvalBuild, 'manifest.json');
+    const library = path.join(approvalBuild, approvalFile);
+    if (failure === 'missing-manifest') rmSync(manifestFile);
+    else if (failure === 'missing-library') rmSync(library);
+    else if (failure === 'json') writeFileSync(manifestFile, '{');
+    else if (failure === 'null') writeFileSync(manifestFile, 'null');
+    else if (failure === 'directory') { rmSync(library); mkdirSync(library); }
+    else {
+      const patches = { abi: { abiVersion: 2 }, platform: { platform: 'linux-arm64' }, file: { file: '../outside.so' },
+        'sha-format': { sha256: 'not-a-hash' }, 'sha-mismatch': { sha256: '0'.repeat(64) }, extra: { other: true } };
+      writeFileSync(manifestFile, JSON.stringify({ ...approvalManifest, ...patches[failure] }));
+    }
+    const target = path.join(directory, 'invalid.zip');
+    const result = run(['linux-x64', target], directory, entry);
+    assert.notEqual(result.status, 0);
+    assert(!existsSync(target));
+    if (failure.startsWith('missing')) assert.match(result.stderr, /build-approval-router/);
+  });
+}
+
+for (const linked of ['manifest.json', 'qoder-approval-router.so', 'platform-directory']) {
+  test(`审批扩展拒绝链接：${linked}`, t => {
+    const directory = temporary(t);
+    const { entry, approvalBuild } = fixture(directory, 'linux-x64');
+    const source = linked === 'platform-directory' ? approvalBuild : path.join(approvalBuild, linked);
+    const external = path.join(directory, 'external');
+    if (linked === 'platform-directory') mkdirSync(external);
+    else copyFileSync(source, external);
+    rmSync(source, { recursive: true });
+    try { symlinkSync(external, source, linked === 'platform-directory' ? (process.platform === 'win32' ? 'junction' : 'dir') : 'file'); }
+    catch (error) {
+      if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) return t.skip(`文件链接不可用：${error.code}`);
+      throw error;
+    }
+    const target = path.join(directory, 'linked.zip');
+    const result = run(['linux-x64', target], directory, entry);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /拒绝符号链接/);
+    assert(!existsSync(target));
+  });
+}
+
+for (const status of [0, 1]) {
+  test(`构建脚本使用锁定 Cargo 参数并处理退出码 ${status}（模拟 Cargo，不编译 Rust）`, t => {
+    const directory = temporary(t);
+    const platform = `${process.platform}-${process.arch}`;
+    const { source } = fixture(directory, platform);
+    rmSync(path.join(source, '.approval-build'), { recursive: true });
+    mkdirSync(path.join(source, 'native/approval-router'), { recursive: true });
+    writeFileSync(path.join(source, 'native/approval-router/Cargo.toml'), '# synthetic manifest; never compiled');
+    const mock = `
+      import childProcess from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { mkdirSync, writeFileSync } from 'node:fs';
+      import path from 'node:path';
+      import assert from 'node:assert/strict';
+      childProcess.spawnSync = (command, args) => {
+        assert.equal(command, 'cargo');
+        assert.deepEqual(args.slice(0, 4), ['build', '--locked', '--release', '--manifest-path']);
+        assert.ok(args[4].endsWith(path.join('native', 'approval-router', 'Cargo.toml')));
+        const target = args[args.indexOf('--target-dir') + 1];
+        const triple = args[args.indexOf('--target') + 1];
+        const name = process.platform === 'win32' ? 'qoder_approval_router.dll' : 'libqoder_approval_router.' + (process.platform === 'darwin' ? 'dylib' : 'so');
+        mkdirSync(path.join(target, triple, 'release'), { recursive: true });
+        writeFileSync(path.join(target, triple, 'release', name), 'synthetic cdylib');
+        return { status: ${status} };
+      };
+      syncBuiltinESMExports();
+    `;
+    const result = spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(mock)}`,
+      path.join(source, 'scripts/build-approval-router.mjs')], { cwd: directory, encoding: 'utf8' });
+    const output = path.join(source, '.approval-build', platform, 'manifest.json');
+    assert.equal(result.status, status, result.stderr);
+    if (status) { assert.match(result.stderr, /Cargo 构建失败/); assert(!existsSync(output)); }
+    else {
+      const file = `qoder-approval-router.${process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so'}`;
+      assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')), { abiVersion: 1, platform, file,
+        sha256: createHash('sha256').update('synthetic cdylib').digest('hex') });
+      assert.equal(readFileSync(path.join(path.dirname(output), file), 'utf8'), 'synthetic cdylib');
+    }
+  });
+}
+
+test('构建脚本拒绝跨平台或无效参数，不调用 Cargo', t => {
+  const directory = temporary(t);
+  const entry = path.join(root, 'scripts/build-approval-router.mjs');
+  const host = `${process.platform}-${process.arch}`;
+  for (const args of [['invalid'], [platforms.find(value => value !== host)], [host, 'extra']]) {
+    const result = run(args, directory, entry);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /不支持|只允许/);
+  }
 });
 
 test('缺失构建核心时失败并提示先运行 fetch-core，不留下 ZIP', t => {

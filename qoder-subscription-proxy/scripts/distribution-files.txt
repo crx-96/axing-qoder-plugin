@@ -7,6 +7,8 @@ LICENSE
 README.md
 THIRD_PARTY_NOTICES.md
 server/approval-routing.mjs
+server/approval-plugin.mjs
+server/approval-router-licenses.txt
 server/bin/LICENSE
 server/bin/README.md
 server/bin/README_CN.md

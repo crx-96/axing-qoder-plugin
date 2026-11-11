@@ -75,6 +75,37 @@ while IFS= read -r relative || [ -n "$relative" ]; do
 done < "$list"
 # 独立市场使用 POSIX 入口，源码中的默认 Windows 清单不进入此位置。
 cp "$copy_root/mcp.posix.json" "$copy_root/mcp.json"
+
+# 市场也必须内置当前 POSIX 平台审批扩展。校验失败由现有 trap 清理整个新副本。
+case "$(uname -s)" in
+    Linux) platform=linux ;;
+    Darwin) platform=darwin ;;
+    *) fail '审批路由市场仅支持 macOS/Linux。' ;;
+esac
+case "$(uname -m)" in
+    x86_64|amd64) platform="$platform-x64" ;;
+    arm64|aarch64) platform="$platform-arm64" ;;
+    *) fail '审批路由市场仅支持 x64/arm64。' ;;
+esac
+command -v node >/dev/null 2>&1 || fail '构建市场需要 PATH 中可用的 Node.js。'
+node --input-type=module - "$plugin_root" "$copy_root" "$platform" <<'NODE'
+import { lstatSync, mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+const [root, copy, platform] = process.argv.slice(2);
+// 在导入构建脚本前逐层检查路径，拒绝源目录链接；不运行 Cargo。
+const helper = path.join(root, 'scripts/build-approval-router.mjs');
+for (let current = helper; ; current = path.dirname(current)) {
+  if (lstatSync(current).isSymbolicLink()) throw new Error(`拒绝符号链接：${current}`);
+  if (path.dirname(current) === current) break;
+}
+const { readApprovalArtifact, assertNoLinks } = await import(pathToFileURL(helper));
+const entries = readApprovalArtifact(root, platform);
+assertNoLinks(copy);
+mkdirSync(path.join(copy, 'server/approval-router'));
+// 只排他写入两份已验证的字节，不再读取构建目录，且不复制其他平台。
+for (const [relative, bytes] of entries) writeFileSync(path.join(copy, relative), bytes, { flag: 'wx' });
+NODE
 owned=
 
 # 仅提示手动安装入口；本脚本不读写用户全局配置或 Qoder 已安装缓存。

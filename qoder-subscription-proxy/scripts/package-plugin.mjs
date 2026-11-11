@@ -62,7 +62,11 @@ async function packagePlugin(platform, requested) {
   if (createHash('sha256').update(coreData).digest('hex') !== release.binarySha256) {
     throw new Error(`${platform} 构建核心 SHA256 与平台清单不一致，拒绝打包`);
   }
-  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/), coreEntry];
+  // 校验构建期模块路径后复用原生扩展校验；扩展源码不进入静态分发清单。
+  assertNoLinks(path.join(root, 'scripts/build-approval-router.mjs'));
+  const { readApprovalArtifact } = await import('./build-approval-router.mjs');
+  const approvalEntries = readApprovalArtifact(root, platform);
+  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/), coreEntry, ...approvalEntries.keys()];
   if (new Set(files).size !== files.length) throw new Error('分发清单包含重复路径');
   for (const name of files) {
     if (/[\\:\r\n]/.test(name) || name.split('/').some(part => !part || part === '.' || part === '..')) {
@@ -80,12 +84,15 @@ async function packagePlugin(platform, requested) {
   let offset = 0;
   let centralSize = 0;
   for (const name of files) {
-    // 核心条目来自构建缓存，其余按白名单读源码；非 Windows 入口统一发布 POSIX MCP 清单。
-    const source = name === coreEntry ? coreSource
-      : path.join(root, name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name);
-    assertNoLinks(source);
-    if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);
-    const data = name === coreEntry ? coreData : readFileSync(source);
+    // 核心和扩展使用已校验快照；其余按白名单读源码，POSIX 替换 MCP 入口。
+    let data = approvalEntries.get(name);
+    if (!data) {
+      const source = name === coreEntry ? coreSource
+        : path.join(root, name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name);
+      assertNoLinks(source);
+      if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);
+      data = name === coreEntry ? coreData : readFileSync(source);
+    }
     const compressed = deflateRawSync(data, { level: 9 });
     const encoded = Buffer.from(name, 'utf8');
     if (data.length >= 0xffffffff || compressed.length >= 0xffffffff || encoded.length > 0xffff) {

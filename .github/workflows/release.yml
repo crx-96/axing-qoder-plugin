@@ -12,71 +12,165 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  resolve:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.commit.outputs.commit }}
     steps:
       - name: Resolve release tag
+        id: tag
         shell: bash
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "标签必须形如 v1.2.3：$tag" >&2; exit 1 ;;
-          esac
-          echo "TAG=$tag" >> "$GITHUB_ENV"
-
+          if [[ ! "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "标签必须形如 v1.2.3" >&2
+            exit 1
+          fi
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
           fetch-depth: 0
+          persist-credentials: false
+      - name: Pin release commit
+        id: commit
+        shell: bash
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32-x64
+          - os: ubuntu-24.04
+            platform: linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-15-intel
+            platform: darwin-x64
+          - os: macos-15
+            platform: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-
       - name: Validate tag matches plugin version
         shell: bash
         run: |
           node --input-type=module - <<'NODE'
           import { readFile } from "node:fs/promises";
           const manifest = JSON.parse(await readFile("qoder-subscription-proxy/.qoder-plugin/plugin.json", "utf8"));
-          const expected = `v${manifest.version}`;
-          if (process.env.TAG !== expected) {
-            console.error(`标签 ${process.env.TAG} 与插件版本 ${expected} 不一致`);
-            process.exit(1);
-          }
+          if (process.env.TAG !== `v${manifest.version}`) throw new Error("标签与插件版本不一致");
+          if (process.env.PLATFORM !== `${process.platform}-${process.arch}`) throw new Error("runner 平台不一致");
           NODE
-
-      - name: Fetch and verify CLIProxyAPI cores
+      - name: Prepare Rust 1.95.0
         shell: bash
-        run: node qoder-subscription-proxy/scripts/fetch-core.mjs all
-
-      - name: Test current platform core
-        shell: bash
-        env:
-          BRIDGE_TEST_BIN: ${{ github.workspace }}/qoder-subscription-proxy/.core-build/linux-x64/qoder-plugin-subscription-proxy
         run: |
-          chmod +x "$BRIDGE_TEST_BIN"
-          node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
-
-      - name: Package five platform ZIPs
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          echo "RUSTUP_TOOLCHAIN=1.95.0" >> "$GITHUB_ENV"
+      - name: Check native approval router
+        shell: bash
+        run: |
+          cargo fmt --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml --check
+          cargo test --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml
+          cargo clippy --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml -- -D warnings
+      - name: Build current-platform approval router
+        shell: bash
+        run: node qoder-subscription-proxy/scripts/build-approval-router.mjs "$PLATFORM"
+      - name: Fetch and verify current-platform CLIProxyAPI core
+        shell: bash
+        run: |
+          node qoder-subscription-proxy/scripts/fetch-core.mjs "$PLATFORM"
+          node --input-type=module - <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          import path from 'node:path';
+          const file = process.platform === 'win32' ? 'qoder-plugin-subscription-proxy.exe' : 'qoder-plugin-subscription-proxy';
+          const binary = path.resolve('qoder-subscription-proxy/.core-build', process.env.PLATFORM, file);
+          appendFileSync(process.env.GITHUB_ENV, `BRIDGE_TEST_BIN=${binary}\n`);
+          NODE
+      - name: Test current platform
+        shell: bash
+        run: node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
+      - name: Package current-platform ZIP
         shell: bash
         run: |
           mkdir -p dist
-          for platform in win32-x64 darwin-x64 darwin-arm64 linux-x64 linux-arm64; do
-            node qoder-subscription-proxy/scripts/package-plugin.mjs \
-              "$platform" "dist/qoder-subscription-proxy-${TAG}-${platform}.zip"
-          done
-          ls -lh dist
+          node qoder-subscription-proxy/scripts/package-plugin.mjs "$PLATFORM" "dist/qoder-subscription-proxy-${TAG}-${PLATFORM}.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-${{ matrix.platform }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
 
+  release:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Verify tag still identifies tested sources
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('qoder-subscription-proxy/.qoder-plugin/plugin.json', 'utf8'));
+          if (process.env.TAG !== `v${manifest.version}`) throw new Error('标签与插件版本不一致');
+          NODE
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: plugin-*
+          path: dist
+          merge-multiple: true
+      - name: Verify all five platform ZIPs
+        shell: bash
+        run: |
+          node --input-type=module - <<'NODE'
+          import { readdirSync, lstatSync } from 'node:fs';
+          const platforms = ['win32-x64', 'darwin-x64', 'darwin-arm64', 'linux-x64', 'linux-arm64'];
+          const expected = platforms.map(platform => `qoder-subscription-proxy-${process.env.TAG}-${platform}.zip`).sort();
+          const actual = readdirSync('dist').sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('五平台 ZIP 不完整或存在额外产物');
+          for (const file of expected) {
+            const stat = lstatSync(`dist/${file}`);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) throw new Error(`无效产物：${file}`);
+          }
+          NODE
       - name: Create release if missing
         shell: bash
         env:
@@ -85,7 +179,6 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
           fi
-
       - name: Upload release assets with retries
         shell: bash
         env:
