@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$failure = 'qoder-subscription-proxy: runtime unavailable. Requires Windows x64, Windows PowerShell 5.1 and Qoder Desktop (or Node.js 22+ for development).'
 
 try {
     if (-not [Environment]::Is64BitProcess -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
@@ -12,7 +13,12 @@ try {
     $ownerPidText = $null
     while ($current -gt 0 -and -not $seen.ContainsKey($current) -and $seen.Count -lt 128) {
         $seen[$current] = $true
-        $ancestor = Get-CimInstance Win32_Process -Filter "ProcessId = $current"
+        try {
+            $ancestor = Get-CimInstance Win32_Process -Filter "ProcessId = $current"
+        } catch {
+            $failure = 'qoder-subscription-proxy: CIM/WMI process query failed. Cannot verify Qoder process ownership; check Windows Management Instrumentation service and access permissions. No runtime was started.'
+            throw
+        }
         if (-not $ancestor) { break }
         if ($ancestor.ExecutablePath -and [IO.Path]::GetFileName($ancestor.ExecutablePath) -iin @('Qoder.exe', 'Qoder CN.exe')) {
             if (-not $runtime) { $runtime = $ancestor.ExecutablePath }
@@ -37,6 +43,6 @@ try {
     )
     exit $result
 } catch {
-    [Console]::Error.WriteLine('qoder-subscription-proxy: runtime unavailable. Requires Windows x64, Windows PowerShell 5.1 and Qoder Desktop (or Node.js 22+ for development).')
+    [Console]::Error.WriteLine($failure)
     exit 1
 }

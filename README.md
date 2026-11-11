@@ -6,15 +6,15 @@
 
 ## 下载与安装
 
-本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.7**。
+本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.8**。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.0.7-win32-x64.zip` |
-| macOS x64 | `qoder-subscription-proxy-v1.0.7-darwin-x64.zip` |
-| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.0.7-darwin-arm64.zip` |
-| Linux x64 | `qoder-subscription-proxy-v1.0.7-linux-x64.zip` |
-| Linux ARM64 | `qoder-subscription-proxy-v1.0.7-linux-arm64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.0.8-win32-x64.zip` |
+| macOS x64 | `qoder-subscription-proxy-v1.0.8-darwin-x64.zip` |
+| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.0.8-darwin-arm64.zip` |
+| Linux x64 | `qoder-subscription-proxy-v1.0.8-linux-x64.zip` |
+| Linux ARM64 | `qoder-subscription-proxy-v1.0.8-linux-arm64.zip` |
 
 按当前源码构建的每个安装包内置对应平台的 CLIProxyAPI 核心及原生审批路由扩展；普通安装者无需 Rust，也不会在线下载或编译扩展。请按本机系统与架构选择，不要混用。以下说明描述当前源码设计，不表示这些变更已发布或已完成 Desktop 安装验收。
 
@@ -36,7 +36,7 @@ mkdir dist
 node qoder-subscription-proxy/scripts/build-approval-router.mjs win32-x64
 # 获取并校验本平台官方核心（归档与二进制两级 SHA256）
 node qoder-subscription-proxy/scripts/fetch-core.mjs win32-x64
-node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.0.7-win32-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.0.8-win32-x64.zip
 ```
 
 在其他宿主上，将三条命令的平台参数及 ZIP 文件名改为本机的 `darwin-x64`、`darwin-arm64`、`linux-x64` 或 `linux-arm64`。构建脚本省略平台参数时使用当前 Node 宿主平台，拒绝伪跨编译；五平台安装包须由对应宿主或 GitHub 原生 runner 矩阵分别构建。`fetch-core.mjs all` 仍可一次下载五平台**官方核心**，但不能代替五平台原生扩展构建。

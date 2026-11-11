@@ -198,7 +198,7 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     return;
   }
   const initialized = await request("中文握手", "initialize", initializeParams);
-  assert.equal(initialized.serverInfo.version, "1.0.7");
+  assert.equal(initialized.serverInfo.version, "1.0.8");
   assert.equal(initialized.protocolVersion, "2025-06-18");
   assert.deepEqual(await request("中文往返-引号\"-反斜杠\\", "ping"), {});
   const tools = await request("工具清单", "tools/list");
@@ -281,6 +281,22 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     await assert.rejects(access(config.configPath), { code: "ENOENT" });
   }
 }
+
+test("CIM 查询失败给出归属诊断，不泄露异常或退回未验证的 Node", { skip: windowsOnly, timeout: 15000 }, async () => {
+  const script = `
+    function Get-CimInstance { throw 'private-cim-error-with-token' }
+    function Get-Command { throw 'unverified-node-fallback' }
+    & '${launcher.replace(/'/g, "''")}'
+  `;
+  await assert.rejects(execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true, timeout: 10000 }), error => {
+    assert.equal(error.code, 1);
+    assert.equal(error.stdout, "");
+    assert.match(error.stderr, /CIM\/WMI.*process ownership/);
+    assert.doesNotMatch(error.stderr, /private-cim|unverified-node|runtime unavailable/);
+    return true;
+  });
+});
 
 test("真实 PowerShell 启动器在持久暂停下透传中文 JSON-RPC、工具参数与 EOF，不执行核心", { skip: windowsOnly, timeout: 45000 }, async (t) => {
   await launcherSession(t, process.execPath);

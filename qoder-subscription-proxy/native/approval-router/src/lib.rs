@@ -208,7 +208,7 @@ fn approval_request(request: &Value) -> Option<(&str, Value)> {
     let bytes = STANDARD.decode(request["Body"].as_str()?).ok()?;
     let body: Value = serde_json::from_slice(&bytes).ok()?;
     let format = request["SourceFormat"].as_str()?;
-    if !is_approval(format, &body) && !is_codex_review(request, &body) {
+    if !is_approval(format, &body) {
         return None;
     }
     let model = request["RequestedModel"]
@@ -230,9 +230,7 @@ fn is_codex_review(request: &Value, body: &Value) -> bool {
         )
         && content.as_array().is_some_and(|parts| parts.len() == 1)
         && content[0]["type"] == "input_text"
-        && content[0]["text"]
-            .as_str()
-            .is_some_and(|text| text.starts_with("You are a security "))
+        && is_approval("openai-response", body)
 }
 
 fn approval_route(request: &Value, body: &Value, model: &str, catalog: &Value) -> Value {

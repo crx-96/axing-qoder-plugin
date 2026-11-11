@@ -1,7 +1,7 @@
 /** 拉起器配置：仅允许 IPv4 回环监听，使用插件专属稳定数据目录，API 密钥仅供本地使用。 */
 
 import { randomBytes } from "node:crypto";
-import { chmod, link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { chmod, link, open, readFile, rename, unlink } from "node:fs/promises";
 import { withLifecycleLock } from "./lifecycle-lock.mjs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -15,7 +15,7 @@ export const DEFAULT_PORT = 19787;
 /** 管理页网关固定端口：免密管理入口与连接器授权元数据共用；与模型端口不同且跨版本保持不变。 */
 export const MANAGEMENT_PORT = 19788;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录与上述固定端口。 */
-export const PLUGIN_VERSION = "1.0.7";
+export const PLUGIN_VERSION = "1.0.8";
 /** 旧版公共密码仅用于识别需要升级的文件和兼容环境配置。 */
 const LEGACY_MGMT_KEY = "123456";
 
@@ -82,19 +82,17 @@ async function publishSecrets(file, apiKey, upgrade) {
 async function loadSecrets(dataDir, port) {
   const file = join(dataDir, "launcher-secrets.json");
   try {
-    let current;
-    try { current = await readSecrets(file); }
-    catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      await mkdir(dataDir, { recursive: true, mode: 0o700 });
-      await publishSecrets(file, randomBytes(32).toString("hex"), false);
-      current = await readSecrets(file);
-    }
-    if (current.mgmtKey && current.mgmtKey !== LEGACY_MGMT_KEY) return current;
+    // Windows 读句柄及 chmod 也会阻止 rename；读取与迁移必须使用同一把锁。
     return await withLifecycleLock({ dataDir, port }, async () => {
-      // 重读胜者；只有仍为历史格式时才替换，不覆盖其他会话生成的管理密钥。
-      const previous = await readSecrets(file);
-      if (!previous.mgmtKey || previous.mgmtKey === LEGACY_MGMT_KEY) await publishSecrets(file, previous.apiKey, true);
+      let current;
+      try { current = await readSecrets(file); }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        await publishSecrets(file, randomBytes(32).toString("hex"), false);
+        current = await readSecrets(file);
+      }
+      if (current.mgmtKey && current.mgmtKey !== LEGACY_MGMT_KEY) return current;
+      await publishSecrets(file, current.apiKey, true);
       return readSecrets(file);
     });
   } catch (error) {

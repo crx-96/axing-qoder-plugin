@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.7
+# qoder订阅代理 · 1.0.8
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生审批路由扩展，普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.7-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生审批路由扩展，普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.8-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -60,6 +60,8 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 插件生成的 `config.yaml` 只包含本机安全必需字段：回环监听与固定端口、仅本机管理（`allow-remote: false`）、固定随包管理页、客户端 API Key、授权目录。**重试、冷却、流式心跳、启动缓冲等请求参数一律沿用 CLIProxyAPI 上游默认值**，插件不写入、不复位、不迁移；如需调整请在管理页或 `config.yaml` 中自行设置。
 
+配置校验支持块式映射/列表、单行内联列表与映射、大小写及下划线键、带空格的单行字符串；仍拒绝重复键、锚点、别名、合并、标签及多文档，防止与核心对安全字段产生不同解释。内联配置的编辑与旧审批规则迁移仅改动对应范围，保留同行其他配置。
+
 第一个功能性例外是终端自动审批兼容：模型切换统一交给原生 `ModelRouter`，在协议翻译前完成；`requests.payload.override` 现在只为审核模型附加原有 `terminalGuidance` 终端风险判断指引，不再承担模型切换。冷启动启用 `plugins.enabled`，仅配置 `qoder-approval-router`，并将 `plugins.dir` 指向经校验的扩展独立目录，不扫描其他目录。已有自定义 `plugins.dir` 或其他扩展配置会明确报冲突，不覆盖用户配置。路由识别与失败边界见下节。
 
 第二个例外是上游出口代理：核心只读取 `requests.proxy-url` 与 `HTTPS_PROXY` 等环境变量，**不读取 Windows 的「系统代理」设置**。冷启动会读取 `HKCU` 的 Internet Settings，把启用中的 HTTP(S) 系统代理写入 `requests.proxy-url`，包括默认端口 80/443；系统代理关闭时写回空值，**空值仍允许核心使用环境代理，不代表强制直连**。同步只改写插件上次写入的值（记录在数据目录 `bridge.proxy`），或用户已清空/删除的代理字段；你自行设置的非空代理（含 `direct`、`none` 或任意自定义地址）原样保留，没有归属记录时即使与系统代理相同也不接管。清空或删除该字段即可恢复跟随。切换代理模式或端口后需 `bridge_stop` 再 `bridge_start`；只调用 `bridge_start` 会复用正在运行的桥，多会话下重连一个连接器也不保证重启共享桥。
@@ -72,12 +74,12 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 ## 原生审批路由
 
-扩展只读取宿主模型目录中的 provider 和 model 索引识别模型来源，不读取 Token。同名模型属于多个 provider 时不猜测，保留原路由。Antigravity 只匹配已知 CN/国际版安全分类器的独立系统提示，普通对话、引用提示或混合历史不匹配；Codex 保留原有首条系统/developer 提示、单个文本块及 `none` / `low` 的识别条件。
+扩展只读取宿主模型目录中的 provider 和 model 索引识别模型来源，不读取 Token。同名模型属于多个 provider 时不猜测，保留原路由。Antigravity 与 Codex 都只匹配已知 CN/国际版安全分类器的独立审批请求，普通安全助手对话、引用提示、带工具或混合历史不匹配；Codex 还要求 Responses 的首条 system/developer 消息为单个文本块、仅跟随一条 user 消息，且推理级别为 `none` / `low`。
 
 | 来源 | 匹配范围 | 翻译前的目标路由 |
 | --- | --- | --- |
 | Antigravity | 独立审批，包含 Claude、Gemini、GPT-OSS；支持 Responses、Chat Completions、Claude Messages、Gemini 原生入口 | `gemini-3.8-flash-high`，推理级别 `low` |
-| Codex | 仅 `gpt-*`、Responses，且为原有 `none` / `low` 审批识别范围 | `codex-auto-review`，推理级别 `low` |
+| Codex | 独立审批，仅 `gpt-*`、Responses，推理级别为 `none` / `low` | `codex-auto-review`，推理级别 `low` |
 
 正常切换只记录 **INFO**，含渠道、源模型、目标模型和 `low`，不记录提示正文或凭据；真实调用失败仍正常报错。审核输出不改，不伪造允许。已选定路由后，目标模型无权限或不可用时返回错误，不自动回到昂贵模型。未匹配、来源不唯一时保留原路由；如果扩展无法读取模型目录或自身运行异常，核心也可能保留原路由并记录异常，因此这些异常情况下不保证节省额度，但不会跳过宿主审批。
 
@@ -94,6 +96,8 @@ ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approva
 | `image_gen_gemini` | 经本机代理聊天接口生图（`gemini-*-image` 系） |
 
 生图工具省略 `model` 时按族内可用模型自动决策：仅一个直接生成；多个返回 `needsModelChoice` 与候选列表，由宿主弹窗交用户选择后带 `model` 重调。图片 base64 不落对话，统一解码保存到数据目录 `generated/`，工具只返回路径与元数据。说"GPT/OpenAI 生图"或"Gemini/谷歌生图"即触发对应工具；不使用宿主内置 ImageGen 通道。
+
+GPT 的 `size` 直接交给图片接口。Gemini 的 `size` 支持方图 `1K`、`2K`、`4K`，或对应的 `1024x1024`、`2048x2048`、`4096x4096`，默认 `1K`；插件将其转换为核心支持的 `image_config`，其他尺寸在请求前明确拒绝，不再静默忽略。具体模型是否支持该档位由上游决定；返回的 `requestedSize` 表示请求参数，不是实测图片尺寸。HTTP 失败保留状态码与本地诊断，不回显上游正文。
 
 ## 数据与安全
 
@@ -129,10 +133,11 @@ ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approva
 - 自动启动以宿主已拉起 stdio 连接器为前提，不注册系统服务、计划任务或开机启动项。
 - Windows 启动器查找实际 `Qoder.exe` / `Qoder CN.exe` 祖先进程，Job Object 在宿主退出或包装器被强杀时回收 MCP 与核心；POSIX 由 supervisor 持有 guardian 的私有 stdin/EOF 租约，guardian 持有核心并先 TERM、超时再 KILL。外层 supervisor 被强杀时，存活的 guardian 仍会回收核心；这不等于 guardian 也被强杀时的内核回收保证。
 - `bridge_stop` 持久暂停自动恢复并关闭本会话管理网关；`bridge_start` 解除暂停并重试下载或启动，核心就绪后恢复网关，监听成功时清除旧诊断。多任务可复用代理，非创建者结束不主动杀共享代理。
-- 启停与凭据发送前验证进程归属，不按进程名批量杀进程。
+- 启停与凭据发送前验证进程归属，不按进程名批量杀进程。POSIX 创建者正常退出并确认核心回收后，仅清理仍与本实例完整身份一致的记录；异常退出或其他会话更新过的记录保留。Linux 在 TCP 握手完成但服务端尚未 accept 的窗口内有界等待，归属确认前不发送凭据。
 
 ## 故障排查
 
+- **Windows 启动报 CIM/WMI 错误**：检查 Windows Management Instrumentation 服务和进程查询权限；仅安装 Node.js 不能修复系统查询故障。插件仍需验证宿主与核心进程归属，不会在查询失败时绕过验证启动。
 - **按钮点击无反应**：确认 stdio 连接器已连接（网关随其监听）；`bridge_status` 的 `gatewayError` 会说明 19788 占用等原因。
 - **管理页打不开**：等待后台核心准备完成或检查 `bridge_status`；修复失败原因后重连或 `bridge_start`。
 - **模型 API 401**：核对供应商 API Key 与本机 `launcher-secrets.json`。

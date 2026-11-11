@@ -150,6 +150,38 @@ for (const suffix of [
   });
 }
 
+test("内联旧审批规则迁移仅删除目标项，不删除同行用户配置", () => {
+  const parsed = parseConfigYaml("rules:\n" + renderApprovalOverride(2) + "\n");
+  const materialize = path => {
+    const key = JSON.stringify(path);
+    const node = parsed.nodes.get(key);
+    if (node.kind === "list") return parsed.values.get(key).map((_, index) => materialize([...path, index]));
+    if (node.kind !== "map") return parsed.values.get(key) ?? null;
+    return Object.fromEntries([...parsed.nodes.keys()].map(key => JSON.parse(key))
+      .filter(child => child.length === path.length + 1 && path.every((part, index) => child[index] === part))
+      .map(child => [child.at(-1), materialize(child)]));
+  };
+  const legacy = materialize(["rules", 0]);
+  const custom = { models: [{ name: "custom" }], params: { model: "unchanged" } };
+  for (const rules of [[legacy], [custom, legacy], [legacy, custom], [legacy, legacy, custom]]) {
+    const text = base.replaceAll("\n", "\r\n") +
+      `requests: {proxy-url: direct, payload: {override: ${JSON.stringify(rules)}, custom: keep}, timeout: 13} # retained\r\n` +
+      "observability:\r\n  logs:\r\n    request-log: true\r\n";
+    const updated = ensureApprovalRouting(text);
+    validateExistingConfig(config, updated);
+    const values = parseConfigYaml(updated).values;
+    assert.equal(values.get('["requests","proxy-url"]'), "direct");
+    assert.equal(values.get('["requests","payload","custom"]'), "keep");
+    assert.equal(values.get('["requests","timeout"]'), 13);
+    assert.equal(values.get('["observability","logs","request-log"]'), true);
+    assert.equal(values.get(overrideKey).length, rules.includes(custom) ? 2 : 1);
+    if (rules.includes(custom)) assert.equal(values.get('["requests","payload","override",0,"params","model"]'), "unchanged");
+    assert.ok(updated.includes("# retained\r\n"));
+    assert.equal(updated.replaceAll("\r\n", "").includes("\n"), false);
+    assert.equal(ensureApprovalRouting(updated), updated);
+  }
+});
+
 test("核心去掉 GJSON 键引号后可加载、迁移且保持幂等", () => {
   const currentConfig = ensureApprovalRouting(base);
   const previousConfig = base + "requests:\n  payload:\n    override:\n" +
@@ -467,6 +499,8 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     ["gpt-6-astra", "high", "developer", prefix, "gpt-6-astra", "high"],
     ["gpt-6-astra", "high", "system", "Ordinary coding task", "gpt-6-astra", "high"],
     ["gpt-6-astra", "low", "system", "Ordinary coding task", "gpt-6-astra", "low"],
+    ["gpt-6-astra", "none", "system", "You are a security expert. Help me review this application.", "gpt-6-astra", "none"],
+    ["gpt-6-astra", "low", "developer", "You are a security custom classifier.", "gpt-6-astra", "low"],
     ["gpt-6-astra", "none", "user", prefix, "gpt-6-astra", "none"],
     ["gpt-6-astra", "none", "system", "Ordinary coding task", "gpt-6-astra", "none"],
     ["gpt-6-astra", "none", "system", "Quoted: " + prefix, "gpt-6-astra", "none"],
@@ -513,7 +547,7 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
   assert.equal(captured.at(-1).path, "/v1/chat/completions");
   const nonstreamResponse = await fetch(`${endpoint}/v1/responses`, {
     method: "POST", headers, signal: AbortSignal.timeout(10000),
-    body: JSON.stringify({ model: "gpt-6-luna", input: [{ role: "system", content: [{ type: "input_text", text: prefix }] }], stream: false, reasoning: { effort: "none" } }),
+    body: JSON.stringify({ model: "gpt-6-luna", input: [{ role: "system", content: [{ type: "input_text", text: prefix }] }, { role: "user", content: [{ type: "input_text", text: "Synthetic action: list the working directory." }] }], stream: false, reasoning: { effort: "none" } }),
   });
   assert.equal(nonstreamResponse.status, 200);
   assert.equal((await nonstreamResponse.json()).model, "codex-auto-review");

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { withLifecycleLock } from "./lifecycle-lock.mjs";
 export { withLifecycleLock };
 import { randomUUID } from "node:crypto";
-import { promisify } from "node:util";
+import { promisify, isDeepStrictEqual } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { MANAGEMENT_PORT, renderConfigYaml, validateExistingConfig } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
@@ -268,7 +268,7 @@ async function launch(config, signal) {
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
   const previous = supervisors.get(config.dataDir);
-  if (previous) await closeSupervisor(previous);
+  if (previous) await closeSupervisor(previous.child);
   await prepareExecutable(config);
   await ensureDataDir(config);
   const approvalRouter = await prepareApprovalRouter(config);
@@ -290,9 +290,10 @@ async function launch(config, signal) {
     // 只对子进程指定受控页面，不能让宿主环境把管理端指向外部静态资产。
     env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
   });
-  supervisors.set(config.dataDir, child);
+  const owned = { child, config, identity: null };
+  supervisors.set(config.dataDir, owned);
   child.once("exit", () => {
-    if (supervisors.get(config.dataDir) === child) supervisors.delete(config.dataDir);
+    if (supervisors.get(config.dataDir) === owned) supervisors.delete(config.dataDir);
   });
   child.stderr.resume();
   child.stdout.setEncoding("utf8");
@@ -334,7 +335,8 @@ async function launch(config, signal) {
       ? await processIdentity(launched.pid)
       : await queryPosixSupervisor({ ...launched, binPath: config.binPath, configPath: config.configPath }, config);
     if (!identity) throw bridgeError("代理在启动时退出，请检查 data/bridge.log");
-    await savePid(config, { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION, approvalRouterSha256: approvalRouter.sha256 });
+    owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION, approvalRouterSha256: approvalRouter.sha256 };
+    await savePid(config, owned.identity);
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
       signal?.throwIfAborted();
@@ -361,7 +363,18 @@ export async function shutdownOwnedBridges() {
   for (const controller of startControllers.values()) controller.abort();
   await Promise.allSettled([...inFlight.values()]);
   // 只关闭本 MCP 持有的 Job 或租约；不按 PID 文件或进程名称清理其他会话。
-  await Promise.all([...supervisors.values()].map(closeSupervisor));
+  await Promise.all([...supervisors.values()].map(async ({ child, config, identity }) => {
+    await closeSupervisor(child);
+    if (process.platform === "win32" || !identity || child.exitCode !== 0 || child.signalCode !== null) return;
+    // 先确认 guardian 回收，再持锁比对完整记录；watchdog 已发布的新实例不能被旧 owner 删除。
+    await withLifecycleLock(config, async () => {
+      const text = await readOptional(config.pidPath);
+      if (text === null) return;
+      let record;
+      try { record = JSON.parse(text); } catch { return; }
+      if (isDeepStrictEqual(record, identity)) await unlink(config.pidPath);
+    });
+  }));
 }
 
 /** 必须在生命周期锁内调用；返回 null 才允许后续准备核心或启动，绝不接管外部进程。 */
@@ -482,8 +495,8 @@ export async function stopBridge(config) {
         // 只由持有 ChildProcess 的托管器终止它的孩子，不向可被回收的记录 PID 发送信号。
         const result = await queryPosixSupervisor(tracked.record, config, { stop: true });
         if (!result?.stopped) return { stopped: false, reason: "代理已退出或归属发生变化；自动恢复已暂停" };
-        const child = supervisors.get(config.dataDir);
-        if (child) await closeSupervisor(child);
+        const owned = supervisors.get(config.dataDir);
+        if (owned) await closeSupervisor(owned.child);
       } catch { return { stopped: false, reason: "停止失败或托管器无法验证；没有按 PID 终止其他进程" }; }
       await unlink(config.pidPath);
       return { stopped: true, reason: "已停止本版本订阅桥，自动恢复暂停；bridge_start 可恢复" };

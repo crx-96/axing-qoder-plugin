@@ -18,10 +18,15 @@ const MODELS_TIMEOUT_MS = 10_000;
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 /** 缺省输出尺寸；调用方可用 size 参数覆盖。 */
 export const DEFAULT_IMAGE_SIZE = "1024x1024";
+const GEMINI_IMAGE_SIZES = new Map([
+  ["1K", "1K"], ["2K", "2K"], ["4K", "4K"],
+  ["1024x1024", "1K"], ["2048x2048", "2K"], ["4096x4096", "4K"],
+]);
 
 /** 生图失败只传播状态码诊断，不回显上游正文或凭据。 */
-function imageFailure(response, model) {
-  return Object.assign(httpFailure(response.status, `模型 ${model} 生图`), { code: "BRIDGE_NOT_READY" });
+function imageFailure(response) {
+  const error = httpFailure(response.status, "生图");
+  return Object.assign(error, { code: response.status, safeMessage: error.message });
 }
 
 /** 按族过滤可用生图模型；输入为核心 /v1/models 的模型 ID 列表。 */
@@ -35,7 +40,7 @@ export function imageModelsByFamily(ids, family) {
 export async function listImageModels(config, family, signal) {
   const response = await requestOwned(config, "/v1/models",
     { authenticated: true, signal, timeoutMs: MODELS_TIMEOUT_MS });
-  if (response.status !== 200) throw imageFailure(response, family);
+  if (response.status !== 200) throw imageFailure(response);
   let body;
   try { body = JSON.parse(response.text); } catch { throw new Error("核心模型清单不是 JSON。"); }
   if (!Array.isArray(body.data)) throw new Error("核心模型清单结构无效。");
@@ -49,7 +54,7 @@ async function requestImage(config, { family, model, prompt, size }, signal) {
       authenticated: true, method: "POST", signal, timeoutMs: REQUEST_TIMEOUT_MS, maxBytes: MAX_IMAGE_BYTES,
       body: { model, prompt, size, n: 1 },
     });
-    if (response.status !== 200) throw imageFailure(response, model);
+    if (response.status !== 200) throw imageFailure(response);
     const item = JSON.parse(response.text)?.data?.[0];
     if (typeof item?.b64_json !== "string" || !item.b64_json) {
       throw new Error("图片接口未返回 base64 图片数据。");
@@ -59,9 +64,10 @@ async function requestImage(config, { family, model, prompt, size }, signal) {
   // Gemini 图片模型不经图片接口；聊天响应的 message.images 携带 data URL。
   const response = await requestOwned(config, "/v1/chat/completions", {
     authenticated: true, method: "POST", signal, timeoutMs: REQUEST_TIMEOUT_MS, maxBytes: MAX_IMAGE_BYTES,
-    body: { model, messages: [{ role: "user", content: prompt }], stream: false },
+    body: { model, messages: [{ role: "user", content: prompt }], stream: false,
+      image_config: { aspect_ratio: "1:1", image_size: GEMINI_IMAGE_SIZES.get(size) } },
   });
-  if (response.status !== 200) throw imageFailure(response, model);
+  if (response.status !== 200) throw imageFailure(response);
   const images = JSON.parse(response.text)?.choices?.[0]?.message?.images;
   const url = Array.isArray(images) ? images[0]?.image_url?.url : undefined;
   const match = /^data:([a-z0-9+.-]+\/[a-z0-9+.-]+);base64,([A-Za-z0-9+/=\s]+)$/s.exec(typeof url === "string" ? url : "");
@@ -93,6 +99,10 @@ async function saveImage(config, { model, mime, base64 }) {
  */
 export async function generateImage(config, { family, prompt, model, size = DEFAULT_IMAGE_SIZE, signal }) {
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("生图提示词必须是非空字符串。");
+  if (family === "gemini" && !GEMINI_IMAGE_SIZES.has(size)) {
+    const safeMessage = "Gemini 生图尺寸仅支持 1K、2K、4K 或对应的 1024x1024、2048x2048、4096x4096 方图。";
+    throw Object.assign(new Error(safeMessage), { safeMessage, code: "ERR_INVALID_ARG_VALUE" });
+  }
   const models = model ? [model] : await listImageModels(config, family, signal);
   if (!models.length) {
     throw Object.assign(new Error(`当前没有可用的 ${family} 生图模型；请检查账号授权或管理页模型列表。`),
@@ -102,5 +112,5 @@ export async function generateImage(config, { family, prompt, model, size = DEFA
   const chosen = models[0];
   const image = await requestImage(config, { family, model: chosen, prompt, size }, signal);
   const saved = await saveImage(config, { model: chosen, ...image });
-  return { generated: true, family, model: chosen, size, ...saved };
+  return { generated: true, family, model: chosen, ...(family === "gemini" ? { requestedSize: size } : { size }), ...saved };
 }

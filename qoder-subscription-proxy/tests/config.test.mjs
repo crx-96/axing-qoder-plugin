@@ -45,7 +45,7 @@ test("默认数据目录跨安装版本稳定保留授权，隔离旧桥且不�
     import { join } from "node:path";
     import { loadConfig, PLUGIN_VERSION } from ${JSON.stringify(moduleUrl)};
     assert.equal(homedir(), ${JSON.stringify(root)});
-    assert.equal(PLUGIN_VERSION, "1.0.7");
+    assert.equal(PLUGIN_VERSION, "1.0.8");
     const oldDir = join(homedir(), ".zcode", "zcode-subscription-proxy", "data");
     await mkdir(join(oldDir, "auths"), { recursive: true });
     await writeFile(join(oldDir, "launcher-secrets.json"), JSON.stringify({ apiKey: "old-plugin-api", mgmtKey: "old-management" }));
@@ -76,7 +76,7 @@ test("插件、市场和 MCP 对外版本保持一致", async () => {
   const marketplace = JSON.parse(await readFile(join(pluginRoot, "..", ".qoder-plugin", "marketplace.json"), "utf8"));
   const listing = marketplace.plugins.find((plugin) => plugin.name === manifest.name);
   assert.ok(listing);
-  assert.equal(PLUGIN_VERSION, "1.0.7");
+  assert.equal(PLUGIN_VERSION, "1.0.8");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(resolve(pluginRoot, "..", listing.source), pluginRoot);
@@ -109,7 +109,7 @@ test("Qoder 清单使用独立标识、根变量与 timeout 字段", async () =>
 test("路径与派生地址符合接口，相对 bin/data 路径解析为绝对路径", async (t) => {
   const { root, load } = await fixture(t);
   const config = await load();
-  assert.equal(PLUGIN_VERSION, "1.0.7");
+  assert.equal(PLUGIN_VERSION, "1.0.8");
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(DEFAULT_PORT, 19787);
@@ -431,7 +431,31 @@ test("已有 YAML 必须显式禁用远程管理，缺失或伪布尔值在加�
     original.replace("  allow-remote: false", "  allow-remote: false # local only")));
 });
 
-test("不假装支持通用 YAML：拒绝重复键、锚点、合并、标签、流式和多行结构", async (t) => {
+test("合法普通请求头与 flow 安全字段可加载且不绕过校验", async (t) => {
+  const { load } = await fixture(t);
+  const config = await load({ BRIDGE_API_KEY: "flow-api" });
+  const text = [
+    'config-version: 8',
+    'server: {host: 127.0.0.1, port: 19787, tls: {enable: false}}',
+    `management: {secret-key: ${JSON.stringify(config.mgmtKey)}, allow-remote: false}`,
+    'access: {api-keys: ["flow-api"]}',
+    `oauth: {auth-dir: ${JSON.stringify(config.authDir)}}`,
+    'headers:', '  X-Custom-Header: Bearer two words', '  _Request_ID: request identifier', '',
+  ].join("\r\n");
+  assert.doesNotThrow(() => validateExistingConfig(config, text));
+  await writeFile(config.configPath, text);
+  assert.equal((await load({ BRIDGE_API_KEY: "flow-api" })).apiKey, "flow-api");
+  assert.equal(await readFile(config.configPath, "utf8"), text);
+  for (const [from, to, field] of [
+    ['host: 127.0.0.1', 'host: 0.0.0.0', /server.host/],
+    ['allow-remote: false', 'allow-remote: true', /management.allow-remote/],
+    ['port: 19787', 'port: 9000', /server.port/],
+    ['["flow-api"]', '[{key: "flow-api"}]', /access.api-keys/],
+    ['["flow-api"]', '["other"]', /access.api-keys/],
+  ]) assert.throws(() => validateExistingConfig(config, text.replace(from, to)), field);
+});
+
+test("不假装支持通用 YAML：拒绝重复键、锚点、合并、标签和多行结构", async (t) => {
   const { load } = await fixture(t);
   const config = await load({ BRIDGE_API_KEY: "PRIVATE-YAML-API" });
   const original = renderConfigYaml(config);
@@ -445,8 +469,6 @@ test("不假装支持通用 YAML：拒绝重复键、锚点、合并、标签、
     original.replace('  host: "127.0.0.1"', "  host: !!str 127.0.0.1"),
     original.replace('  host: "127.0.0.1"', "  host: |\n    127.0.0.1"),
     original.replace('  host: "127.0.0.1"', '  host: "127.0.0.1\n    "'),
-    original.replace('    - "PRIVATE-YAML-API"', '    - { key: "PRIVATE-YAML-API" }'),
-    original.replace('  api-keys:\n    - "PRIVATE-YAML-API"', '  api-keys: ["PRIVATE-YAML-API"]'),
     original.replace("  port: 19787", "  port: 19787\n   unknown: value"),
     `${original}---\nserver:\n  host: 0.0.0.0\n`,
     `${original}unknown: !secret PRIVATE-YAML-API\n`,
@@ -498,7 +520,7 @@ test("共享 YAML 读取拒绝解码重复键、控制字符键及合并等扩�
     "extra:\n  - name: one\n    'name': two",
     ...["\0", "\n", "\t", "\u007f", "\u0085", "\u2028"].map((key) => `${JSON.stringify(key)}: value`),
     '"<<": {}', "'<<': {}", "<<: *anchor", "extra: &anchor value", "extra: *anchor",
-    "extra: !tag value", "extra: [one]", "extra: {one: two}", "extra: |\n  value",
+    "extra: !tag value", "extra: |\n  value",
   ]) assert.throws(() => parseConfigYaml(text), /结构不受支持/);
 });
 
@@ -551,6 +573,44 @@ test("损坏的 secrets 不重新生成且异常不回显敏感内容", async (t
     await assert.rejects(load(), (error) => noSecret(error, ["PRIVATE-JSON-SECRET", text]));
     assert.equal(await readFile(path, "utf-8"), text);
   }
+});
+
+test("密钥加载先获取生命周期锁，再读取或迁移共享凭据", { timeout: 10000 }, async (t) => {
+  const { root, env } = await fixture(t);
+  await mkdir(env.BRIDGE_DATA_DIR);
+  const file = join(env.BRIDGE_DATA_DIR, "launcher-secrets.json");
+  await writeFile(file, JSON.stringify({ apiKey: "retained-fixture-key" }));
+  const script = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { setTimeout as delay } from 'node:timers/promises';
+    const file = ${JSON.stringify(file)};
+    let reads = 0;
+    const original = fs.promises.readFile;
+    fs.promises.readFile = async (path, ...options) => {
+      if (String(path) === file) reads++;
+      return original(path, ...options);
+    };
+    syncBuiltinESMExports();
+    const { loadConfig } = await import(${JSON.stringify(moduleUrl)});
+    const { withLifecycleLock } = await import(${JSON.stringify(new URL("../server/lifecycle-lock.mjs", import.meta.url).href)});
+    let pending, readsBeforeRelease;
+    await withLifecycleLock({ dataDir: ${JSON.stringify(env.BRIDGE_DATA_DIR)}, port: 19787 }, async () => {
+      pending = Promise.all(Array.from({ length: 2 }, () => loadConfig({ pluginRoot: ${JSON.stringify(pluginRoot)}, env: ${JSON.stringify(env)} })));
+      await delay(100);
+      readsBeforeRelease = reads;
+    });
+    const configs = await pending;
+    assert.equal(readsBeforeRelease, 0, '持锁迁移期间其他加载者不得在锁外读取凭据');
+    assert.ok(reads > 0);
+    assert.equal(configs[0].apiKey, 'retained-fixture-key');
+    assert.equal(configs[0].mgmtKey, configs[1].mgmtKey);
+    assert.deepEqual(JSON.parse(await fs.promises.readFile(file, 'utf8')), { apiKey: configs[0].apiKey, mgmtKey: configs[0].mgmtKey });
+    assert.deepEqual(await fs.promises.readdir(${JSON.stringify(env.BRIDGE_DATA_DIR)}), ['launcher-secrets.json']);
+  `;
+  const result = await execFileAsync(process.execPath, ["--input-type=module", "-e", script], { cwd: root, timeout: 8000 });
+  assert.equal(result.stderr, "");
 });
 
 test("首次同进程并发加载只发布一组完整密钥并清理临时文件", async (t) => {

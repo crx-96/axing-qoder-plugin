@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { readFile, readdir, readlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { promisify, isDeepStrictEqual } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 
 /** 使用系统工具时限制运行时间和输出，失败一律禁止认证。 */
 const execute = promisify(execFile);
@@ -19,9 +20,12 @@ async function linuxOwns(pid, serverPort, clientPort) {
   const rows = await readFile("/proc/net/tcp", "utf8");
   const peer = rows.split("\n").map(row => row.trim().split(/\s+/)).find(fields =>
     fields[1] === endpoint(serverPort) && fields[2] === endpoint(clientPort) && fields[3] === "01");
-  if (!peer || !/^[1-9]\d*$/.test(peer[9])) return false;
   const directory = `/proc/${pid}/fd`;
-  for (const entry of await readdir(directory)) {
+  const entries = await readdir(directory);
+  // 握手完成而 accept 尚未执行时 inode 为 0；只有这一窗口允许等待。
+  if (!peer || peer[9] === "0") return null;
+  if (!/^[1-9]\d*$/.test(peer[9])) return false;
+  for (const entry of entries) {
     try { if (await readlink(join(directory, entry)) === `socket:[${peer[9]}]`) return true; }
     catch (error) { if (error.code !== "ENOENT") throw error; }
   }
@@ -56,7 +60,8 @@ export async function connectOwned(config, identify, signal) {
   active.throwIfAborted();
   const socket = createConnection({ host: config.host, port: config.port, family: 4 });
   // net 的 signal 会在之后到期并销毁长请求；仅在建连和验证阶段挂自己的取消监听。
-  const cancel = () => socket.destroy();
+  let rejectVerification;
+  const cancel = () => { socket.destroy(); rejectVerification?.(unverified()); };
   active.addEventListener("abort", cancel, { once: true });
   socket.on("error", () => { /* 在异步归属查询期间由 destroyed 检查统一失败。 */ });
   try {
@@ -65,8 +70,27 @@ export async function connectOwned(config, identify, signal) {
       socket.once("close", () => reject(unverified()));
       socket.once("error", reject);
     });
-    const id = await identify();
-    if (!Number.isSafeInteger(id?.pid) || id.pid <= 0 || id.pid > 0x7fffffff || !await ownsSocket(id.pid, config.port, socket.localPort, active) || socket.destroyed) throw unverified();
+    const verify = async () => {
+      active.throwIfAborted();
+      const id = await identify();
+      active.throwIfAborted();
+      if (!Number.isSafeInteger(id?.pid) || id.pid <= 0 || id.pid > 0x7fffffff) throw unverified();
+      const original = { ...id };
+      let owned;
+      do {
+        active.throwIfAborted();
+        if (socket.destroyed) throw unverified();
+        owned = await ownsSocket(original.pid, config.port, socket.localPort, active);
+        if (owned === null) await delay(25, undefined, { signal: active });
+      } while (owned === null);
+      active.throwIfAborted();
+      if (!owned || socket.destroyed) throw unverified();
+      // 等待期间记录可能被另一会话替换；同 PID 不能代替完整实例身份。
+      if (process.platform === "linux" && !isDeepStrictEqual(original, await identify())) throw unverified();
+      active.throwIfAborted();
+      if (socket.destroyed) throw unverified();
+    };
+    await Promise.race([new Promise((_, reject) => { rejectVerification = reject; }), verify()]);
     active.throwIfAborted();
     return socket;
   } catch {

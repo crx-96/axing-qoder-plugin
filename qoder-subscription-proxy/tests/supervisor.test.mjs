@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { once } from "node:events";
+import { once, EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -234,6 +234,57 @@ async function mcpClient(t, env, beforeCleanup, { initialize = true } = {}) {
       return JSON.parse(result.content.find((item) => item.type === "text").text);
     },
   };
+}
+
+async function shutdownFixture(t) {
+  const url = new URL("../server/supervisor.mjs", import.meta.url);
+  const source = (await readFile(url, "utf8"))
+    .replaceAll("import.meta.url", JSON.stringify(url.href))
+    .replace(/from "(\.\/[^"]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, url).href)}`);
+  const module = await import(`data:text/javascript;base64,${Buffer.from(
+    `const process = { platform: "linux", env: {}, pid: 1 };\n${source}\nexport { supervisors as ownedForTest };\n// ${Math.random()}`
+  ).toString("base64")}`);
+  const config = testConfig(await directoryFixture(t));
+  const identity = { pid: 123, creationDate: "instance", commandLine: "command", executablePath: config.binPath,
+    controlPort: 12345, controlToken: "token", binPath: config.binPath, configPath: config.configPath, panelRevision: "revision" };
+  await writeFile(config.pidPath, JSON.stringify(identity));
+  const child = new EventEmitter();
+  Object.assign(child, { pid: 456, exitCode: null, signalCode: null,
+    stdin: { end() { queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0, null); }); } } });
+  module.ownedForTest.set(config.dataDir, { child, config, identity });
+  return { config, identity, child, module };
+}
+
+for (const mode of ["same", "different-token", "different-path", "different-revision", "failed", "signaled", "borrower", "concurrent"]) {
+  test(`POSIX owned shutdown ${mode} 仅清理已确认回收的完整实例记录`, async (t) => {
+    const f = await shutdownFixture(t);
+    let expected = f.identity;
+    if (mode.startsWith("different")) {
+      const field = { "different-token": "controlToken", "different-path": "binPath", "different-revision": "panelRevision" }[mode];
+      expected = { ...expected, [field]: "replacement" };
+      await writeFile(f.config.pidPath, JSON.stringify(expected));
+    }
+    if (mode === "failed" || mode === "signaled") {
+      f.child.stdin.end = () => queueMicrotask(() => {
+        f.child.exitCode = mode === "failed" ? 1 : null;
+        f.child.signalCode = mode === "signaled" ? "SIGKILL" : null;
+        f.child.emit("exit", f.child.exitCode, f.child.signalCode);
+      });
+    }
+    if (mode === "borrower") f.module.ownedForTest.clear();
+    if (mode === "concurrent") {
+      let pending;
+      await withLifecycleLock(f.config, async () => {
+        pending = f.module.shutdownOwnedBridges();
+        expected = { ...expected, creationDate: "watchdog-new-instance" };
+        await writeFile(f.config.pidPath, JSON.stringify(expected));
+      });
+      await pending;
+    } else await f.module.shutdownOwnedBridges();
+    if (mode === "same") assert.equal(await readPid(f.config), null);
+    else assert.deepEqual(await readPid(f.config), expected);
+    if (!["borrower", "signaled"].includes(mode)) assert.notEqual(f.child.exitCode, null, "必须先等待所拥有的托管器退出");
+  });
 }
 
 test("probeBridge 只有完整根签名才识别为桥，不泄漏认证头", async (t) => {

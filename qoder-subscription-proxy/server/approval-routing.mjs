@@ -109,6 +109,18 @@ export function ensureApprovalRouting(text) {
   const signatures = ruleSignatures(parsed, activePath);
   const legacyIndexes = new Set(signatures.flatMap((signature, index) => legacySignatures.has(signature) ? [index] : []));
   if (legacyIndexes.size) {
+    const list = parsed.nodes.get(JSON.stringify(activePath));
+    if (list.flow) {
+      const row = parsed.lines[list.line];
+      const retained = signatures.flatMap((_, index) => {
+        if (legacyIndexes.has(index)) return [];
+        const { start, end } = parsed.nodes.get(JSON.stringify([...activePath, index])).flow;
+        return [row.slice(start, end)];
+      });
+      // 内联列表可能与其他配置共行，只替换列表范围，不能按物理行删除。
+      parsed.lines[list.line] = row.slice(0, list.flow.start) + `[${retained.join(", ")}]` + row.slice(list.flow.end);
+      return ensureApprovalRouting(parsed.lines.join(parsed.newline));
+    }
     // 只移除完整匹配旧内置规则的语法行，用户修改过的规则、注释及空行保留。
     const removedLines = new Set();
     for (const [key, node] of parsed.nodes) {

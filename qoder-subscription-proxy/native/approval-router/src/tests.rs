@@ -160,37 +160,173 @@ fn route_for_catalog(model: &str, catalog: &Value) -> Value {
     approval_route(&request, &responses(CLASSIFIERS[0]), model, catalog)
 }
 
+fn route_request(format: &str, model: &str, provider: &str, body: &Value) -> Value {
+    let request = json!({
+        "SourceFormat": format, "RequestedModel": model,
+        "Body": STANDARD.encode(serde_json::to_vec(body).unwrap()),
+        "AvailableProviders": [provider]
+    });
+    let Some((model, decoded)) = approval_request(&request) else {
+        return json!({"Handled": false});
+    };
+    approval_route(&request, &decoded, model, &catalog(provider, &[model]))
+}
+
+#[test]
+fn codex_routes_only_known_independent_approval_requests() {
+    for prefix in CLASSIFIERS {
+        for role in ["system", "developer"] {
+            for effort in ["none", "low"] {
+                for tools in [Value::Null, json!([])] {
+                    let mut body = responses(prefix);
+                    body["input"][0]["role"] = json!(role);
+                    body["reasoning"] = json!({"effort": effort});
+                    body["tools"] = tools;
+                    let original = body.clone();
+                    assert_eq!(
+                        route_request("openai-response", "gpt-6-astra", "codex", &body),
+                        json!({"Handled": true, "TargetKind": "provider", "Target": "codex",
+                            "TargetModel": "codex-auto-review(low)"})
+                    );
+                    assert_eq!(body, original);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn codex_retains_original_protocol_effort_and_classifier_scope() {
-    let model = "gpt-6-astra";
-    let mut request = json!({"SourceFormat": "openai-response", "RequestedModel": model});
-    let models = catalog("codex", &[model]);
-    let mut body = responses("You are a security custom classifier.");
-    for effort in ["none", "low"] {
+    let mut body = responses(CLASSIFIERS[0]);
+    for effort in [
+        json!("high"),
+        json!("xhigh"),
+        json!("auto"),
+        json!("minimal"),
+        json!(""),
+        Value::Null,
+    ] {
         body["reasoning"] = json!({"effort": effort});
         assert_eq!(
-            approval_route(&request, &body, model, &models)["TargetModel"],
-            "codex-auto-review(low)"
-        );
-    }
-    for effort in ["high", "xhigh", "auto", "minimal", ""] {
-        body["reasoning"] = json!({"effort": effort});
-        assert_eq!(
-            approval_route(&request, &body, model, &models)["Handled"],
+            route_request("openai-response", "gpt-6-astra", "codex", &body)["Handled"],
             false
         );
     }
+    body.as_object_mut().unwrap().remove("reasoning");
+    assert_eq!(
+        route_request("openai-response", "gpt-6-astra", "codex", &body)["Handled"],
+        false
+    );
     body["reasoning"] = json!({"effort": "none"});
-    body["input"].as_array_mut().unwrap().truncate(1);
-    assert!(is_codex_review(&request, &body));
-    request["SourceFormat"] = json!("openai");
-    assert!(!is_codex_review(&request, &body));
-    request["SourceFormat"] = json!("openai-response");
-    request["RequestedModel"] = json!("not-gpt-model");
-    assert!(!is_codex_review(&request, &body));
-    request["RequestedModel"] = json!(model);
+    assert_eq!(
+        route_request("openai-response", "not-gpt-model", "codex", &body)["Handled"],
+        false
+    );
     body["input"][0]["content"] = json!(CLASSIFIERS[0]);
-    assert!(!is_codex_review(&request, &body));
+    assert_eq!(
+        route_request("openai-response", "gpt-6-astra", "codex", &body)["Handled"],
+        false
+    );
+
+    for (format, mut body) in [
+        (
+            "openai",
+            json!({"messages": [{"role": "system", "content": CLASSIFIERS[0]}, {"role": "user", "content": "Action"}]}),
+        ),
+        (
+            "claude",
+            json!({"system": CLASSIFIERS[0], "messages": [{"role": "user", "content": "Action"}]}),
+        ),
+        (
+            "gemini",
+            json!({"systemInstruction": {"parts": [{"text": CLASSIFIERS[0]}]}, "contents": [{"role": "user", "parts": [{"text": "Action"}]}]}),
+        ),
+        (
+            "openai-response",
+            json!({"instructions": CLASSIFIERS[0], "input": "Action"}),
+        ),
+        (
+            "openai-response",
+            json!({"instructions": CLASSIFIERS[0], "input": [{"role": "user", "content": "Action"}]}),
+        ),
+    ] {
+        body["reasoning"] = json!({"effort": "low"});
+        assert_eq!(
+            route_request(format, "gpt-6-astra", "codex", &body)["Handled"],
+            false,
+            "{format}: {body}"
+        );
+        assert_eq!(
+            route_request(format, "private-alias", "antigravity", &body)["TargetModel"],
+            REVIEWER
+        );
+    }
+}
+
+#[test]
+fn codex_rejects_ordinary_security_prompts_and_mixed_requests_through_full_route() {
+    for role in ["system", "developer"] {
+        for effort in ["none", "low"] {
+            for prefix in [
+                CLASSIFIERS[0],
+                CLASSIFIERS[1],
+                "You are a security expert. Help me review this application.",
+                "You are a security custom classifier.",
+                "Quoted: You are a security classifier for auto permission mode.",
+                "Quoted: You are a security monitor for an autonomous AI coding agent.",
+            ] {
+                let mut base = responses(prefix);
+                base["input"][0]["role"] = json!(role);
+                base["reasoning"] = json!({"effort": effort});
+                let mut cases = Vec::new();
+                if !CLASSIFIERS.contains(&prefix) {
+                    cases.push(base.clone());
+                }
+                let mut body = base.clone();
+                body["tools"] = json!([{"type": "function", "name": "execute"}]);
+                cases.push(body);
+                let mut body = base.clone();
+                body["tools"] = json!({"invalid": "tools"});
+                cases.push(body);
+                let mut body = base.clone();
+                body["input"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"role": "assistant", "content": "History"}));
+                cases.push(body);
+                let mut body = base.clone();
+                body["input"].as_array_mut().unwrap().truncate(1);
+                cases.push(body);
+                let mut body = base.clone();
+                body["input"][1]["role"] = json!("assistant");
+                cases.push(body);
+                let mut body = base.clone();
+                body["input"][0]["role"] = json!("user");
+                cases.push(body);
+                for instructions in ["Other instructions", CLASSIFIERS[0]] {
+                    let mut body = base.clone();
+                    body["instructions"] = json!(instructions);
+                    cases.push(body);
+                }
+                let mut body = base.clone();
+                body["input"][0]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"type": "input_text", "text": "Additional instructions"}));
+                cases.push(body);
+                let mut body = base.clone();
+                body["input"][0]["content"][0]["type"] = json!("text");
+                cases.push(body);
+                for body in cases {
+                    assert_eq!(
+                        route_request("openai-response", "gpt-6-astra", "codex", &body)["Handled"],
+                        false,
+                        "{body}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

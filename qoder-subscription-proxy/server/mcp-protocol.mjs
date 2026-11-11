@@ -33,6 +33,13 @@ const IMAGE_SCHEMA = {
   required: ["prompt"],
   additionalProperties: false,
 };
+const GEMINI_IMAGE_SCHEMA = {
+  ...IMAGE_SCHEMA,
+  properties: {
+    ...IMAGE_SCHEMA.properties,
+    size: { type: "string", description: "可选方图分辨率：1K、2K、4K，或对应的 1024x1024、2048x2048、4096x4096；默认 1K，实际支持范围取决于模型" },
+  },
+};
 /** 宿主可发现的代理管理工具；管理工具不接受参数，生图工具按 IMAGE_SCHEMA 校验。 */
 const TOOLS = [
   {
@@ -62,8 +69,8 @@ const TOOLS = [
   },
   {
     name: "image_gen_gemini",
-    description: "经本机订阅代理的聊天接口生图（gemini 系图片模型）。用户说 Gemini/谷歌生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体。",
-    inputSchema: IMAGE_SCHEMA,
+    description: "经本机订阅代理的聊天接口生图（gemini 系图片模型）。用户说 Gemini/谷歌生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体；requestedSize 表示请求的方图分辨率，不是实测图片尺寸。",
+    inputSchema: GEMINI_IMAGE_SCHEMA,
   },
 ];
 /** 只允许稳定错误标识出现在异常响应中，不转发异常 message、stack 或响应正文。 */

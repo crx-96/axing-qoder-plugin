@@ -326,6 +326,8 @@ for (const mode of ["EOF", "SIGKILL"]) {
     const record = await assertIdentity(f.config);
     if (mode === "EOF") await owner.endInput(); else await owner.killOwner();
     await assertReleased(f.config, record);
+    assert.deepEqual(await readPid(f.config), mode === "EOF" ? null : record,
+      "仅正常收尾确认回收后删除记录；SIGKILL 路径仍保留记录");
     assert.equal((await getStatus(f.config)).autoRecoveryPaused, false, "owner 退出不是用户暂停");
     await delay(2300);
     assert.equal((await probeBridge(f.config)).state, "offline", "退出的 MCP 不得残留 watchdog");
@@ -399,7 +401,7 @@ test("POSIX 控制端点消失时仅确认 PID 不存在才恢复陈旧记录", 
   assert.notEqual((await assertIdentity(f.config)).creationDate, stale.creationDate);
 });
 
-test("POSIX 升级核心路径时不接管存活旧实例，owner EOF 保留旧记录后可在原数据目录启动新核心", native, async (t) => {
+test("POSIX 升级核心路径时不接管存活旧实例，owner SIGKILL 保留旧记录后可在原数据目录启动新核心", native, async (t) => {
   const f = await fixture(t);
   const owner = await mcpClient(f);
   assert.equal((await owner.call("bridge_start")).ready, true);
@@ -432,10 +434,10 @@ test("POSIX 升级核心路径时不接管存活旧实例，owner EOF 保留旧�
     assert.deepEqual(await readPid(newConfig), oldRecord, "拒绝接管不能改写旧实例记录");
     await assertDataUnchanged();
 
-    // 必须由 EOF 回收，bridge_stop 会删除旧记录，无法复现路径升级后的校验回归。
-    await owner.endInput();
+    // SIGKILL 无法执行确认后的记录清理，保留升级遇到旧记录的回归覆盖。
+    await owner.killOwner();
     await assertReleased(f.config, oldRecord);
-    assert.deepEqual(await readPid(newConfig), oldRecord, "EOF 后必须留下路径 A 的陈旧记录");
+    assert.deepEqual(await readPid(newConfig), oldRecord, "未经正常收尾仍须保留路径 A 的陈旧记录");
     await assertDataUnchanged();
     const started = await ensureRunning(newConfig);
     assert.equal(started.started, true);
