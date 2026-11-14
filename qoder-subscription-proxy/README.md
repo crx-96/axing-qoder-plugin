@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.8
+# qoder订阅代理 · 1.0.9
 
 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
@@ -6,7 +6,7 @@
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生审批路由扩展，普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.8-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生扩展（审批路由与空补全处理），普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.9-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
@@ -14,8 +14,8 @@
 | 内置运行时 | Electron 内置 Node mode 或系统 Node 22+；Windows 启动器依赖 PowerShell 5.1、.NET Framework 与 Job Object |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh` 与系统进程工具；尚未实机验证 |
-| 核心 | 固定 CLIProxyAPI `v8.0.67` 原样不改，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
-| 审批扩展 | Rust `native/approval-router` cdylib，通过核心 `ModelRouter` 接口加载；随包提供当前平台库，不支持运行时下载/编译 |
+| 核心 | 固定 CLIProxyAPI `v8.0.69` 原样不改，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
+| 原生扩展 | Rust `native/approval-router` cdylib，通过核心 `ModelRouter` 与响应拦截接口加载；随包提供当前平台库，不支持运行时下载/编译 |
 | 不支持 | Windows 32 位、原生 Windows ARM64 及其他平台/架构 |
 
 ## 连接器与管理页按钮
@@ -58,7 +58,7 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 
 ## 核心配置策略
 
-插件生成的 `config.yaml` 只包含本机安全必需字段：回环监听与固定端口、仅本机管理（`allow-remote: false`）、固定随包管理页、客户端 API Key、授权目录。**重试、冷却、流式心跳、启动缓冲等请求参数一律沿用 CLIProxyAPI 上游默认值**，插件不写入、不复位、不迁移；如需调整请在管理页或 `config.yaml` 中自行设置。
+插件生成的 `config.yaml` 只包含本机安全必需字段：回环监听与固定端口、仅本机管理（`allow-remote: false`）、固定随包管理页、客户端 API Key、授权目录。**重试、冷却、流式心跳、启动缓冲等请求参数一律沿用 CLIProxyAPI 上游默认值**，插件不写入、不复位、不迁移；如需调整请在管理页或 `config.yaml` 中自行设置。Antigravity 纯思考空补全的插件侧续写不属于这些核心重试参数，见[空补全自动续写](#空补全自动续写)。
 
 配置校验支持块式映射/列表、单行内联列表与映射、大小写及下划线键、带空格的单行字符串；仍拒绝重复键、锚点、别名、合并、标签及多文档，防止与核心对安全字段产生不同解释。内联配置的编辑与旧审批规则迁移仅改动对应范围，保留同行其他配置。
 
@@ -84,6 +84,21 @@ API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换
 正常切换只记录 **INFO**，含渠道、源模型、目标模型和 `low`，不记录提示正文或凭据；真实调用失败仍正常报错。审核输出不改，不伪造允许。已选定路由后，目标模型无权限或不可用时返回错误，不自动回到昂贵模型。未匹配、来源不唯一时保留原路由；如果扩展无法读取模型目录或自身运行异常，核心也可能保留原路由并记录异常，因此这些异常情况下不保证节省额度，但不会跳过宿主审批。
 
 ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approval-router.dll` / `.dylib` / `.so` 经平台、ABI 和 SHA256 校验后安装到 `dataDir/approval-router/<sha256>/`。扩展缺失、损坏、未被核心真实注册启用都会阻止就绪，不能跳过校验或在线补编译。升级不会自动重启正在处理请求的旧桥；等待请求结束后调用 `bridge_stop`，再 `bridge_start` 才会加载新版扩展，仅重连 MCP 不保证重启共享桥。现有端口和 API 不变。
+
+## 空补全自动续写
+
+上游 Antigravity 对特定长会话或高思考档位偶发**纯思考空补全**：HTTP 200 正常结束，响应只有 `thoughtSignature` 与 `thinking`，可见文本和工具调用均为 0。Google 社区与官方论坛已确认这是 API 侧缺陷，官方 Antigravity CLI（`agy`）通过内部的 `EmptyOutputContinuationCheckHook` 在检测到空输出时自动追加一次续写；CLIProxyAPI `v8.0.69` 尚未为 Antigravity 实现同类处理（`v8.0.68` 只为 Devin 增加了空补全 failover，上游 [issue #5227](https://github.com/router-for-me/CLIProxyAPI/issues/5227) 已关闭但无 Antigravity 实现），因此客户端原样重试同一 payload 通常会连续失败。
+
+插件随包的原生扩展为此注册响应拦截能力，作为**插件侧的临时兼容**：
+
+- 仅处理 **OpenAI Chat Completions** 入口且模型经宿主模型目录确认属于 **Antigravity** 的请求；OpenAI 入口下的其他渠道或模型只记录诊断，不额外调用模型，其他协议不参与空补全检测。
+- 流式在终止分片、非流式在完整响应中检测到“正常结束但零可见文本/工具调用”时，使用宿主模型执行接口带原会话追加一条继续指令，同步续写一次，并合并文本、工具调用与两次调用的 usage。每个请求最多续写一次。
+- `finish_reason` 为 `length`（输出上限截断）或 `content_filter` 时不视为空补全，保持上游原行为。
+- 已由 `ModelRouter` 改投审核模型的审批分类请求不续写，避免追加指令破坏分类器签名或绕过审批路由；这类请求仍按客户端原逻辑重试。
+- 续写成功、失败或跳过都会以 INFO/WARN 写入 `bridge.log`（`空补全已自动续写` / `空补全续写失败` / `空补全未续写`），只含模型、渠道、计费与原因，不记录提示正文或凭据。
+- 续写会额外消耗一次模型调用额度；这是恢复可用性的主动取舍，不是核心配置里的请求重试，也不会改变重试、冷却或心跳等上游默认值。
+
+**移除条件**：当 CLIProxyAPI 后续版本为 Antigravity 原生实现空补全检测、续写或 failover 后，应删除本插件的空补全拦截处理，直接采用上游行为；仅在核心仍未处理时保留本节兼容。当前固定核心版本为 `v8.0.69`，尚未包含该上游处理。该兼容只覆盖 Chat Completions；Responses、Claude Messages、Gemini 原生入口的空补全不会被自动续写。若上游连终止分片都没有（完全空响应体），流已经结束，插件无法再注入内容，仍由客户端按原逻辑失败。自定义 `BRIDGE_BIN` 也须支持响应拦截与宿主模型执行回调，否则只能保留旧核心行为，无法使用本兼容。
 
 ## MCP 工具与生图
 
@@ -111,7 +126,7 @@ GPT 的 `size` 直接交给图片接口。Gemini 的 `size` 支持方图 `1K`、
 | `bridge.pid`、`bridge.paused` | 归属记录与持久暂停状态 |
 | `bridge.proxy` | 插件上次同步进 `requests.proxy-url` 的系统代理值，用于区分用户自管代理 |
 | `runtimes/` | 经校验的固定版本、当前平台核心 |
-| `approval-router/<sha256>/` | 经平台、ABI 和摘要校验的原生审批扩展，核心只扫描此独立目录 |
+| `approval-router/<sha256>/` | 经平台、ABI 和摘要校验的原生扩展（审批路由与空补全处理），核心只扫描此独立目录 |
 | `management-panel/`、`generated/` | 生成的管理页与生图工具输出 |
 
 保持 `management.allow-remote: false`，仅在可信本机使用；不要通过代理或隧道公开管理服务。Windows 权限由用户目录 ACL 决定，POSIX 新建私有目录用 `0700`、敏感文件用 `0600`。卸载不自动删除授权、密钥、日志和图片，也不等于撤销服务商授权。
@@ -147,6 +162,7 @@ GPT 的 `size` 直接交给图片接口。Gemini 的 `size` 支持方图 `1K`、
 - **审批扩展缺失 / 损坏 / 未启用**：安装包用户重新获取匹配平台的可信 ZIP；源码用户先构建本平台扩展。核对平台、ABI、SHA256 与核心实际注册状态，不绕过就绪检查。自定义 `BRIDGE_BIN` 也须支持此扩展。
 - **扩展配置冲突**：已有自定义 `plugins.dir` 或其他扩展时会停止准备，不覆盖；先由用户协调配置归属，不把其他扩展复制进审批扩展目录。
 - **审批目标模型报错**：核对对应渠道权限、模型可用性及上游错误；不会伪造审批通过，也不自动切回原昂贵模型。
+- **模型偶发空回复或回合失败**：Antigravity 的纯思考空补全会由原生扩展自动续写一次；在 `bridge.log` 搜索 `空补全` 查看是否命中、续写是否成功。未命中时确认入口为 Chat Completions、模型渠道为 Antigravity，并检查扩展是否实际加载；其他协议或渠道目前只诊断、不续写。若续写仍为空，可降低思考档位或更换模型后重试，不反复重启本机代理。
 - **下载失败（仅未随包的源码运行）**：检查 curl、HTTPS、代理与目录权限后重试；此下载回退仅适用于核心，不适用于原生扩展。
 - **切换 TUN / 系统代理后出口不符合预期**：同步只发生在冷启动，`bridge_stop` 再 `bridge_start`；系统代理不可达且默认路由确认由隧道承载时才写入显式 `direct`。空值仍可能使用环境代理，需要固定出口请自行填写 `requests.proxy-url`，清空或删除可恢复跟随。
 

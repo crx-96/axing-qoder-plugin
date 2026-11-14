@@ -456,7 +456,8 @@ test("原生核心仅将 GPT 的 Qoder 审批请求改为 codex-auto-review low"
     ...modelNames.flatMap(model => [
       `        - name: ${model}`, `          alias: ${model}`, "          support-configuration-update: true",
       "          thinking:", "            levels:",
-      "              - low", "              - medium", "              - high", "              - xhigh", "              - max",
+      // v8.0.69 会按模型声明的档位校验 effort；显式声明 none 才能验证普通请求不被改写。
+      "              - none", "              - low", "              - medium", "              - high", "              - xhigh", "              - max",
     ]),
     "      keys:", "        - api-key: isolated-upstream", "          disable-codex-cloaking: true",
     "  openai-compatibility:", "    - name: isolated-compatible",

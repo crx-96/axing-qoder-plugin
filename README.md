@@ -6,15 +6,15 @@
 
 ## 下载与安装
 
-本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.8**。
+本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.9**。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.0.8-win32-x64.zip` |
-| macOS x64 | `qoder-subscription-proxy-v1.0.8-darwin-x64.zip` |
-| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.0.8-darwin-arm64.zip` |
-| Linux x64 | `qoder-subscription-proxy-v1.0.8-linux-x64.zip` |
-| Linux ARM64 | `qoder-subscription-proxy-v1.0.8-linux-arm64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.0.9-win32-x64.zip` |
+| macOS x64 | `qoder-subscription-proxy-v1.0.9-darwin-x64.zip` |
+| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.0.9-darwin-arm64.zip` |
+| Linux x64 | `qoder-subscription-proxy-v1.0.9-linux-x64.zip` |
+| Linux ARM64 | `qoder-subscription-proxy-v1.0.9-linux-arm64.zip` |
 
 按当前源码构建的每个安装包内置对应平台的 CLIProxyAPI 核心及原生审批路由扩展；普通安装者无需 Rust，也不会在线下载或编译扩展。请按本机系统与架构选择，不要混用。以下说明描述当前源码设计，不表示这些变更已发布或已完成 Desktop 安装验收。
 
@@ -36,7 +36,7 @@ mkdir dist
 node qoder-subscription-proxy/scripts/build-approval-router.mjs win32-x64
 # 获取并校验本平台官方核心（归档与二进制两级 SHA256）
 node qoder-subscription-proxy/scripts/fetch-core.mjs win32-x64
-node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.0.8-win32-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.0.9-win32-x64.zip
 ```
 
 在其他宿主上，将三条命令的平台参数及 ZIP 文件名改为本机的 `darwin-x64`、`darwin-arm64`、`linux-x64` 或 `linux-arm64`。构建脚本省略平台参数时使用当前 Node 宿主平台，拒绝伪跨编译；五平台安装包须由对应宿主或 GitHub 原生 runner 矩阵分别构建。`fetch-core.mjs all` 仍可一次下载五平台**官方核心**，但不能代替五平台原生扩展构建。
@@ -55,8 +55,8 @@ ZIP 根目录直接是插件内容，不再套一层仓库或插件目录。非 
 
 - 插件清单为 `qoder-subscription-proxy/.qoder-plugin/plugin.json`；MCP 使用 `${QODER_PLUGIN_ROOT}` 和 `timeout: 660000`，与 Desktop 自带 `recordAndReplay` 资源一致，但不等于安装已验收。仓库 `.qoder-plugin/marketplace.json` 另按 Qoder CLI 市场规范保留，不据此承诺 Desktop 市场导入。
 - 已核对的桌面版本为 **Qoder Desktop 0.5.7**；CN 版程序名为 `Qoder CN.exe`，国际版为 `Qoder.exe`。入口可复用桌面内置 Node mode 或系统 Node.js 22+。
-- 安装包按平台拆分，各自内置固定 `v8.0.67` 的当前平台 CLIProxyAPI 核心；首次 MCP 启动把随包核心校验 SHA256 后安装到本机缓存，无需联网下载。仅从源码直接运行（未随包）时才回退到官方 Release 下载，同样校验归档与二进制 SHA256。
-- 官方 CLIProxyAPI `v8.0.67` 核心原样不改；审批模型切换由独立 Rust `ModelRouter` 扩展完成，端口/API 不变。扩展校验平台、ABI、SHA256 后安装至 `dataDir/approval-router/<sha256>/`，只扫描该独立目录；缺失、损坏或未被核心真实注册启用均阻止就绪。已有自定义插件目录或其他扩展配置会明确报冲突，不覆盖。详见[审批路由说明](qoder-subscription-proxy/README.md#原生审批路由)。
+- 安装包按平台拆分，各自内置固定 `v8.0.69` 的当前平台 CLIProxyAPI 核心；首次 MCP 启动把随包核心校验 SHA256 后安装到本机缓存，无需联网下载。仅从源码直接运行（未随包）时才回退到官方 Release 下载，同样校验归档与二进制 SHA256。
+- 官方 CLIProxyAPI `v8.0.69` 核心原样不改；审批模型切换与 Antigravity 纯思考空补全续写由独立 Rust 扩展完成，端口/API 不变。扩展校验平台、ABI、SHA256 后安装至 `dataDir/approval-router/<sha256>/`，只扫描该独立目录；缺失、损坏或未被核心真实注册启用均阻止就绪。已有自定义插件目录或其他扩展配置会明确报冲突，不覆盖。详见[原生扩展说明](qoder-subscription-proxy/README.md#原生审批路由)与[空补全自动续写](qoder-subscription-proxy/README.md#空补全自动续写)。
 - 安装后可离线准备随包核心和扩展；远程授权与模型服务仍需要网络。自定义 `BRIDGE_BIN` 仍不下载、不替换，但必须兼容并真实启用扩展。升级不会自动重启仍在处理请求的旧桥，须等请求结束后 `bridge_stop` / `bridge_start`。
 - `prepare-posix-marketplace.sh` 仅保留给支持本地市场的高级兼容客户端；尚未确认 Qoder Desktop 提供自定义市场 UI，不将其作为 Desktop 安装步骤。
 - 默认端口 `19787`，数据位于 `~/.qoder/qoder-subscription-proxy/data`。CN 版也使用这个插件专属稳定目录，**不是 Qoder App 设置目录**。管道、缓存和锁与兄弟 Zcode 插件隔离，不复制真实账号或旧运行数据。

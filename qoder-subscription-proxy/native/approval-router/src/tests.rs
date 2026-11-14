@@ -1,5 +1,8 @@
 use super::*;
 
+/// HOST 是进程级静态；涉及宿主回调替身的测试必须串行，避免并行测试互相覆盖。
+static HOST_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn responses(prefix: &str) -> Value {
     json!({"input": [
         {"role": "system", "content": [{"type": "input_text", "text": format!("{prefix}\nKeep the host policy unchanged.")}]},
@@ -344,6 +347,9 @@ fn normal_route_logs_are_info_and_never_include_prompt_or_credentials() {
 
 #[test]
 fn abi_reinitialization_replaces_host_callbacks_after_shutdown() {
+    let _serial = HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     unsafe extern "C" fn callback(
         context: *mut c_void,
         _method: *const c_char,
@@ -404,7 +410,20 @@ fn abi_registration_owns_and_releases_exact_response_buffer() {
         let value: Value =
             serde_json::from_slice(std::slice::from_raw_parts(response.ptr, response.len)).unwrap();
         assert_eq!(value["ok"], true);
+        assert_eq!(value["result"]["schema_version"], 10);
         assert_eq!(value["result"]["capabilities"]["model_router"], true);
+        assert_eq!(
+            value["result"]["capabilities"]["response_interceptor"],
+            true
+        );
+        assert_eq!(
+            value["result"]["capabilities"]["response_stream_interceptor"],
+            true
+        );
+        assert_eq!(
+            value["result"]["capabilities"]["request_lifecycle_plugin"],
+            true
+        );
         assert_eq!(value["result"]["metadata"]["Name"], "qoder-approval-router");
         plugin_free(response.ptr as *mut c_void, response.len);
         assert_eq!(
@@ -414,4 +433,393 @@ fn abi_registration_owns_and_releases_exact_response_buffer() {
         assert!(response.ptr.is_null());
         assert_eq!(cliproxy_plugin_init(ptr::null(), ptr::null_mut()), 1);
     }
+}
+
+/// 测试宿主替身：记录每次回调，并按方法返回模型目录或续写完成体。
+struct TestHost {
+    catalog: Value,
+    completion: Value,
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+unsafe extern "C" fn test_host_callback(
+    context: *mut c_void,
+    method: *const c_char,
+    request: *const u8,
+    request_len: usize,
+    response: *mut Buffer,
+) -> i32 {
+    let host = &*(context as *const TestHost);
+    let method = CStr::from_ptr(method).to_str().unwrap_or("").to_string();
+    let payload: Value = if request_len == 0 {
+        json!({})
+    } else {
+        serde_json::from_slice(std::slice::from_raw_parts(request, request_len))
+            .unwrap_or(Value::Null)
+    };
+    host.calls.lock().unwrap().push((method.clone(), payload));
+    let result = match method.as_str() {
+        "host.auth.models" => host.catalog.clone(),
+        "host.model.execute" => json!({
+            "status_code": 200,
+            "headers": {},
+            "body": STANDARD.encode(serde_json::to_vec(&host.completion).unwrap())
+        }),
+        _ => json!({}),
+    };
+    let bytes = serde_json::to_vec(&json!({"ok": true, "result": result}))
+        .unwrap()
+        .into_boxed_slice();
+    (*response).len = bytes.len();
+    (*response).ptr = Box::into_raw(bytes) as *mut u8;
+    0
+}
+
+/// 安装测试宿主并返回带自动清理的插件句柄，失败断言时也不会污染后续测试。
+struct HostGuard(PluginApi);
+
+impl Drop for HostGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(shutdown) = self.0.shutdown {
+                shutdown();
+            }
+        }
+    }
+}
+
+fn install_host(host: &mut TestHost) -> HostGuard {
+    let api = HostApi {
+        abi_version: ABI_VERSION,
+        host_ctx: ptr::from_mut(host).cast(),
+        call: Some(test_host_callback),
+        free_buffer: Some(plugin_free),
+    };
+    let mut plugin = PluginApi {
+        abi_version: 0,
+        call: None,
+        free_buffer: None,
+        shutdown: None,
+    };
+    unsafe { assert_eq!(cliproxy_plugin_init(&api, &mut plugin), 0) };
+    HostGuard(plugin)
+}
+
+fn call_method(method: &str, request: &Value) -> Value {
+    handle(method, serde_json::to_vec(request).unwrap().as_slice())
+        .unwrap_or_else(|error| panic!("{method} failed: {error}"))
+}
+
+fn continuation_completion(content: &str) -> Value {
+    json!({
+        "id": "chatcmpl-continuation",
+        "object": "chat.completion",
+        "model": "gemini-4-hydrogen-xhigh",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}
+    })
+}
+
+#[test]
+fn continuation_body_appends_prompt_and_forces_non_stream() {
+    let original = json!({
+        "model": "gemini-4-hydrogen-xhigh",
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "messages": [{"role": "user", "content": "private prompt"}]
+    });
+    let body = continuation_body(&original, "gemini-4-hydrogen-xhigh").unwrap();
+    assert_eq!(body["stream"], false);
+    assert!(body.get("stream_options").is_none());
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], CONTINUATION_PROMPT);
+    // 原始请求保持不变，避免续写构造污染已缓存的会话。
+    assert_eq!(original["messages"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn reasoning_only_and_tool_call_outputs_are_classified_correctly() {
+    let reasoning =
+        json!({"choices": [{"delta": {"reasoning_content": "thinking"}, "finish_reason": "stop"}]});
+    assert!(!has_visible_delta(&reasoning));
+    let text = json!({"choices": [{"delta": {"content": "answer"}, "finish_reason": null}]});
+    assert!(has_visible_delta(&text));
+    let tools = json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1"}]}, "finish_reason": "tool_calls"}]});
+    assert!(has_visible_delta(&tools));
+    assert_eq!(terminal_finish_reason(&reasoning), Some("stop".to_string()));
+    assert_eq!(terminal_finish_reason(&text), None);
+
+    let empty = json!({"choices": [{"message": {"role": "assistant", "content": null}, "finish_reason": "stop"}]});
+    assert!(!completion_has_visible(&empty));
+    let answered = json!({"choices": [{"message": {"role": "assistant", "content": "answer"}, "finish_reason": "stop"}]});
+    assert!(completion_has_visible(&answered));
+    let tool_answer = json!({"choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call-1"}]}, "finish_reason": "tool_calls"}]});
+    assert!(completion_has_visible(&tool_answer));
+    assert!(recoverable_finish(Some("stop")));
+    assert!(!recoverable_finish(Some("length")));
+    assert!(!recoverable_finish(Some("content_filter")));
+}
+
+#[test]
+fn stream_empty_completion_continues_once_and_merges_usage() {
+    let _serial = HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut host = TestHost {
+        catalog: catalog("antigravity", &["gemini-4-hydrogen-xhigh"]),
+        completion: continuation_completion("final answer"),
+        calls: Mutex::new(Vec::new()),
+    };
+    let _guard = install_host(&mut host);
+    let original = json!({
+        "model": "gemini-4-hydrogen-xhigh",
+        "stream": true,
+        "messages": [{"role": "user", "content": "private prompt"}]
+    });
+    let header = json!({
+        "RequestID": "req-stream",
+        "SourceFormat": "openai",
+        "RequestedModel": "gemini-4-hydrogen-xhigh",
+        "OriginalRequest": STANDARD.encode(serde_json::to_vec(&original).unwrap()),
+        "ChunkIndex": -1,
+        "host_callback_id": "callback-1"
+    });
+    assert_eq!(
+        call_method("response.intercept_stream_chunk", &header),
+        json!({})
+    );
+    let terminal = json!({
+        "id": "chatcmpl-empty",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "gemini-4-hydrogen-xhigh",
+        "choices": [{
+            "index": 0,
+            "delta": {"reasoning_content": "thinking"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10}
+    });
+    let chunk = json!({
+        "RequestID": "req-stream",
+        "SourceFormat": "openai",
+        "RequestedModel": "gemini-4-hydrogen-xhigh",
+        "ChunkIndex": 0,
+        "Body": STANDARD.encode(serde_json::to_vec(&terminal).unwrap()),
+        "host_callback_id": "callback-1"
+    });
+    let output = call_method("response.intercept_stream_chunk", &chunk);
+    let merged: Value = serde_json::from_slice(&decode_bytes(&output["Body"]).unwrap()).unwrap();
+    assert_eq!(merged["choices"][0]["delta"]["content"], "final answer");
+    assert_eq!(merged["choices"][0]["finish_reason"], "stop");
+    assert_eq!(merged["usage"]["prompt_tokens"], 30);
+    assert_eq!(merged["usage"]["completion_tokens"], 5);
+    assert_eq!(merged["usage"]["total_tokens"], 35);
+
+    // 同一请求的后续终止分片不再续写，也不重复计费。
+    let again = call_method("response.intercept_stream_chunk", &chunk);
+    assert!(again.get("Body").is_none());
+    let calls = host.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, _)| method == "host.model.execute")
+            .count(),
+        1
+    );
+    let execution = calls
+        .iter()
+        .find(|(method, _)| method == "host.model.execute")
+        .map(|(_, payload)| payload)
+        .unwrap();
+    let request_body: Value = serde_json::from_slice(
+        &STANDARD
+            .decode(execution["body"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request_body["stream"], false);
+    assert_eq!(request_body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(execution["host_callback_id"], "callback-1");
+}
+
+#[test]
+fn non_stream_empty_completion_replaces_body_and_sums_usage() {
+    let _serial = HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut host = TestHost {
+        catalog: catalog("antigravity", &["gemini-4-hydrogen-xhigh"]),
+        completion: continuation_completion("final answer"),
+        calls: Mutex::new(Vec::new()),
+    };
+    let _guard = install_host(&mut host);
+    let original = json!({
+        "model": "gemini-4-hydrogen-xhigh",
+        "stream": false,
+        "messages": [{"role": "user", "content": "private prompt"}]
+    });
+    let empty = json!({
+        "id": "chatcmpl-empty",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": null, "reasoning_content": "thinking"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10}
+    });
+    let request = json!({
+        "RequestID": "req-nonstream",
+        "SourceFormat": "openai",
+        "Model": "gemini-4-hydrogen-xhigh",
+        "RequestedModel": "gemini-4-hydrogen-xhigh",
+        "OriginalRequest": STANDARD.encode(serde_json::to_vec(&original).unwrap()),
+        "Body": STANDARD.encode(serde_json::to_vec(&empty).unwrap()),
+        "host_callback_id": "callback-2"
+    });
+    let output = call_method("response.intercept_after", &request);
+    let replaced: Value = serde_json::from_slice(&decode_bytes(&output["Body"]).unwrap()).unwrap();
+    assert_eq!(replaced["choices"][0]["message"]["content"], "final answer");
+    assert_eq!(replaced["model"], "gemini-4-hydrogen-xhigh");
+    assert_eq!(replaced["usage"]["prompt_tokens"], 30);
+    assert_eq!(replaced["usage"]["completion_tokens"], 5);
+    assert_eq!(replaced["usage"]["total_tokens"], 35);
+}
+
+#[test]
+fn non_stream_empty_completion_for_other_provider_is_unchanged() {
+    let _serial = HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut host = TestHost {
+        catalog: catalog("gemini", &["gemini-4-hydrogen-xhigh"]),
+        completion: continuation_completion("final answer"),
+        calls: Mutex::new(Vec::new()),
+    };
+    let _guard = install_host(&mut host);
+    let request = json!({
+        "RequestID": "req-other",
+        "SourceFormat": "openai",
+        "RequestedModel": "gemini-4-hydrogen-xhigh",
+        "OriginalRequest": STANDARD.encode(b"{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"),
+        "Body": STANDARD.encode(b"{\"choices\":[{\"message\":{\"content\":null},\"finish_reason\":\"stop\"}]}"),
+        "host_callback_id": "callback-3"
+    });
+    assert_eq!(call_method("response.intercept_after", &request), json!({}));
+    assert!(host
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(method, _)| method != "host.model.execute"));
+}
+
+#[test]
+fn request_completion_drops_stream_recovery_state() {
+    let _serial = HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    {
+        let mut guard = streams();
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(
+            "req-cleanup".to_string(),
+            StreamState {
+                original_request: None,
+                source_format: "openai".to_string(),
+                requested_model: "gemini-4-hydrogen-xhigh".to_string(),
+                host_callback_id: "callback-4".to_string(),
+                has_visible: false,
+                recovered: false,
+            },
+        );
+    }
+    assert_eq!(
+        call_method("request.complete", &json!({"RequestID": "req-cleanup"})),
+        json!({})
+    );
+    assert!(!streams()
+        .as_ref()
+        .is_some_and(|map| map.contains_key("req-cleanup")));
+}
+
+#[test]
+fn stream_merge_normalizes_tool_call_index_and_finish_reason() {
+    let terminal = json!({
+        "choices": [{"index": 0, "delta": {"reasoning_content": "thinking"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}
+    });
+    let completion = json!({
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "run", "arguments": "{}"}}]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+    });
+    let merged = merge_stream_completion(&terminal, &completion);
+    assert_eq!(merged["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(merged["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+    assert_eq!(
+        merged["choices"][0]["delta"]["tool_calls"][0]["id"],
+        "call-1"
+    );
+    assert_eq!(merged["usage"]["prompt_tokens"], 3);
+    assert_eq!(merged["usage"]["completion_tokens"], 3);
+    assert_eq!(merged["usage"]["total_tokens"], 6);
+}
+
+#[test]
+fn empty_approval_completion_is_not_continued() {
+    let _serial = HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut host = TestHost {
+        catalog: catalog("antigravity", &["gpt-6-astra"]),
+        completion: continuation_completion("shouldBlock:false"),
+        calls: Mutex::new(Vec::new()),
+    };
+    let _guard = install_host(&mut host);
+    let original = json!({
+        "model": "gpt-6-astra",
+        "stream": false,
+        "messages": [
+            {"role": "system", "content": CLASSIFIERS[0]},
+            {"role": "user", "content": "Synthetic action."}
+        ]
+    });
+    let empty = json!({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": null},
+            "finish_reason": "stop"
+        }]
+    });
+    let request = json!({
+        "RequestID": "req-approval",
+        "SourceFormat": "openai",
+        "Model": "gemini-3.8-flash-high(low)",
+        "RequestedModel": "gpt-6-astra",
+        "OriginalRequest": STANDARD.encode(serde_json::to_vec(&original).unwrap()),
+        "Body": STANDARD.encode(serde_json::to_vec(&empty).unwrap()),
+        "host_callback_id": "callback-approval"
+    });
+    assert_eq!(call_method("response.intercept_after", &request), json!({}));
+    assert!(host
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(method, _)| method != "host.model.execute"));
 }
