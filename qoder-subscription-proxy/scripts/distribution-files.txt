@@ -21,6 +21,7 @@ server/crc32.mjs
 server/lifecycle-lock.mjs
 server/image-generation.mjs
 server/local-http.mjs
+server/management-app.mjs
 server/management-gateway.mjs
 server/management-panel.mjs
 server/mcp-protocol.mjs
@@ -28,6 +29,7 @@ server/mcp-server.mjs
 server/owned-http.mjs
 server/panel/LICENSE
 server/panel/management.upstream.html
+server/panel/management-app.js
 server/posix-supervisor.mjs
 server/supervisor.mjs
 server/system-proxy.mjs

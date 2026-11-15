@@ -84,6 +84,37 @@ function harness(t, overrides = {}, options = {}) {
   return { input, output, messages, done, send, wait, response: (id) => wait((message) => message.id === id) };
 }
 
+test("MCP Apps 全局管理入口直接打开浏览器，结果不包含票据", async () => {
+  const ctx = { config };
+  const capabilities = { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } } };
+  const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18", capabilities }), ctx);
+  assert.deepEqual(initialized.result.capabilities.resources, {});
+  const tools = (await handleMessage(request(2, "tools/list"), ctx)).result.tools;
+  const app = tools.find(tool => tool.name === "bridge_management_app");
+  assert.equal(app.title, "订阅代理管理");
+  assert.deepEqual(app._meta.ui.visibility, ["app"]);
+  assert.deepEqual(app._meta["qoder/ui"].entrypoints, [{ type: "global" }]);
+  const resource = (await handleMessage(request(3, "resources/read", { uri: app._meta.ui.resourceUri }), ctx)).result.contents[0];
+  assert.equal(resource.mimeType, "text/html;profile=mcp-app");
+  assert.equal(resource._meta.csp, undefined);
+  assert.doesNotMatch(resource.text, /<iframe|\/app\/exchange|managementUrl/);
+  assert.equal(resource._meta["qoder/ui"].preferredDisplayMode, "fullscreen");
+  assert.ok(resource.text.includes("订阅代理管理"));
+  assert.ok(!resource.text.includes(config.mgmtKey));
+  assert.equal((await handleMessage(request(4, "resources/read", { uri: "file:///private" }), ctx)).error.code, -32602);
+  let opened = 0;
+  const ticket = "a".repeat(64);
+  const response = await handleMessage(call(5, "bridge_management_app"), ctx, { handlers: { openManagement: async () => { opened++; return ticket; } } });
+  assert.equal(opened, 1);
+  assert.equal(response.result._meta, undefined);
+  assert.match(response.result.content[0].text, /系统浏览器/);
+  assert.ok(!JSON.stringify(response).includes(ticket));
+  const legacy = { config };
+  await handleMessage(request(6, "initialize", { protocolVersion: "2025-06-18" }), legacy);
+  assert.equal((await handleMessage(call(7, "bridge_management_app"), legacy)).error.code, -32602);
+  assert.deepEqual((await handleMessage(request(8, "resources/list"), legacy)).result.resources, []);
+});
+
 test("输入 destroy 无 error 也会收尾并取消在途调用", { timeout: 3000 }, async (t) => {
   let signal;
   const entered = deferred();

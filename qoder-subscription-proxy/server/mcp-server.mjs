@@ -13,7 +13,7 @@ const ctx = {
   config: {},
   /** 最近一次后台启动故障，供 bridge_status 返回安全摘要；代理就绪后清除。 */
   startupError: null,
-  /** 管理网关固定端口被占用等故障；连接器按钮与免密管理页不可用时据此诊断。 */
+  /** 管理网关占用等故障，供菜单与浏览器入口诊断。 */
   gatewayError: null,
 };
 /** 健康检查的停止函数；只注册一次，下载失败时不启用自动恢复。 */
@@ -76,7 +76,7 @@ async function listenManagement() {
     ctx.gatewayError = null;
   } catch (error) {
     ctx.gatewayError = typeof error?.safeMessage === "string" ? error.safeMessage
-      : "管理网关固定端口监听失败；连接器授权按钮与免密管理页不可用。";
+      : "管理网关固定端口监听失败；菜单与浏览器管理入口不可用。";
   }
 }
 
@@ -90,7 +90,7 @@ async function prepare(signal) {
     throw reportStartupFailure(null, "配置不可用；请检查 BRIDGE_*、config.yaml 和 launcher-secrets.json，再在宿主设置中重连 MCP。");
   }
   signal.throwIfAborted();
-  // 网关随会话常驻监听：连接器授权按钮与免密管理页共用固定端口；占用失败只记录诊断，不阻塞握手。
+  // 应用与浏览器共用固定端口；占用失败只记录诊断，不阻塞握手。
   await listenManagement();
   // 保存任务用于退出收尾；异步故障由 prepareBridge 接住，不拒绝本次 initialize。
   backgroundPreparation = prepareBridge(signal);

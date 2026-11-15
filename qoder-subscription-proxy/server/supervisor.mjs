@@ -547,7 +547,7 @@ export async function getStatus(config) {
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
     authCount, models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
     core: await getCoreStatus(config),
-    loginHint: `点击插件管理页连接器的授权按钮，或让 AI 调用 bridge_open_management，从固定端口 ${MANAGEMENT_PORT} 免输密码进入管理页。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。`,
+    loginHint: `点击 Qoder 更多菜单中的订阅代理管理，或让 AI 调用 bridge_open_management，在系统默认浏览器从固定端口 ${MANAGEMENT_PORT} 免输密码进入管理页。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。`,
   };
 }
 

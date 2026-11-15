@@ -3,6 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 import { ensureRunning, getStatus, stopBridge } from "./supervisor.mjs";
 import { generateImage } from "./image-generation.mjs";
 import { PLUGIN_VERSION } from "./config.mjs";
+import { managementAppResource, MANAGEMENT_APP_URI, MANAGEMENT_APP_MIME } from "./management-app.mjs";
 
 /** 2025-03-26 强制支持批请求，本按行单消息实现不声明支持；其余版本协商到首项。 */
 const PROTOCOL_VERSIONS = ["2025-06-18", "2024-11-05"];
@@ -73,6 +74,18 @@ const TOOLS = [
     inputSchema: GEMINI_IMAGE_SCHEMA,
   },
 ];
+const MANAGEMENT_APP_TOOL = {
+  name: "bridge_management_app",
+  title: "订阅代理管理",
+  description: "从 Qoder 更多菜单直接在系统默认浏览器打开已登录的订阅代理管理页；不返回登录票据。",
+  inputSchema: EMPTY_SCHEMA,
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  _meta: {
+    ui: { resourceUri: MANAGEMENT_APP_URI, visibility: ["app"] },
+    "qoder/ui": { entrypoints: [{ type: "global" }] },
+  },
+};
+
 /** 只允许稳定错误标识出现在异常响应中，不转发异常 message、stack 或响应正文。 */
 const SAFE_CODES = new Set([
   "ABORT_ERR", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "EACCES", "EPERM",
@@ -166,6 +179,7 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       const stopped = result?.stopped === true;
       return textResult({ stopped, reason: safeReason(result?.reason, stopped ? "已停止" : "未能停止", config) }, !stopped);
     }
+    case "bridge_management_app":
     case "bridge_open_management": {
       // 由本机入口直接唤起浏览器；即使实现返回了内部票据，协议响应也只包含固定结果。
       await handlers.openManagement(config, { signal });
@@ -197,14 +211,24 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
     case "initialize": {
       if (typeof params?.protocolVersion !== "string" || !params.protocolVersion.trim()) return fail(id, -32602, "缺少有效的 protocolVersion。");
       const protocolVersion = PROTOCOL_VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : PROTOCOL_VERSIONS[0];
-      return ok(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: SERVER_INFO });
+      const mimeTypes = params.capabilities?.extensions?.["io.modelcontextprotocol/ui"]?.mimeTypes;
+      ctx.supportsApps = Array.isArray(mimeTypes) && mimeTypes.includes(MANAGEMENT_APP_MIME);
+      return ok(id, { protocolVersion, capabilities: { tools: {}, ...(ctx.supportsApps ? { resources: {} } : {}) }, serverInfo: SERVER_INFO });
     }
     case "ping":
       return ok(id, {});
     case "tools/list":
-      return ok(id, { tools: TOOLS });
+      return ok(id, { tools: ctx.supportsApps ? [...TOOLS, MANAGEMENT_APP_TOOL] : TOOLS });
+    case "resources/list":
+      return ok(id, { resources: ctx.supportsApps ? [{ uri: MANAGEMENT_APP_URI, name: "订阅代理管理", mimeType: MANAGEMENT_APP_MIME }] : [] });
+    case "resources/read": {
+      if (!ctx.supportsApps || params?.uri !== MANAGEMENT_APP_URI) return fail(id, -32602, "未知应用资源。");
+      try { return ok(id, { contents: [await managementAppResource()] }); }
+      catch { return fail(id, -32603, "无法读取订阅代理管理页面，请检查插件文件。"); }
+    }
     case "tools/call": {
-      const tool = TOOLS.find(({ name }) => name === params?.name);
+      const tool = ctx.supportsApps && params?.name === MANAGEMENT_APP_TOOL.name
+        ? MANAGEMENT_APP_TOOL : TOOLS.find(({ name }) => name === params?.name);
       if (!tool) return fail(id, -32602, "未知工具或缺少工具名称。");
       const args = params.arguments === undefined ? {} : params.arguments;
       // 按工具 schema 逐项校验：管理工具为空 schema，自然拒绝任何非空参数；生图工具只接受声明的字符串参数。
@@ -347,7 +371,7 @@ export async function runMcp(ctx, { input = process.stdin, output = process.stdo
     const validRequest = validEnvelope(message) && Object.hasOwn(message, "id");
     const isTool = validRequest && message.method === "tools/call";
     const isInitialize = Boolean(prepare && validRequest && message.method === "initialize");
-    if (prepare && !initialized && validRequest && ["tools/list", "tools/call"].includes(message.method)) {
+    if (prepare && !initialized && validRequest && ["tools/list", "tools/call", "resources/list", "resources/read"].includes(message.method)) {
       return send(fail(message.id, -32002, "本地配置尚未初始化完成，请等待 MCP 初始化成功。"));
     }
     if (isInitialize && [...requests.values()].some((request) => request.initializing)) {

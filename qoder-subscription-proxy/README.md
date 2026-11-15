@@ -1,49 +1,50 @@
-# qoder订阅代理 · 1.0.9
+# qoder订阅代理 · 1.0.10
 
-基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并在插件连接器上提供一键打开免密管理登录页的按钮。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
+基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并提供 Qoder「更多 → 订阅代理管理」入口，点击即可在系统默认浏览器打开免密管理页。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
 
 > 管理密码和模型 API Key 都保存在本机用户数据目录。请保护该目录，并让代理仅在本机回环地址提供服务。[免责声明](DISCLAIMER.md) · [第三方软件与许可证](THIRD_PARTY_NOTICES.md)
 
 ## 安装与兼容范围
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生扩展（审批路由与空补全处理），普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.9-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生扩展（审批路由与空补全处理），普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.10-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
 
 | 项目 | 范围与验证边界 |
 | --- | --- |
-| Qoder | 已核对 Qoder Desktop `0.5.7`；CN 版程序为 `Qoder CN.exe`，国际版为 `Qoder.exe`；本轮未重新核对 Electron / 内置 Node 版本 |
+| Qoder | 管理应用按 Desktop `0.5.12` 随附 MCP Apps 规范实现，宿主实机验收待执行；CN 版程序为 `Qoder CN.exe`，国际版为 `Qoder.exe` |
 | 内置运行时 | Electron 内置 Node mode 或系统 Node 22+；Windows 启动器依赖 PowerShell 5.1、.NET Framework 与 Job Object |
 | Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；Windows 10 尚未单独验收 |
 | macOS / Linux | x64 / ARM64；依赖 `/bin/sh` 与系统进程工具；尚未实机验证 |
-| 核心 | 固定 CLIProxyAPI `v8.0.69` 原样不改，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
+| 核心 | 固定 CLIProxyAPI `v8.0.72` 原样不改，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
 | 原生扩展 | Rust `native/approval-router` cdylib，通过核心 `ModelRouter` 与响应拦截接口加载；随包提供当前平台库，不支持运行时下载/编译 |
 | 不支持 | Windows 32 位、原生 Windows ARM64 及其他平台/架构 |
 
-## 连接器与管理页按钮
+## 订阅代理管理入口
 
-插件声明两个连接器：
+启用插件并连接 `qoder-subscription-proxy` stdio 连接器后，点击 Qoder 左下角 **更多 → 订阅代理管理**，直接在**系统默认浏览器**打开已登录的完整管理页，无需先发送聊天消息或进入插件详情页。入口名称仍为「订阅代理管理」，支持固定到导航栏的客户端可将它固定。
 
-| 连接器 | 类型 | 职责 |
-| --- | --- | --- |
-| `qoder-subscription-proxy` | stdio | 代理生命周期托管与 MCP 工具（状态、启停、打开管理页） |
-| `management-page` | http | 指向本机管理网关 `http://127.0.0.1:19788/mcp` 的授权元数据端点 |
+全局入口使用 MCP Apps `2026-01-26` 协议，按宿主实际能力声明展示。本实现依据 Qoder Desktop `0.5.12` 随附规范；未声明 MCP Apps 的客户端可通过 `bridge_open_management` 打开同一浏览器管理页。尚未接入从插件直接唤起 Qoder 内置浏览器的接口，不把系统浏览器称为内置浏览器。
 
-`management-page` 连接器按 RFC 9728 暴露受保护资源与授权服务器元数据，其授权端点就是本机免密管理页：在插件详情页或连接器列表点击该连接器行的 **授权 / 重新授权** 按钮，默认浏览器即打开已登录的授权与账号管理页。该连接器的回调故意不完成，因此连接器保持「待授权」状态、按钮常驻，随时可再次点击跳转；它不提供工具，也不影响 stdio 连接器与模型请求。
+- 点击菜单时由入口工具执行一次浏览器打开操作；成功后通过 `ui/notifications/request-teardown` 请求宿主回收独立应用页。正常路径不显示中间页或“再次打开”按钮，宿主完成回收后，下次点击菜单会创建新入口并生成新的浏览器登录链接。
+- 页面初始化不会重复调用打开工具；失败或取消才展示原因与 **重试打开浏览器** 按钮，不自动重试。仅独立视图请求自动关闭；若宿主没有完成回收，会明确提示手动关闭，不假称已退出。此生命周期行为仍须在实际 Qoder 版本中确认。
+- 票据 1 分钟内一次性使用，浏览器管理会话最长 30 分钟；过期后重新点击更多菜单。入口页回收不会调用停止代理工具，MCP 连接退出仍按既有生命周期撤销票据与会话。
+- 账号授权、配置、上传和导出均在系统浏览器中使用原有完整面板；不再受插件内嵌文件传输大小限制。
+- 不声明旧的 `management-page` HTTP 连接器，不借“待授权”状态保留按钮。
 
-网关随 stdio 连接器会话常驻监听 `19788`。票据 1 分钟后失效，兑换后的浏览器会话最长 30 分钟；会话过期后重新点击按钮即可。端口被其他程序占用时网关不监听，按钮点击无效，`bridge_status` 会返回 `gatewayError` 诊断。
+网关随 stdio 连接器监听固定回环端口 `19788`，管理页面禁止被 iframe 嵌入，票据兑换和管理 API 继续要求同源。长期管理密钥不会交给页面；一次性票据只传给系统浏览器，不返回给模型或应用页面。端口被占用或核心未就绪时显示错误，`bridge_status` 提供诊断；打开入口不会擅自启动用户已暂停的代理。
 
 ## 固定端口
 
 | 端口 | 用途 |
 | --- | --- |
 | `19787` | 模型 API（OpenAI 兼容 `/v1`）与核心原生管理面板 |
-| `19788` | 管理页网关：免密登录入口、连接器授权元数据、管理 API 同源代理 |
+| `19788` | 管理页网关：浏览器免密登录入口与管理 API 同源代理 |
 
-两个端口互不相同，作为常量固定，**不随版本更新变动**；模型客户端地址与管理页按钮地址都依赖该约定。仅高级环境变量 `BRIDGE_PORT` 可覆盖模型端口，覆盖后须同步修改供应商 Base URL（连接器地址仍为 19788）。
+两个端口互不相同，作为常量固定，**不随版本更新变动**；模型客户端地址与管理应用都依赖该约定。仅高级环境变量 `BRIDGE_PORT` 可覆盖模型端口，覆盖后须同步修改供应商 Base URL（管理网关仍为 19788）。
 
 ## 首次使用
 
 1. 安装、启用插件并确认 stdio 连接器已连接。握手只等待本地配置，随包核心与原生扩展在后台校验安装并自动启动代理，无需联网下载，也无需先有聊天模型。扩展必须被核心真实注册并启用，否则不能进入就绪状态。
-2. 在插件详情页点击 `management-page` 连接器的 **授权** 按钮，浏览器打开免密管理页；首次接入订阅时在该页选择服务商，由本人登录并同意授权。
+2. 点击 **更多 → 订阅代理管理**，直接在系统默认浏览器打开免密管理页；首次接入订阅时选择服务商，由本人登录并同意授权。
 3. 在 Qoder 模型/供应商设置中添加 OpenAI 兼容服务：
    - **Base URL**：`http://127.0.0.1:19787/v1`
    - **API Key**：数据目录 `launcher-secrets.json` 中的 `apiKey`
@@ -87,7 +88,7 @@ ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approva
 
 ## 空补全自动续写
 
-上游 Antigravity 对特定长会话或高思考档位偶发**纯思考空补全**：HTTP 200 正常结束，响应只有 `thoughtSignature` 与 `thinking`，可见文本和工具调用均为 0。Google 社区与官方论坛已确认这是 API 侧缺陷，官方 Antigravity CLI（`agy`）通过内部的 `EmptyOutputContinuationCheckHook` 在检测到空输出时自动追加一次续写；CLIProxyAPI `v8.0.69` 尚未为 Antigravity 实现同类处理（`v8.0.68` 只为 Devin 增加了空补全 failover，上游 [issue #5227](https://github.com/router-for-me/CLIProxyAPI/issues/5227) 已关闭但无 Antigravity 实现），因此客户端原样重试同一 payload 通常会连续失败。
+Antigravity 可能出现**纯思考空补全**：HTTP 200 正常结束，包含思考内容，但没有可见文本或工具调用。插件保留针对这种结果的单次续写。CLIProxyAPI 从 `v8.0.69` 升至 `v8.0.72` 的[上游变更](https://github.com/router-for-me/CLIProxyAPI/compare/v8.0.69...v8.0.72)新增了异常终止零输出、仅签名且缺少结束原因的空流保护；这些错误与正常结束的纯思考输出应区分，不将上游修复概括成所有空补全都已解决。新版核心与现有续写扩展的兼容性纳入升级回归验证。
 
 插件随包的原生扩展为此注册响应拦截能力，作为**插件侧的临时兼容**：
 
@@ -98,7 +99,7 @@ ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approva
 - 续写成功、失败或跳过都会以 INFO/WARN 写入 `bridge.log`（`空补全已自动续写` / `空补全续写失败` / `空补全未续写`），只含模型、渠道、计费与原因，不记录提示正文或凭据。
 - 续写会额外消耗一次模型调用额度；这是恢复可用性的主动取舍，不是核心配置里的请求重试，也不会改变重试、冷却或心跳等上游默认值。
 
-**移除条件**：当 CLIProxyAPI 后续版本为 Antigravity 原生实现空补全检测、续写或 failover 后，应删除本插件的空补全拦截处理，直接采用上游行为；仅在核心仍未处理时保留本节兼容。当前固定核心版本为 `v8.0.69`，尚未包含该上游处理。该兼容只覆盖 Chat Completions；Responses、Claude Messages、Gemini 原生入口的空补全不会被自动续写。若上游连终止分片都没有（完全空响应体），流已经结束，插件无法再注入内容，仍由客户端按原逻辑失败。自定义 `BRIDGE_BIN` 也须支持响应拦截与宿主模型执行回调，否则只能保留旧核心行为，无法使用本兼容。
+**移除条件**：当上游原生覆盖相同的“正常结束、纯思考、零可见输出”场景并经过回归确认后，删除重复的插件续写，直接采用上游行为。当前固定核心版本为 `v8.0.72`；插件兼容仍只覆盖 Chat Completions，Responses、Claude Messages、Gemini 原生入口不由本插件追加续写。上游在 HTTP 200 提交前拒绝的异常空流交由核心处理；完全没有可拦截分片的响应也无法由插件注入内容。自定义 `BRIDGE_BIN` 须支持响应拦截与宿主模型执行回调。
 
 ## MCP 工具与生图
 
@@ -106,7 +107,8 @@ ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approva
 | --- | --- |
 | `bridge_status` | 查询就绪、核心准备及失败原因、管理地址、凭据数量和模型，不返回 token 或 API Key |
 | `bridge_start` / `bridge_stop` | 解除暂停并启动 / 持久暂停并停止可确认归属的代理 |
-| `bridge_open_management` | 在系统浏览器打开免密管理页 |
+| `bridge_management_app` | 仅应用可见；点击「订阅代理管理」全局入口时直接打开系统默认浏览器 |
+| `bridge_open_management` | 通过对话或应用按钮在系统默认浏览器打开免密管理页 |
 | `image_gen_gpt` | 经本机代理 OpenAI 图片接口生图（`gpt-image-*` 系） |
 | `image_gen_gemini` | 经本机代理聊天接口生图（`gemini-*-image` 系） |
 
@@ -156,7 +158,7 @@ GPT 的 `size` 直接交给图片接口。Gemini 的 `size` 支持方图 `1K`、
 - **按钮点击无反应**：确认 stdio 连接器已连接（网关随其监听）；`bridge_status` 的 `gatewayError` 会说明 19788 占用等原因。
 - **管理页打不开**：等待后台核心准备完成或检查 `bridge_status`；修复失败原因后重连或 `bridge_start`。
 - **模型 API 401**：核对供应商 API Key 与本机 `launcher-secrets.json`。
-- **管理页登录失败**：重新点击连接器按钮；手动登录时核对 `mgmtKey` 与端口。
+- **管理页登录失败**：重新点击更多菜单打开新的登录链接；入口执行失败时可点击“重试打开浏览器”，手动登录时核对 `mgmtKey` 与端口。
 - **403 / 429 / 5xx**：先检查权限、配额、网络和上游异常，不反复重启本机进程。
 - **随包核心校验失败**：提示 SHA256 不匹配或随包核心无效时，重新下载对应平台的官方 ZIP 并重装；哈希不匹配不得跳过校验。
 - **审批扩展缺失 / 损坏 / 未启用**：安装包用户重新获取匹配平台的可信 ZIP；源码用户先构建本平台扩展。核对平台、ABI、SHA256 与核心实际注册状态，不绕过就绪检查。自定义 `BRIDGE_BIN` 也须支持此扩展。

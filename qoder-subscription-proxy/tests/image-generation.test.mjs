@@ -87,7 +87,7 @@ test("生图实际请求传递 Gemini 分辨率、拒绝无效尺寸并保留 HT
             : { choices: [{ message: { images: [{ image_url: { url: 'data:image/png;base64,' + base64 } }] } }] }) };
         },
       },
-      './config.mjs': { PLUGIN_VERSION: 'fixture' },
+      './config.mjs': { PLUGIN_VERSION: 'fixture', MANAGEMENT_PORT: 19788 },
       './local-http.mjs': await import(pathToFileURL(join(${JSON.stringify(server)}, 'local-http.mjs'))),
     };
     const modules = new Map();

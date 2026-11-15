@@ -15,39 +15,39 @@ const notices = await readFile(join(pluginRoot, "THIRD_PARTY_NOTICES.md"), "utf-
 const expected = {
   "win32-x64": {
     path: "qoder-plugin-subscription-proxy.exe",
-    archive: "CLIProxyAPI_8.0.69_windows_amd64.zip",
-    binarySha256: "fa1f338d21fa9b5c3d214aa067c20961684434e0f97c99e18d204bc4f2eaa680",
-    archiveSha256: "c81830b40c69d3d4d44b4fb9721827ffc8d3c686ebc69e16aea3af5636d54517",
+    archive: "CLIProxyAPI_8.0.72_windows_amd64.zip",
+    binarySha256: "3128cc87e842d675b134b87b8e9cf12bf20314d47bcd4e75b1b5758eacabde7d",
+    archiveSha256: "9c98651a4a35e05fd87193bf722710f32ff87d13ff8b7177d0cfd200f4b51749",
   },
   "darwin-x64": {
     path: "darwin-x64/qoder-plugin-subscription-proxy",
-    archive: "CLIProxyAPI_8.0.69_darwin_amd64.tar.gz",
-    binarySha256: "341613fe8b8c0ed926c9e3e75645574c923fcc864dbaaacb5996416de2f33e18",
-    archiveSha256: "dc9b9e782cf1266eedb9c7102ade1f263027af2cf509c8175e156b74bda994d6",
+    archive: "CLIProxyAPI_8.0.72_darwin_amd64.tar.gz",
+    binarySha256: "bc050e2739c03280cf4425be13d5eaee4b0b52b1beb1dfdb789edea8998c4f25",
+    archiveSha256: "27591f4c829cd3a2ce9daed541328103f6439841d25aefca82207d79126a90af",
   },
   "darwin-arm64": {
     path: "darwin-arm64/qoder-plugin-subscription-proxy",
-    archive: "CLIProxyAPI_8.0.69_darwin_aarch64.tar.gz",
-    binarySha256: "e2d9d0cc14b8abbe6f9c3dd3ae8450dff58671c7c3cd75803a84a5b472409d59",
-    archiveSha256: "44070a946dd8932829a52e5d15fe8f01c3748afbbdacc17b10f5a42ce7dba263",
+    archive: "CLIProxyAPI_8.0.72_darwin_aarch64.tar.gz",
+    binarySha256: "eff6b1b6a60c23aadb6a17d35117f8ef699c6b73a030c72d631991652763002e",
+    archiveSha256: "ae008afd4ad52603f220200afc6417102591ba0a847d128cb65e904f86ac7918",
   },
   "linux-x64": {
     path: "linux-x64/qoder-plugin-subscription-proxy",
-    archive: "CLIProxyAPI_8.0.69_linux_amd64.tar.gz",
-    binarySha256: "1d014dc55756be35bd57307eb917a9e7a73b6743f98213ca238fff49cd061c73",
-    archiveSha256: "4213723d57096bc97ad32d810b89653ba3edeb384087cecc90956c4c33e8af22",
+    archive: "CLIProxyAPI_8.0.72_linux_amd64.tar.gz",
+    binarySha256: "c0c2ac82642300090bc06ad7adef9c14604a5a5ac4db0f0eb0e428b79eefeb1e",
+    archiveSha256: "ce8e57a10e081c1deff48e214ca1932b0c2df51ab35d3628f6a1638c4be90ff7",
   },
   "linux-arm64": {
     path: "linux-arm64/qoder-plugin-subscription-proxy",
-    archive: "CLIProxyAPI_8.0.69_linux_aarch64.tar.gz",
-    binarySha256: "782ec929a094596376b772d1d98630762488713bd5d9ee206c3cddc2836e0d46",
-    archiveSha256: "19f13e62643ea9f6275553622ad13f945e551397166f099a78c32a2e0f85d4c3",
+    archive: "CLIProxyAPI_8.0.72_linux_aarch64.tar.gz",
+    binarySha256: "8d8666274e3f5279acf903c113fda7d41e70168b2f25da426d86e4646625a464",
+    archiveSha256: "51a001340f5bea352f935f97f5d2477a06a8349a4fa396d6f6923cef25573b5f",
   },
 };
 
-test("分发清单固定上游 v8.0.69 和五种平台，不包含 no-plugin 或 Windows ARM64", async () => {
+test("分发清单固定上游 v8.0.72 和五种平台，不包含 no-plugin 或 Windows ARM64", async () => {
   assert.equal(metadata.upstream, "router-for-me/CLIProxyAPI");
-  assert.equal(metadata.version, "v8.0.69");
+  assert.equal(metadata.version, "v8.0.72");
   assert.deepEqual(Object.keys(metadata.platforms).sort(), Object.keys(expected).sort());
   const entries = await readdir(binRoot, { withFileTypes: true });
   assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
@@ -70,12 +70,12 @@ for (const [key, pinned] of Object.entries(expected)) {
       assert.equal(release[field], pinned[field], `下载器 ${key}.${field}`);
       assert.ok(notices.includes(pinned[field]), `第三方声明缺少 ${key}.${field}`);
     }
-    assert.equal(entry.url, `https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.69/${pinned.archive}`);
+    assert.equal(entry.url, `https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.72/${pinned.archive}`);
     assert.equal(release.url, entry.url);
     assert.doesNotMatch(entry.archive, /no-plugin/);
     const dataDir = join(tmpdir(), "isolated-platform-path-check");
     assert.equal(resolveCoreBinaryPath({ dataDir, platform, arch }),
-      join(dataDir, "runtimes", "v8.0.69", key, basename(pinned.path)));
+      join(dataDir, "runtimes", "v8.0.72", key, basename(pinned.path)));
     if (platform !== "win32") assert.equal(entry.mode, "0755");
   });
 }

@@ -5,10 +5,6 @@
       "command": "/bin/sh",
       "args": ["${QODER_PLUGIN_ROOT}/scripts/start-mcp.sh"],
       "timeout": 660000
-    },
-    "management-page": {
-      "type": "http",
-      "url": "http://127.0.0.1:19788/mcp"
     }
   }
 }

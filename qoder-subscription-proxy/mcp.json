@@ -5,10 +5,6 @@
       "command": "powershell.exe",
       "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "${QODER_PLUGIN_ROOT}/scripts/start-mcp.ps1"],
       "timeout": 660000
-    },
-    "management-page": {
-      "type": "http",
-      "url": "http://127.0.0.1:19788/mcp"
     }
   }
 }

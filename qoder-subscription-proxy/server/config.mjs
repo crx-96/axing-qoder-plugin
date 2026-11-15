@@ -12,10 +12,10 @@ import { parseConfigYaml } from "./config-yaml.mjs";
 export const DEFAULT_HOST = "127.0.0.1";
 /** 模型 API 固定端口；跨版本保持不变，用户客户端地址与核心配置均依赖该常量。 */
 export const DEFAULT_PORT = 19787;
-/** 管理页网关固定端口：免密管理入口与连接器授权元数据共用；与模型端口不同且跨版本保持不变。 */
+/** 管理应用与浏览器共用的固定回环网关端口，与模型端口不同。 */
 export const MANAGEMENT_PORT = 19788;
 /** 与插件 manifest 保持一致；版本升级不改变专属数据目录与上述固定端口。 */
-export const PLUGIN_VERSION = "1.0.9";
+export const PLUGIN_VERSION = "1.0.10";
 /** 旧版公共密码仅用于识别需要升级的文件和兼容环境配置。 */
 const LEGACY_MGMT_KEY = "123456";
 
@@ -155,7 +155,7 @@ export async function loadConfig({ pluginRoot, env = process.env, platform = pro
     apiKey: apiKey ?? secrets.apiKey,
     /** 按安装持久保存的管理密钥，独立于模型 API Key；核心启动后可在 YAML 中保存其哈希。 */
     mgmtKey: secrets.mgmtKey,
-    /** 核心原生管理面板，供手动登录；免密入口由连接器授权按钮或 bridge_open_management 打开。 */
+    /** 核心原生管理面板供手动登录，更多菜单与浏览器工具提供免密入口。 */
     managementUrl: `http://${host}:${port}/management.html`,
     /** OpenAI 兼容接口地址。 */
     endpoint: `http://${host}:${port}/v1`,

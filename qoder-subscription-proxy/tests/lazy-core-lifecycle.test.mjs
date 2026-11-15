@@ -189,7 +189,7 @@ test("管理网关占用解除及停止启动后恢复监听，成功时清除�
     occupied.listen(0, '127.0.0.1');
     await once(occupied, 'listening');
     const port = occupied.address().port;
-    const url = 'http://127.0.0.1:' + port + '/.well-known/oauth-authorization-server';
+    const url = 'http://127.0.0.1:' + port + '/management.html';
     const processStub = new EventEmitter();
     processStub.stdin = { destroy() {} };
     processStub.stderr = { write() {} };

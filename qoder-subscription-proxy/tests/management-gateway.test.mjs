@@ -108,6 +108,9 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
   assert.equal(panel.status, 200);
   assert.ok(![ticket, session, config.mgmtKey, config.apiKey].some(value => panelHtml.includes(value)));
 
+  assert.equal((await request("/app", { headers })).status, 404);
+  assert.equal((await request("/app/exchange", { method: "POST", headers: { ...headers, Origin: origin } })).status, 404);
+
   const expiring = await open();
   const now = Date.now();
   const clock = t.mock.method(Date, "now", () => now + 61_000);
@@ -132,7 +135,7 @@ test("原生核心与管理页经同源一次性票据交接、代理认证、�
   assert.equal((await request(route, { headers })).status, 401);
 });
 
-test("连接器授权元数据端点使按钮常驻并指向免密管理页", async (t) => {
+test("管理文档拒绝跨站嵌入，旧授权与内嵌端点不可用", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "bridge-connector-oauth-"));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   const config = await loadConfig({
@@ -144,43 +147,24 @@ test("连接器授权元数据端点使按钮常驻并指向免密管理页", as
   t.after(() => login.close());
   await login.listen();
   const origin = `http://127.0.0.1:${port}`;
-  // 宿主探测收到 401 与受保护资源元数据，连接器进入待授权，按钮常驻。
-  const probe = await fetch(origin + "/mcp", { method: "POST" });
-  assert.equal(probe.status, 401);
-  assert.match(probe.headers.get("www-authenticate"), /resource_metadata="[^"]+oauth-protected-resource"$/);
-  const resource = await (await fetch(origin + "/.well-known/oauth-protected-resource")).json();
-  assert.equal(resource.resource, origin + "/mcp");
-  assert.deepEqual(resource.authorization_servers, [origin]);
-  // 宿主按 RFC 9728 以资源路径后缀构造元数据地址，后缀拼法必须同答。
-  const suffixed = await fetch(origin + "/.well-known/oauth-protected-resource/mcp");
-  assert.equal(suffixed.status, 200);
-  assert.equal((await suffixed.json()).resource, origin + "/mcp");
-  const serverMeta = await (await fetch(origin + "/.well-known/oauth-authorization-server")).json();
-  assert.equal(serverMeta.authorization_endpoint, origin + "/oauth/authorize");
-  assert.equal(serverMeta.token_endpoint, origin + "/oauth/token");
-  // 授权端点只重定向到免密落地页，不在浏览器内完成回调。
-  const redirect = new URL(origin + "/callback");
-  redirect.port = String(await unusedPort());
-  const authorize = await fetch(serverMeta.authorization_endpoint + `?redirect_uri=${encodeURIComponent(redirect)}&state=abc`, { redirect: "manual" });
-  assert.equal(authorize.status, 302);
-  const location = new URL(authorize.headers.get("location"));
-  assert.equal(location.origin, origin);
-  assert.equal(location.pathname, "/open");
-  assert.match(location.hash, /^#[a-f0-9]{64}$/);
-  // 外部重定向地址被拒绝，防止票据落地页被导向外部站点。
-  const external = await fetch(serverMeta.authorization_endpoint + "?redirect_uri=https://example.com/cb", { redirect: "manual" });
-  assert.equal(external.status, 400);
-  // 令牌端点按无效授权统一拒绝，连接器维持待授权。
-  const token = await fetch(serverMeta.token_endpoint, { method: "POST", body: "grant_type=authorization_code" });
-  assert.equal(token.status, 400);
-  assert.equal((await token.json()).error, "invalid_grant");
-  // 动态注册响应回显 redirect_uris，宿主 SDK 据此完成客户端登记。
-  const registered = await fetch(serverMeta.registration_endpoint, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ redirect_uris: [redirect.href], token_endpoint_auth_method: "none" }),
-  });
-  assert.equal(registered.status, 201);
-  const client = await registered.json();
-  assert.match(client.client_id, /^qoder-connector-[a-f0-9]{16}$/);
-  assert.deepEqual(client.redirect_uris, [redirect.href]);
+  const panel = await fetch(origin + "/management.html");
+  assert.equal(panel.status, 200);
+  assert.equal(panel.headers.get("x-frame-options"), "DENY");
+  assert.equal(panel.headers.get("access-control-allow-origin"), null);
+  const html = await panel.text();
+  assert.ok(!html.includes("/app/exchange"));
+  assert.ok(!html.includes(config.mgmtKey));
+  for (const path of ["/app", "/management.html", "/open", "/v8/management/config"]) {
+    const rejected = await fetch(origin + path, { headers: { "Sec-Fetch-Site": "cross-site" } });
+    assert.equal(rejected.status, 403);
+    assert.equal(rejected.headers.get("x-frame-options"), "DENY");
+  }
+  for (const path of ["/oauth/authorize?redirect_uri=http://localhost/cb", "/.well-known/oauth-protected-resource"]) {
+    const response = await fetch(origin + path, { redirect: "manual" });
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.get("location"), null);
+  }
+  assert.equal((await fetch(origin + "/app/exchange", { method: "POST", headers: {
+    Origin: "https://example.invalid", "X-Login-Ticket": "a".repeat(64),
+  } })).status, 403);
 });
