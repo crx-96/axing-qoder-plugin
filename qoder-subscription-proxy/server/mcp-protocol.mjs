@@ -70,7 +70,7 @@ const TOOLS = [
   },
   {
     name: "image_gen_gemini",
-    description: "经本机订阅代理的聊天接口生图（gemini 系图片模型）。用户说 Gemini/谷歌生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体；requestedSize 表示请求的方图分辨率，不是实测图片尺寸。",
+    description: "旧版 Gemini 生图入口已停用，不在工具列表公开；调用仅返回 ACP 图片生成尚未验证的错误，不触及旧 Google 接口。",
     inputSchema: GEMINI_IMAGE_SCHEMA,
   },
 ];
@@ -90,7 +90,7 @@ const MANAGEMENT_APP_TOOL = {
 const SAFE_CODES = new Set([
   "ABORT_ERR", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "EACCES", "EPERM",
   "ENOTFOUND", "EAI_AGAIN", "ERR_INVALID_ARG_VALUE", "ERR_INVALID_ARG_TYPE",
-  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED",
+  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED", "ACP_IMAGE_UNSUPPORTED",
   "CORE_CONFIG", "CORE_CANCELLED", "CORE_TIMEOUT", "CORE_CURL", "CORE_DOWNLOAD", "CORE_SIZE",
   "CORE_ARCHIVE_HASH", "CORE_BINARY_HASH", "CORE_ARCHIVE", "CORE_PATH", "CORE_CACHE",
   "CORE_PUBLISH", "CORE_CLEANUP", "CORE_LOCK",
@@ -185,10 +185,11 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       await handlers.openManagement(config, { signal });
       return textResult("已请求系统浏览器打开授权与账号管理页。");
     }
-    case "image_gen_gpt":
-    case "image_gen_gemini": {
+    case "image_gen_gemini":
+      return textResult("ACP 图片生成尚未验证，Gemini 生图不可用；不会回退旧 Google 通道。", true);
+    case "image_gen_gpt": {
       // 族内模型决策与落盘由生图模块完成；多模型待选结果原样返回供宿主弹窗。
-      const family = name === "image_gen_gpt" ? "gpt" : "gemini";
+      const family = "gpt";
       const result = await handlers.generateImage(config,
         { family, prompt: args.prompt, model: args.model, size: args.size, signal });      return textResult(result);
     }
@@ -218,7 +219,7 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
     case "ping":
       return ok(id, {});
     case "tools/list":
-      return ok(id, { tools: ctx.supportsApps ? [...TOOLS, MANAGEMENT_APP_TOOL] : TOOLS });
+      return ok(id, { tools: (ctx.supportsApps ? [...TOOLS, MANAGEMENT_APP_TOOL] : TOOLS).filter(tool => tool.name !== "image_gen_gemini") });
     case "resources/list":
       return ok(id, { resources: ctx.supportsApps ? [{ uri: MANAGEMENT_APP_URI, name: "订阅代理管理", mimeType: MANAGEMENT_APP_MIME }] : [] });
     case "resources/read": {

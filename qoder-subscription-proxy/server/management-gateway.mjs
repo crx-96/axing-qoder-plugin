@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { pipeline } from "node:stream";
 import { MANAGEMENT_PORT } from "./config.mjs";
 import { patchManagementPanel } from "./management-panel.mjs";
-import { openCoreConnection, requestOwned } from "./supervisor.mjs";
+import { openCoreConnection, requestOwned, requestAcpControl } from "./supervisor.mjs";
+import { blockedGoogleManagement, containsGoogleConfiguration, isLegacyGoogleProvider } from "./google-policy.mjs";
 
 /** 票据只用于一次浏览器交接，兑换后的会话限定于此进程、此端口和管理 API。 */
 const TICKET_MS = 60_000;
@@ -72,6 +73,47 @@ async function relay(config, incoming, outgoing) {
       !["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].includes(incoming.method)) {
     outgoing.writeHead(404).end(); return;
   }
+  if (blockedGoogleManagement(incoming.url, incoming.method)) {
+    outgoing.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Google 模型已迁移至 ACP，请使用 ACP 管理入口。" })); return;
+  }
+  let payload;
+  if (!["GET", "HEAD"].includes(incoming.method)) {
+    if (/\/config(?:\.yaml|\/yaml)?\/?$/i.test(decodeURIComponent(target.pathname))) {
+      outgoing.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "ACP 模式不接受完整配置覆盖；请使用各供应商的独立设置入口。" })); return;
+    }
+    const chunks = []; let size = 0;
+    for await (const chunk of incoming) {
+      size += chunk.length;
+      if (size > 8 * 1024 * 1024) { outgoing.writeHead(413).end(); return; }
+      chunks.push(chunk);
+    }
+    payload = Buffer.concat(chunks);
+    const type = incoming.headers["content-type"] ?? "";
+    try {
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+      let documents = [];
+      if (type.toLowerCase().includes("multipart/form-data")) {
+        const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/.exec(type);
+        if (!boundary) throw Error();
+        documents = text.split("--" + (boundary[1] ?? boundary[2])).filter(part => /filename=/i.test(part))
+          .map(part => JSON.parse(part.slice(part.indexOf("\r\n\r\n") + 4).trim()));
+      } else if (text) documents = [JSON.parse(text)];
+      let blocked = documents.some(containsGoogleConfiguration);
+      for (const document of documents) {
+        if (document?.disabled !== false || typeof document.name !== "string") continue;
+        const response = await requestOwned(config, "/v0/management/auth-files", { management: true });
+        if (response.status !== 200) throw Error();
+        const files = JSON.parse(response.text).files;
+        if (!Array.isArray(files)) throw Error();
+        blocked ||= files.some(file => file.name === document.name && isLegacyGoogleProvider(file.provider ?? file.type));
+      }
+      if (blocked) {
+        outgoing.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "旧 Google 渠道不能重新启用或导入，请使用 ACP。" })); return;
+      }
+    } catch {
+      outgoing.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "管理请求无法安全检查，未转发。" })); return;
+    }
+  }
   const controller = new AbortController();
   outgoing.once("close", () => controller.abort());
   const socket = await openCoreConnection(config, controller.signal);
@@ -97,14 +139,15 @@ async function relay(config, incoming, outgoing) {
   });
   incoming.once("aborted", () => upstream.destroy());
   incoming.on("error", () => upstream.destroy());
-  incoming.pipe(upstream);
+  if (payload !== undefined) upstream.end(payload);
+  else incoming.pipe(upstream);
 }
 
 /** 回环管理网关的票据与会话随 MCP 连接回收。 */
 export function createManagementLogin(config, { launchBrowser = openSystemBrowser, port = MANAGEMENT_PORT } = {}) {
   const tickets = new Map();
   const sessions = new Map();
-  let server, starting, origin, panel, closed = false;
+  let server, starting, origin, panel, acpPage, closed = false;
 
   /** 回收过期值，并限制每个进程保留的标签页和未兑换票据数。 */
   function issue(map, lifetime) {
@@ -127,9 +170,9 @@ export function createManagementLogin(config, { launchBrowser = openSystemBrowse
         (!["GET", "HEAD"].includes(req.method) && req.headers.origin !== origin)) {
       res.writeHead(403).end(); return;
     }
-    if (req.method === "GET" && ["/open", "/management.html"].includes(req.url)) {
+    if (req.method === "GET" && ["/open", "/management.html", "/acp"].includes(req.url)) {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(req.url === "/open" ? LANDING : panel); return;
+      res.end(req.url === "/open" ? LANDING : req.url === "/acp" ? acpPage : panel); return;
     }
     if (req.method === "POST" && req.url === "/exchange") {
       const key = req.headers["x-login-ticket"];
@@ -146,12 +189,29 @@ export function createManagementLogin(config, { launchBrowser = openSystemBrowse
       res.writeHead(204).end();
       return;
     }
+    if (req.url.startsWith("/acp/")) {
+      res.setHeader("Content-Type", "application/json");
+      if (!(req.method === "GET" && req.url === "/acp/status") &&
+          !(req.method === "POST" && ["/acp/connect", "/acp/authenticate", "/acp/stop"].includes(req.url))) { res.writeHead(404).end(); return; }
+      const controller = new AbortController();
+      res.once("close", () => { if (!res.writableEnded) controller.abort(); });
+      try {
+        let body = "";
+        for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 4096) throw Error(); }
+        const args = JSON.parse(body || "{}");
+        if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => key !== "methodId") ||
+            args.methodId !== undefined && !["oauth-personal", "oauth-business", "gemini-api-key", "agent-platform"].includes(args.methodId)) throw Error();
+        res.end(JSON.stringify(await requestAcpControl(config, req.url.slice("/acp/".length), args, controller.signal)));
+      } catch (error) { res.writeHead(400).end(JSON.stringify({ error: error.safeMessage ?? "ACP 操作未完成，请检查状态后重试。" })); }
+      return;
+    }
     await relay(config, req, res);
   }
 
   /** 会话期独占监听固定回环端口；占用期间拒绝签发凭证，释放后可重试。 */
   async function start() {
     panel = sessionPanel(await readFile(new URL("./panel/management.upstream.html", import.meta.url)));
+    acpPage = await readFile(new URL("./panel/acp.html", import.meta.url), "utf8");
     if (closed) throw Error("MCP 会话已关闭。");
     const candidate = http.createServer((req, res) => {
       handle(req, res).catch(() => { if (!res.headersSent) res.writeHead(502); res.end(); });

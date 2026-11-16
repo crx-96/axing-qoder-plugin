@@ -15,6 +15,7 @@ import { ensureRunning, shutdownOwnedBridges } from "../server/supervisor.mjs";
 import { loadConfig } from "../server/config.mjs";
 import { createManagementLogin } from "../server/management-gateway.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
+import { createAcpService, getAcpService } from "../server/acp-service.mjs";
 
 const browser = process.env.BRIDGE_TEST_BROWSER;
 const pluginRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -143,7 +144,113 @@ async function expectAuthorizedPanel(send, config, origin) {
   throw new Error("已兑换的管理页未显示真实 Codex 和 Antigravity 授权选项");
 }
 
-test("宿主回收后连续三次入口均打开新浏览器会话，真实管理页保留授权回调", {
+test("真实浏览器验证入口返回、居中布局、主题、重复打开和错误恢复", {
+  skip: !browser && "未设置 BRIDGE_TEST_BROWSER；跳过真实 Chromium 入口页",
+  timeout: 60000,
+}, async t => {
+  assert.ok(isAbsolute(browser));
+  const directory = await mkdtemp(join(tmpdir(), "subscription-entry-browser-"));
+  const profile = join(directory, "browser");
+  let child, exited, socket, send, host;
+  t.after(async () => {
+    try { await stopBrowser(child, exited, send); }
+    finally {
+      socket?.close();
+      if (host) { host.closeAllConnections(); await new Promise(resolve => host.close(resolve)); }
+      await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
+    }
+  });
+  const resource = await managementAppResource();
+  host = createHttpServer((req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    if (req.url === "/shell") { res.end(resource.text); return; }
+    res.end(`<!doctype html><html><body style="margin:0"><iframe id="app" src="/shell" sandbox="allow-scripts allow-same-origin" style="display:block;border:0;width:100vw;height:100vh"></iframe><script>
+      const app=document.querySelector('#app');window.calls=0;window.teardowns=0;window.failNext=false;
+      window.notify=(method,params)=>app.contentWindow.postMessage({jsonrpc:'2.0',method,params},location.origin);
+      window.addEventListener('message',event=>{
+        if(event.source!==app.contentWindow||event.origin!==location.origin)return;
+        const message=event.data;
+        const reply=result=>app.contentWindow.postMessage({jsonrpc:'2.0',id:message.id,result},location.origin);
+        if(message.method==='ui/initialize')reply({protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}},hostContext:{theme:'dark',displayMode:'fullscreen'}});
+        else if(message.method==='ui/notifications/initialized')window.notify('ui/notifications/tool-result',{content:[]});
+        else if(message.method==='tools/call'){
+          window.calls++;
+          reply(window.failNext?{isError:true,content:[{type:'text',text:'无法打开系统默认浏览器。'}]}:{content:[]});window.failNext=false;
+        }else if(message.method==='ui/notifications/request-teardown'){
+          window.teardowns++;app.srcdoc='<p>交互界面暂时无法打开</p><button>重试</button>';
+        }
+      });</script></body></html>`);
+  });
+  host.listen(0, "127.0.0.1");
+  await once(host, "listening");
+  child = spawn(browser, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-sync",
+    "--disable-background-networking", "--disable-extensions", "--remote-debugging-port=0",
+    ...(process.platform === "win32" && /msedge\.exe$/i.test(browser) ? ["--edge-skip-compat-layer-relaunch"] : []),
+    "--user-data-dir=" + profile, "about:blank"], { stdio: "ignore", windowsHide: true });
+  exited = new Promise(resolve => { child.once("exit", resolve); child.once("error", resolve); });
+  await once(child, "spawn");
+  socket = await connectBrowser(profile);
+  const exceptions = [];
+  socket.addEventListener("message", event => {
+    const message = JSON.parse(event.data);
+    if (message.method === "Runtime.exceptionThrown") exceptions.push(message.params);
+  });
+  send = cdpClient(socket);
+  await send("Runtime.enable");
+  const evaluate = async expression => (await send("Runtime.evaluate", { expression, returnByValue: true })).result.value;
+  async function waitFor(expression) {
+    const deadline = Date.now() + 5000;
+    while (!await evaluate(expression)) {
+      if (Date.now() >= deadline) {
+        const state = await evaluate("({calls:window.calls,teardowns:window.teardowns,text:document.querySelector('#app')?.contentDocument.body?.innerText})");
+        assert.fail(`入口页面状态未在期限内更新：${expression}；${JSON.stringify(state)}`);
+      }
+      await delay(50);
+    }
+  }
+  await send("Page.navigate", { url: `http://127.0.0.1:${host.address().port}/` });
+  const doc = "document.querySelector('#app').contentDocument";
+  await waitFor(`${doc}?.querySelector('h1')?.textContent==='请在浏览器中继续'`);
+  for (const [width, height] of [[1280, 800], [360, 640], [2000, 437]]) {
+    await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    for (const theme of ["light", "dark"]) {
+      await evaluate(`window.notify('ui/notifications/host-context-changed',{theme:'${theme}'})`);
+      await waitFor(`${doc}.documentElement.style.colorScheme==='${theme}'`);
+      const layout = await evaluate(`(() => {
+        const doc=${doc},main=doc.querySelector('main'),box=main.getBoundingClientRect(),button=doc.querySelector('#open');
+        return {x:box.x+box.width/2,y:box.y+box.height/2,width:doc.documentElement.scrollWidth,
+          height:doc.documentElement.scrollHeight,text:main.innerText,button:button.textContent,disabled:button.disabled};
+      })()`);
+      assert.ok(Math.abs(layout.x - width / 2) <= 1, "内容水平居中");
+      assert.ok(Math.abs(layout.y - height / 2) <= 1, "内容垂直居中");
+      assert.equal(layout.width, width, "窄屏不产生水平滚动");
+      assert.equal(layout.height, height, "正常文案不产生垂直溢出");
+      assert.equal(layout.button, "再次打开管理页");
+      assert.equal(layout.disabled, false);
+      assert.doesNotMatch(layout.text, /重试|失败|暂时无法打开/);
+    }
+  }
+  await evaluate("document.querySelector('#app').style.display='none'");
+  await evaluate("document.querySelector('#app').style.display='block'");
+  assert.equal(await evaluate("window.calls"), 0, "返回入口不自动打开新窗口");
+  await evaluate(`${doc}.querySelector('#open').focus()`);
+  assert.equal(await evaluate(`${doc}.activeElement.id`), "open");
+  await send("Page.bringToFront");
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "char", key: "Enter", code: "Enter", text: "\r", unmodifiedText: "\r", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor(`window.calls===1 && !${doc}.querySelector('#open').disabled`);
+  await evaluate(`window.failNext=true;${doc}.querySelector('#open').click()`);
+  await waitFor(`${doc}.querySelector('#status').textContent==='无法打开系统默认浏览器。'`);
+  assert.equal(await evaluate(`${doc}.querySelector('h1').textContent`), "订阅代理管理");
+  await evaluate(`${doc}.querySelector('#open').click()`);
+  await waitFor(`${doc}.querySelector('h1').textContent==='请在浏览器中继续'`);
+  assert.equal(await evaluate("window.calls"), 3);
+  assert.equal(await evaluate("window.teardowns"), 0);
+  assert.deepEqual(exceptions, [], "页面无未捕获的脚本异常");
+});
+
+test("保留入口并连续打开管理页，真实浏览器验证 ACP 连接、认证、停用及过期", {
   skip: nativeCoreSkip || (!browser && "未设置 BRIDGE_TEST_BROWSER；跳过真实 Chromium 管理页"),
   timeout: 90000,
 }, async t => {
@@ -167,6 +274,25 @@ test("宿主回收后连续三次入口均打开新浏览器会话，真实管�
     BRIDGE_API_KEY: "synthetic-browser-fixture",
   } });
   assert.equal((await ensureRunning(config)).ready, true);
+  await getAcpService(config).close();
+  let failConnect = false, authenticated;
+  const acp = createAcpService(config, {
+    prepareRuntime: async () => {
+      if (failConnect) throw Object.assign(Error("fixture failure"), { code: "ACP_START_FAILED", safeMessage: "测试连接失败" });
+      return { path: "fixture", source: "host", version: "1.5.0" };
+    },
+    Connection: class {
+      async initialize() { return { authMethods: [{ id: "gemini-api-key" }] }; }
+      async call(method, args) {
+        if (method === "authenticate") { authenticated = args.methodId; return {}; }
+        assert.equal(method, "session/new");
+        return { sessionId: "browser-fixture", models: { availableModels: [{ modelId: "fixture", name: "Browser fixture" }] } };
+      }
+      async close() {}
+    },
+  });
+  await acp.listen();
+  t.after(() => acp.close());
   child = spawn(browser, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-sync",
     "--disable-background-networking", "--disable-extensions", "--remote-debugging-port=0",
     ...(process.platform === "win32" && /msedge\.exe$/i.test(browser) ? ["--edge-skip-compat-layer-relaunch"] : []),
@@ -203,7 +329,7 @@ test("宿主回收后连续三次入口均打开新浏览器会话，真实管�
       let app,closingId;
       window.closedApps=0;window.intermediateVisible=false;
       function openApp(){
-        if(app)return;
+        if(app){app.contentDocument.querySelector('#open').click();return;}
         app=document.createElement('iframe');app.id='app';app.style='border:0;width:100vw;height:90vh';
         app.setAttribute('sandbox','allow-scripts allow-same-origin');app.src='/shell';document.body.append(app);
       }
@@ -230,15 +356,17 @@ test("宿主回收后连续三次入口均打开新浏览器会话，真实管�
   const waitOpen = async count => {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
-      const state = (await send("Runtime.evaluate", { expression: `({closed:window.closedApps,visible:window.intermediateVisible,frames:document.querySelectorAll('iframe').length})`, returnByValue: true })).result.value;
-      if (opened === count && state.closed === count) {
-        assert.equal(state.frames, 0, "成功后入口页面必须被回收");
-        assert.equal(state.visible, false, "正常路径不展示中间页");
+      const state = (await send("Runtime.evaluate", { expression: `({closed:window.closedApps,frames:document.querySelectorAll('iframe').length,
+        ready:document.querySelector('iframe')?.contentDocument.querySelector('h1')?.textContent==='请在浏览器中继续'
+          &&!document.querySelector('iframe')?.contentDocument.querySelector('#open')?.disabled})`, returnByValue: true })).result.value;
+      if (opened === count && state.ready) {
+        assert.equal(state.closed, 0, "成功后不能销毁仍展示的入口");
+        assert.equal(state.frames, 1, "返回时复用入口页面");
         return;
       }
       await delay(100);
     }
-    throw Error("管理入口未完成浏览器打开和页面回收");
+    throw Error("管理入口未完成浏览器打开和状态更新");
   };
   const menuDeadline = Date.now() + 10000;
   while (!(await send("Runtime.evaluate", { expression: "Boolean(document.querySelector('#menu'))", returnByValue: true })).result.value) {
@@ -256,44 +384,35 @@ test("宿主回收后连续三次入口均打开新浏览器会话，真实管�
   await send("Runtime.evaluate", { expression: "window.testDocumentAboutToReload = true" });
   await send("Page.reload", { ignoreCache: true });
   await expectAuthorizedPanel(send, config, origin);
-  const blocker = createServer(connection => connection.destroy());
-  t.after(async () => { if (blocker.listening) await new Promise(resolve => blocker.close(resolve)); });
-  for (const manual of [true, false]) {
-    if (manual) {
-      blocker.listen({ port: 51121, exclusive: true });
-      await once(blocker, "listening");
-    } else {
-      await new Promise(resolve => blocker.close(resolve));
-      await send("Runtime.evaluate", { expression: "window.testDocumentAboutToReload = true" });
-      await send("Page.reload", { ignoreCache: true });
-      await expectAuthorizedPanel(send, config, origin);
-    }
-    await send("Runtime.evaluate", { expression: "Array.from(document.querySelectorAll('button')).find(element => element.textContent.trim() === 'Antigravity').click()" });
+  const evaluate = async expression => (await send("Runtime.evaluate", { expression, returnByValue: true })).result.value;
+  const waitFor = async expression => {
     const deadline = Date.now() + 10000;
-    let state;
-    while (Date.now() < deadline) {
-      const result = await send("Runtime.evaluate", { expression: `(() => {
-        const dialog = document.querySelector('.modal');
-        if (!dialog) return null;
-        const input = dialog.querySelector('input[placeholder^="http://localhost:51121/"]');
-        const open = Array.from(dialog.querySelectorAll('button')).find(element => element.textContent.trim() === '打开链接');
-        return {ready:!!input&&!input.disabled&&!!open&&!open.disabled,
-          manual:dialog.innerText.includes('本机回调监听启动失败，已切换为手动回填'),optional:!!dialog.querySelector('[class*="optional"]')};
-      })()`, returnByValue: true });
-      state = result.result.value;
-      if (state?.ready) break;
-      await delay(100);
+    while (!await evaluate(expression)) {
+      assert.ok(Date.now() < deadline, `页面状态未更新：${expression}`);
+      await delay(50);
     }
-    assert.equal(state?.ready, true, "授权链接和回调输入应可用");
-    assert.equal(state.manual, manual);
-    assert.equal(state.optional, !manual, "仅手动降级时回填步骤才为必填");
-    await send("Runtime.evaluate", { expression: `(() => {
-      const input = document.querySelector('.modal input[placeholder^="http://localhost:51121/"]');
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'http://localhost:51121/oauth-callback?code=synthetic-never-submit&state=wrong-state');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    })()` });
-    await send("Runtime.evaluate", { expression: "Array.from(document.querySelectorAll('.modal button')).find(element => element.textContent.trim() === '提交回调 URL').click()" });
-    const validation = await send("Runtime.evaluate", { expression: "document.querySelector('.modal').innerText.includes('请粘贴本次授权的完整 localhost:51121 回调地址')", returnByValue: true });
-    assert.equal(validation.result.value, true, "不匹配的 state 必须在浏览器端拒绝");
-  }
+  };
+  await evaluate("Array.from(document.querySelectorAll('button')).find(element => element.textContent.trim() === 'Antigravity').click()");
+  await waitFor("document.body.innerText.includes('Google 模型已迁移至 ACP')");
+  await evaluate("document.querySelector('a[href=\"/acp\"]').click()");
+  await waitFor("location.pathname==='/acp' && document.querySelector('#status')?.textContent.includes('尚未连接')");
+  await evaluate("document.querySelector('#connect').click()");
+  await waitFor("document.querySelector('#status').textContent.includes('已就绪') && !document.querySelector('#connect').disabled");
+  assert.match(await evaluate("document.querySelector('#models').innerText"), /acp\/fixture/);
+  await evaluate("document.querySelector('#method').value='gemini-api-key';document.querySelector('#login').click()");
+  await waitFor("document.querySelector('#status').textContent.includes('已就绪') && !document.querySelector('#login').disabled");
+  assert.equal(authenticated, "gemini-api-key");
+  await evaluate("document.querySelector('#stop').click()");
+  await waitFor("document.querySelector('#status').textContent.includes('已停用')");
+  assert.equal(await evaluate("document.querySelector('#models').children.length"), 0);
+  failConnect = true;
+  await evaluate("document.querySelector('#connect').click()");
+  await waitFor("document.querySelector('#status').textContent.includes('测试连接失败') && !document.querySelector('#connect').disabled");
+  failConnect = false;
+  await evaluate("document.querySelector('#connect').click()");
+  await waitFor("document.querySelector('#status').textContent.includes('已就绪') && !document.querySelector('#connect').disabled");
+  await send("Emulation.setDeviceMetricsOverride", { width: 360, height: 640, deviceScaleFactor: 1, mobile: false });
+  assert.equal(await evaluate("document.documentElement.scrollWidth === document.documentElement.clientWidth"), true, "ACP 页面窄屏不溢出");
+  await evaluate("sessionStorage.removeItem('bridge-panel-session');document.querySelector('#refresh').click()");
+  await waitFor("document.querySelector('#status').textContent.includes('登录已过期')");
 });

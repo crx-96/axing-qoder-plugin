@@ -2,79 +2,67 @@
 
 ## CLIProxyAPI
 
-本插件使用 **CLIProxyAPI**，每个安装 ZIP 内置对应平台核心，在宿主启动插件 MCP 进程时后台校验并安装到本机缓存，无需首启下载；只有从源码直接运行等未随包场景才回退下载。MCP 握手只等待本地配置，核心准备完成后自动启动代理，无需先有模型或工具调用。CLIProxyAPI 提供 OpenAI 兼容 API、服务商适配、模型列表、OAuth 管理及图片生成接口。插件自己的代码负责 Qoder MCP 接入、本机进程托管、本地配置和授权辅助，不应被理解为这些上游能力的原创实现。
+本插件使用 CLIProxyAPI，负责 MCP 接入、本机进程托管、配置与 ACP 适配；OpenAI 兼容接口、非 Google 服务商适配及管理接口来自上游，不应被理解为插件原创能力。
 
 | 项目 | 值 |
 | --- | --- |
 | 上游仓库 | https://github.com/router-for-me/CLIProxyAPI |
-| 固定核心版本 | `v8.0.72`；支持 Windows x64、macOS x64/arm64、Linux x64/arm64，每个安装 ZIP 只内置对应平台核心 |
-| 对应源码 | https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.72 |
-| 发布页 | https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.72 |
-| 许可证 | MIT，原文保存在 [`server/bin/LICENSE`](server/bin/LICENSE) |
-| 原程序名 | Windows：`cli-proxy-api.exe`；macOS/Linux：`cli-proxy-api` |
-| 修改情况 | 仅重命名文件，不修改二进制内容，不隐藏上游身份 |
-| 平台与来源清单 | [`server/bin/platforms.json`](server/bin/platforms.json)，`path` 为相对 `server/bin/` 的随包路径；用户缓存仅使用其 basename |
+| 固定核心版本 | `v8.0.74` |
+| 对应源码 | https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.74 |
+| 发布页 | https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.74 |
+| 许可证 | MIT，原文保存在 `server/bin/LICENSE` |
+| 修改情况 | 核心仅重命名，不修改二进制，不隐藏上游身份 |
 
-插件 `1.0.10` 按五个平台分别分发内置核心的安装 ZIP，源码仓库仅保留来源清单、上游文档与许可证，构建缓存和 ZIP 不提交到源码仓库。默认缓存为 `dataDir/runtimes/v8.0.72/<platform-arch>/<basename(platforms.json.path)>`，`dataDir` 默认为 `~/.qoder/qoder-subscription-proxy/data`。MCP 启动会后台校验随包核心并安装到缓存；随包文件不存在时才下载，文件无效或 SHA256 不符时明确报错，不回退网络。watchdog 不安装、下载或自动重试核心准备；高级用户仍可使用 `BRIDGE_BIN` 指向可信当前平台核心。用户 `bridge_stop` 会取消本会话在途准备并持久暂停，重连仍可握手，但不自动安装、下载或启动；显式 `bridge_start` 可恢复。无账号时也可启动管理页，宿主连接 MCP 的时机不由插件控制，不承诺打开空白窗口即触发。
+插件 `1.0.11` 按五个平台打包，各 ZIP 只内置对应核心和原生扩展。核心缓存为 `dataDir/runtimes/v8.0.74/【platform-arch】/【basename】`。源码仓库保留来源清单、文档及许可证，不提交缓存和安装 ZIP。随包核心校验失败时拒绝运行；只有未随包才回退官方 Release 下载。`BRIDGE_BIN` 不扩展平台支持，插件不替换用户指定的核心。
 
-固定二进制的随包路径与 SHA256（上游 `amd64` 对应 Node `x64`，`aarch64` 对应 `arm64`）：
+| 平台 | 随包路径（相对 server/bin） | 官方归档 | 归档 SHA256 | 二进制 SHA256 |
+| --- | --- | --- | --- | --- |
+| Windows x64 | `qoder-plugin-subscription-proxy.exe` | `CLIProxyAPI_8.0.74_windows_amd64.zip` | `d84243f7a67086c2cbea17103ddc0da6f4ab709f3210803a7cf2241a2b492504` | `be9efadefff7e59cb837b47729a22b437d8120a1b5d0676a7f0f45f219fcfb22` |
+| macOS x64 | `darwin-x64/qoder-plugin-subscription-proxy` | `CLIProxyAPI_8.0.74_darwin_amd64.tar.gz` | `788eed3efddb18d1bc9df89022201f88a4373e6e53c8711e16ae74fbef97c1b7` | `f468ed2cd7c5819e24de8875c125a6048d1e1b1f7564c92efeb7f41e050a8255` |
+| macOS arm64 | `darwin-arm64/qoder-plugin-subscription-proxy` | `CLIProxyAPI_8.0.74_darwin_aarch64.tar.gz` | `22f29feb8646aee6b124ba0b4a974a92fbffd71d4c875da7e21ef36d698635f4` | `318acb3eebac60ecab276e8b5a3044e7b5a5cc1c44cf4cbbda891da5a17aa7d1` |
+| Linux x64 | `linux-x64/qoder-plugin-subscription-proxy` | `CLIProxyAPI_8.0.74_linux_amd64.tar.gz` | `94205d5be11464c57fab5e05ebd44d73a89190f9410a13e9e78c67987738c26f` | `810a9f64ecc7f5a704bff666fec4549e262426efd2a0b9202cccfa0b56a73986` |
+| Linux arm64 | `linux-arm64/qoder-plugin-subscription-proxy` | `CLIProxyAPI_8.0.74_linux_aarch64.tar.gz` | `f783d366ee4660448e5365be21db82e32dfa1c0f5c5175addf79ee27828649c5` | `b5aa9ae0e1f3e2a2fcb0aa0d9350d016765d96b19e07e2cc739e15a6261ae02c` |
 
-| 平台/架构 | 随包路径（相对 `server/bin/`） | 二进制 SHA256 |
-| --- | --- | --- |
-| Windows x64 | `qoder-plugin-subscription-proxy.exe` | `3128cc87e842d675b134b87b8e9cf12bf20314d47bcd4e75b1b5758eacabde7d` |
-| macOS x64 | `darwin-x64/qoder-plugin-subscription-proxy` | `bc050e2739c03280cf4425be13d5eaee4b0b52b1beb1dfdb789edea8998c4f25` |
-| macOS arm64 | `darwin-arm64/qoder-plugin-subscription-proxy` | `eff6b1b6a60c23aadb6a17d35117f8ef699c6b73a030c72d631991652763002e` |
-| Linux x64 | `linux-x64/qoder-plugin-subscription-proxy` | `c0c2ac82642300090bc06ad7adef9c14604a5a5ac4db0f0eb0e428b79eefeb1e` |
-| Linux arm64 | `linux-arm64/qoder-plugin-subscription-proxy` | `8d8666274e3f5279acf903c113fda7d41e70168b2f25da426d86e4646625a464` |
+五个平台均使用支持动态插件的发行物，不使用 `no-plugin`。归档 SHA256 已核对官方 `checksums.txt` 和 Release 资产 digest；`checksums.txt` 自身摘要为 `0ef75f553ae75afb536f0afe32a6d7588d7f365a54e1145cdce4514ab4bdace5`。二进制摘要从校验通过的归档计算。这些摘要不是数字签名，也不代表平台运行验收已完成。
 
-官方归档与 `checksums.txt` 中的 SHA256：
+运行时下载使用系统 curl，固定 HTTPS 来源，遵循显式代理及 NO_PROXY；下载失败不无限重试。POSIX 核心执行位为 `0755`。配置、凭据和运行数据保持在插件专属目录，停止只针对插件拥有的进程。
 
-| 官方发布资产 | 归档 SHA256 |
-| --- | --- |
-| [CLIProxyAPI_8.0.72_windows_amd64.zip](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.72/CLIProxyAPI_8.0.72_windows_amd64.zip) | `9c98651a4a35e05fd87193bf722710f32ff87d13ff8b7177d0cfd200f4b51749` |
-| [CLIProxyAPI_8.0.72_darwin_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.72/CLIProxyAPI_8.0.72_darwin_amd64.tar.gz) | `27591f4c829cd3a2ce9daed541328103f6439841d25aefca82207d79126a90af` |
-| [CLIProxyAPI_8.0.72_darwin_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.72/CLIProxyAPI_8.0.72_darwin_aarch64.tar.gz) | `ae008afd4ad52603f220200afc6417102591ba0a847d128cb65e904f86ac7918` |
-| [CLIProxyAPI_8.0.72_linux_amd64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.72/CLIProxyAPI_8.0.72_linux_amd64.tar.gz) | `ce8e57a10e081c1deff48e214ca1932b0c2df51ab35d3628f6a1638c4be90ff7` |
-| [CLIProxyAPI_8.0.72_linux_aarch64.tar.gz](https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.72/CLIProxyAPI_8.0.72_linux_aarch64.tar.gz) | `51a001340f5bea352f935f97f5d2477a06a8349a4fa396d6f6923cef25573b5f` |
-
-上述固定哈希来自通过 `gh release download` 获取的官方 `v8.0.72` 非 `no-plugin` 发布资产；五个平台归档 SHA256 均同时核对官方 `checksums.txt` 和 GitHub Release 资产 digest，二进制 SHA256 由通过校验的归档中原始核心内容计算。`checksums.txt` 自身也已核对 Release 资产 digest（`3b5b7091944731d09e980a4c6a28a4fe6001e3b95574d3d932f6136629ceb11a`）。构建期由 `scripts/fetch-core.mjs` 获取指定平台归档，先核验归档 SHA256，再安全提取核心并核验二进制 SHA256；`scripts/package-plugin.mjs` 再次校验二进制摘要，只将目标平台核心及分发白名单文件写入 ZIP，不打包下载归档或构建缓存。
-
-运行时优先核验随包二进制 SHA256 后安装到当前平台缓存，不连接下载服务。仅未随包时才通过系统 `curl` 回退 HTTPS 下载，沿用相同的归档及二进制两级校验；显式 `QODER_HTTP_PROXY` 优先，否则保留 HTTPS/ALL 代理环境变量（含显式空值），均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。核心后台准备使用独立的 **10 分钟（600 秒）**预算，不阻塞 MCP 握手，不对下载失败自动重试，不下载其他平台；仅当其他进程的核心准备被取消时，仍有效的等待者会接续获取准备锁，这不属于下载失败重试。后台准备失败时保留 MCP 连接，通过状态和安全 stderr 摘要报告原因；修复后可显式 `bridge_start` 或在宿主设置中重连。EOF、断管、退出信号或本会话的 `bridge_stop` 会中止在途准备并清理。
-
-POSIX 默认缓存核心使用 `0755`（清单中的 `mode`），已有缓存仅经哈希验证后才恢复缺失执行位；配置解析本身不修改权限。自定义 `BRIDGE_BIN` 由用户负责来源、兼容性和权限，下载器不替换或 chmod 该文件。不提供 Windows ARM64 或其他平台/架构核心，`BRIDGE_BIN` 高级覆盖不扩展平台支持。
-
-这些哈希用于核对固定版本内容和来源，不等于数字签名或对未来上游下载的背书。更新版本时，应重新核对来源、许可和兼容性，同步清单、本说明与测试。
-
-上游版权行按原许可保留（包括原文中的日期格式）：
+上游版权原文保留：
 
 ```text
 Copyright (c) 2025-2005.9 Luis Pater
 Copyright (c) 2025.9-present Router-For.ME
 ```
 
-随附上游 [`README.md`](server/bin/README.md)、[`README_CN.md`](server/bin/README_CN.md) 和 [`config.example.yaml`](server/bin/config.example.yaml) 保留作为来源与维护参考。其中的赞助、推广、其他产品及示例配置属于上游内容，不代表本插件推荐或保证；普通用户应以本插件 [README](README.md) 的本机安全配置为准。上游示例里的空主机或远程管理配置不适用于本插件。
+随附 `server/bin/README.md`、`README_CN.md`、`config.example.yaml` 是固定版本上游原文。推广及其他产品内容归上游；普通用户以本插件 README 的本机安全配置为准。MIT 不代表远程服务、商标和所有上游依赖由本仓库重新许可。
 
-CLIProxyAPI 及其依赖仍受各自许可约束；MIT 不表示所有第三方依赖、商标或远程服务也由本仓库重新许可。本修订管理网页按下节固定分发，不再依赖核心的周期自动下载。
+## Google Antigravity ACP
+
+- 官方发行注册表：https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json
+- 固定运行时：`1.5.0`，发行地址、归档及成员摘要保存在 `server/acp-platforms.json`。
+- 官方下载域名：`dl.google.com`。插件不修改官方程序，不随安装 ZIP 再分发该程序；缺失时下载到私有缓存。
+- 官方程序由 Google LLC 提供，采用 proprietary 许可，适用条款：https://antigravity.google/terms 。插件 MIT 许可不覆盖官方程序。
+- 五个平台归档均已核对注册表提供的 SHA256；成员摘要从通过校验的归档计算。宿主程序与伴随文件也须匹配已验证发行，不能只凭文件名执行。
+- Windows/macOS 归档约 100 MiB，Linux 归档约 260 MiB、解压约 820 MiB；下载与解压有独立容量限制。
+- 使用官方程序不等于第三方主模型集成自动获得个人订阅授权。用户须选择适用于其用途的官方认证方式；插件不承诺避开识别或风控，不复制其他客户端 token。
+- 协议参考：https://agentclientprotocol.com/overview/introduction 。工具挂起回传方案参考 DSH 项目 https://github.com/KouzakiUmi/dsh-antigravity-acp ，没有将其作为运行依赖或分发其插件。
 
 ## CLI Proxy API Management Center
 
-- 来源：https://github.com/router-for-me/Cli-Proxy-API-Management-Center ，固定发布 `v1.26.7`。
-- 原资产：[management.html](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.26.7/management.html)，随包原样保存在 `server/panel/management.upstream.html`。
-- SHA256：`8c9c6b7d3fb311e6aad5d06e1993e53a2d28389e640448a1bc6304ed20b057b5`，已与该 release 提供的资产 digest 核对。
-- MIT 许可和 `Copyright (c) 2026 Router-For.ME` 声明全文见 [`server/panel/LICENSE`](server/panel/LICENSE)。
-- 修改由 [`server/management-panel.mjs`](server/management-panel.mjs) 可复现生成：Antigravity 优先使用 `is_webui=true` 自动接收回调，仅在核心明确返回回调监听启动失败时重试 `is_webui=false` 手动模式；保留取消信号、回调地址及当前 state 校验，并按实际模式显示中英文回填提示。上游原资产和代理二进制不直接修改。
-- 插件指令使用本地一次性票据进入管理页。入口和会话由插件实现，管理 API 和服务商授权由上游核心提供。
-- 生成页位于插件专属数据目录 `management-panel/<SHA256>/`，核心通过进程级 `MANAGEMENT_STATIC_PATH` 读取；周期自动更新被禁用，后续上游更新需同步来源、哈希、补丁和验证。
+- 来源：https://github.com/router-for-me/Cli-Proxy-API-Management-Center ，固定 `v1.26.7`。
+- 原资产：https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.26.7/management.html ，保存为 `server/panel/management.upstream.html`。
+- SHA256：`8c9c6b7d3fb311e6aad5d06e1993e53a2d28389e640448a1bc6304ed20b057b5`。
+- MIT 与 `Copyright (c) 2026 Router-For.ME` 原文见 `server/panel/LICENSE`。
+- 补丁由 `server/management-panel.mjs` 生成，提供 ACP 管理入口并阻止旧 Google OAuth 操作；不直接修改上游资产。
+- 一次性登录票据、本地管理会话和 ACP 管理页由插件实现。生成页面按内容存入专属目录，禁用核心的管理页自动更新。
 
-## 原生审批路由扩展与 Rust 依赖
+## 原生审批路由与 Rust 依赖
 
-本仓库新增的 `native/approval-router` 是独立 Rust `cdylib`（`qoder-approval-router`），通过 CLIProxyAPI 的 `ModelRouter` 接口在协议翻译前处理审批模型路由，并用响应拦截接口处理 Antigravity 的纯思考空补全；不是修改或替换上游核心，CLIProxyAPI 仍固定 `v8.0.72`、二进制原样保留，上述核心与管理页归属不变。扩展原创代码适用本插件 [`LICENSE`](LICENSE)。
+`native/approval-router` 是独立 Rust cdylib，目前仅保留 Codex 独立审批路由。Gemini 审批降本分流和旧 Antigravity 空补全续写已移除。扩展不修改上游核心，使用插件 MIT 许可。
 
-源码构建使用 `Cargo.lock`，执行 `node scripts/build-approval-router.mjs`（在插件目录下）生成当前宿主 `.approval-build/<platform>/` 产物；不支持一个宿主伪跨编译，五平台由对应 GitHub 原生 runner 构建。ZIP 随附 `server/approval-router/manifest.json` 与当前平台 `qoder-approval-router.dll` / `.dylib` / `.so`；运行时校验平台、ABI 和 SHA256 后安装到 `dataDir/approval-router/<sha256>/`，普通用户无需 Rust，不在线下载或编译扩展。这是当前源码分发设计，不表示已发布或已完成安装验收。
+`Cargo.lock` 固定依赖。各平台须原生构建动态库，运行时验证平台、ABI 与 SHA256。普通安装者无需 Rust；源码构建使用 `scripts/build-approval-router.mjs`。构建或打包不代表已发布或已完成安装验收。
 
-原生依赖许可原文集中保存在随包单一文本 [`server/approval-router-licenses.txt`](server/approval-router-licenses.txt)。下表来自 `cargo tree --locked --offline -e normal,build` 的实际构建依赖，而非将 `Cargo.lock` 中所有可选条目都视为已链接依赖；crate 元数据另用 `cargo metadata --locked --offline --no-deps` 核对。来源为 crates.io registry 下载的对应版本，仓库地址取自 Cargo 元数据。
-
-| 依赖 | 版本 | 上游仓库 | 上游许可 / 本次分发选择 |
+| 依赖 | 版本 | 上游 | 许可 / 分发选择 |
 | --- | --- | --- | --- |
 | base64 | `0.22.1` | https://github.com/marshallpierce/rust-base64 | MIT OR Apache-2.0 / MIT |
 | serde_json | `1.0.154` | https://github.com/serde-rs/json | MIT OR Apache-2.0 / MIT |
@@ -83,12 +71,10 @@ CLIProxyAPI 及其依赖仍受各自许可约束；MIT 不表示所有第三方�
 | serde_core | `1.0.229` | https://github.com/serde-rs/serde | MIT OR Apache-2.0 / MIT |
 | zmij | `1.0.23` | https://github.com/dtolnay/zmij | MIT |
 
-许可证文本取自本机 Cargo registry 中六个对应版本的真实 `LICENSE-MIT`，保留原文，四份完全相同的文本合并列明适用组件，不根据作者字段补造版权行；同时保留 `serde_json/src/lexical/mod.rs` 的 Alexander Huszagh 来源与版权说明。上述替代许可均允许选择 MIT，不需要为此复制完整第三方源码。实际依赖图没有独立的 build-only 依赖 crate；未启用、未链接的可选过程宏依赖不因出现在锁文件中而纳入动态库依赖清单。更新依赖、功能开关或工具链时应重新核对分发义务；本清单不声称覆盖未来依赖或所有工具链内部组件。
+依赖许可原文集中保存在 `server/approval-router-licenses.txt`，保留 `serde_json/src/lexical/mod.rs` 的 Alexander Huszagh 来源及版权说明。未启用、未链接的可选依赖不列入动态库清单；更新依赖和工具链时需重新核对。
 
-## 操作系统、Qoder 与 Node.js
+## 系统与本仓库许可
 
-插件使用 Windows PowerShell、.NET Framework/Win32 API、macOS/Linux 系统能力和当前 Qoder Desktop 的 Node 运行时，不在仓库中重新分发操作系统、Qoder 或 Node。相关产品和运行时遵循各自许可及使用条款。本仓库不是其官方扩展目录或授权发行方。
+插件使用宿主 Windows PowerShell、.NET/Win32、macOS/Linux、Qoder 和 Node.js 能力，不重新分发这些产品或运行时，其许可分别适用。本仓库不是 Google、Qoder 或上游项目的官方扩展。
 
-## 本仓库许可与免责声明
-
-插件原创代码的 MIT 许可随插件保留在 [`LICENSE`](LICENSE)。打包、转发或修改本插件时须保留适用版权及许可声明；本说明不替代完整许可证。使用风险与责任边界见 [`DISCLAIMER.md`](DISCLAIMER.md)。
+插件原创代码许可见 `LICENSE`，使用风险及责任边界见 `DISCLAIMER.md`。再分发须保留所有适用版权及许可声明。

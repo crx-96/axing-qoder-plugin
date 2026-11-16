@@ -134,7 +134,7 @@ async function checkDirectories(config, create = false) {
  * stdout 经字节计数管道写盘，stderr 丢弃；不使用 shell、不读取 curlrc、不自动重试。
  * spawnProcess/env 只供独立测试注入，生产调用沿用系统环境。
  */
-async function downloadWithCurl({ url, destination, signal, maxBytes }, spawnProcess, env, readProxy) {
+export async function downloadWithCurl({ url, destination, signal, maxBytes }, spawnProcess = spawn, env = process.env, readProxy = readEffectiveProxyUrl) {
   checkCancelled(signal);
   const windowsRoot = env.SystemRoot ?? env.WINDIR ?? "C:\\Windows";
   if (process.platform === "win32" && !win32.isAbsolute(windowsRoot)) throw coreError("CORE_CURL");
@@ -286,8 +286,8 @@ function checkZipExtra(bytes) {
   }
 }
 
-/** 校验 ZIP 全部目录/本地头，拒绝链接、重叠、重复、加密和 ZIP64，只返回目标普通文件。 */
-async function extractZip(bytes, expected, signal) {
+/** expected=null 保留 ACP 官方程序的伴随文件；所有成员仍执行相同的路径、CRC 和容量校验。 */
+export async function extractZip(bytes, expected, signal, { maxExpandedBytes = MAX_EXPANDED_BYTES, maxBinaryBytes = MAX_BINARY_BYTES } = {}) {
   let end = -1;
   for (let position = bytes.length - 22; position >= Math.max(0, bytes.length - 65557); position--) {
     if (bytes.readUInt32LE(position) === 0x06054b50 && position + 22 + bytes.readUInt16LE(position + 20) === bytes.length) { end = position; break; }
@@ -300,7 +300,7 @@ async function extractZip(bytes, expected, signal) {
       !count || count > 1024 || directoryOffset + directorySize !== end) throw coreError("CORE_ARCHIVE");
   let offset = directoryOffset;
   let expanded = 0;
-  let selected;
+  const selected = new Map();
   const names = new Set();
   const ranges = [];
   for (let index = 0; index < count; index++) {
@@ -324,7 +324,7 @@ async function extractZip(bytes, expected, signal) {
     expanded += size;
     if (next > end || bytes.readUInt16LE(offset + 34) || flags & ~0x080e || ![0, 8].includes(method) ||
         ![0, 0x8000, 0x4000].includes(kind) || (kind === 0x4000 && !directory) ||
-        (directory && (size !== 0 || kind === 0x8000)) || names.has(name) || expanded > MAX_EXPANDED_BYTES) throw coreError("CORE_ARCHIVE");
+        (directory && (size !== 0 || kind === 0x8000)) || names.has(name) || expanded > maxExpandedBytes) throw coreError("CORE_ARCHIVE");
     names.add(name);
     checkZipExtra(bytes.subarray(offset + 46 + nameLength, offset + 46 + nameLength + extraLength));
     // 本地名称、标志、压缩方法须与中心目录逐字相同，不能借第二套名称绕过检查。
@@ -347,18 +347,22 @@ async function extractZip(bytes, expected, signal) {
     }
     if (ranges.some(([begin, stop]) => local < stop && finish > begin)) throw coreError("CORE_ARCHIVE");
     ranges.push([local, finish]);
-    if (name === expected) {
-      if (directory || !size || size > MAX_BINARY_BYTES || selected) throw coreError("CORE_ARCHIVE");
-      selected = { start, compressed, size, method, crc };
+    if (name === expected || (expected === null && !directory)) {
+      if (directory || !size || size > maxBinaryBytes) throw coreError("CORE_ARCHIVE");
+      selected.set(name, { start, compressed, size, method, crc });
     }
     offset = next;
   }
-  if (offset !== end || !selected) throw coreError("CORE_ARCHIVE");
-  const packed = bytes.subarray(selected.start, selected.start + selected.compressed);
-  const binary = selected.method === 0 ? packed : await unzipDeflate(packed, { maxOutputLength: MAX_BINARY_BYTES });
-  checkCancelled(signal);
-  if (binary.length !== selected.size || crc32(binary) !== selected.crc) throw coreError("CORE_ARCHIVE");
-  return binary;
+  if (offset !== end || !selected.size) throw coreError("CORE_ARCHIVE");
+  const files = new Map();
+  for (const [name, entry] of selected) {
+    const packed = bytes.subarray(entry.start, entry.start + entry.compressed);
+    const binary = entry.method === 0 ? packed : await unzipDeflate(packed, { maxOutputLength: maxBinaryBytes });
+    checkCancelled(signal);
+    if (binary.length !== entry.size || crc32(binary) !== entry.crc) throw coreError("CORE_ARCHIVE");
+    files.set(name, binary);
+  }
+  return expected === null ? files : files.get(expected);
 }
 
 /** 将有界完整归档解为一个内存成员；任何非预期错误也只转换为固定安全文案。 */

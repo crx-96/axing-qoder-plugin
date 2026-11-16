@@ -107,7 +107,7 @@ test("核心下载被阻塞时握手、工具发现、状态和ping均可用；�
   const f = await fixture(t);
   assert.ok((await f.initialize.response).result.serverInfo);
   await f.downloading;
-  assert.equal((await f.request("tools/list").response).result.tools.length, 6);
+  assert.equal((await f.request("tools/list").response).result.tools.length, 5);
   const status = await waitStatus(f, (value) => value.core.state === "downloading");
   assert.equal(status.ready, false);
   assert.equal(status.startupError, undefined);

@@ -1,14 +1,13 @@
-/** 订阅代理生图：GPT 族走 OpenAI 图片接口，Gemini 族走聊天接口的 images 字段；结果解码落盘，base64 不进入对话。 */
+/** 图片只在本机落盘，base64 不进入对话；未验证的 ACP 生图不能回退旧 Google 接口。 */
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { httpFailure } from "./local-http.mjs";
 import { requestOwned } from "./supervisor.mjs";
 
-/** 两个生图族的模型命名约定：核心图片接口只接受 gpt-image 系，Gemini 图片模型以 -image 结尾并经聊天接口出图。 */
+/** 模型名称分类与通道能力分开；匹配名称不代表该生图通道已开放。 */
 const FAMILY_PATTERNS = {
   gpt: /^gpt-image-/,
-  gemini: /^gemini-.*-image$/,
 };
 /** 生图上游耗时可达数十秒，单独放宽时限；模型清单查询仍用短时限。 */
 const REQUEST_TIMEOUT_MS = 300_000;
@@ -18,10 +17,6 @@ const MODELS_TIMEOUT_MS = 10_000;
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 /** 缺省输出尺寸；调用方可用 size 参数覆盖。 */
 export const DEFAULT_IMAGE_SIZE = "1024x1024";
-const GEMINI_IMAGE_SIZES = new Map([
-  ["1K", "1K"], ["2K", "2K"], ["4K", "4K"],
-  ["1024x1024", "1K"], ["2048x2048", "2K"], ["4096x4096", "4K"],
-]);
 
 /** 生图失败只传播状态码诊断，不回显上游正文或凭据。 */
 function imageFailure(response) {
@@ -61,18 +56,7 @@ async function requestImage(config, { family, model, prompt, size }, signal) {
     }
     return { mime: "image/png", base64: item.b64_json };
   }
-  // Gemini 图片模型不经图片接口；聊天响应的 message.images 携带 data URL。
-  const response = await requestOwned(config, "/v1/chat/completions", {
-    authenticated: true, method: "POST", signal, timeoutMs: REQUEST_TIMEOUT_MS, maxBytes: MAX_IMAGE_BYTES,
-    body: { model, messages: [{ role: "user", content: prompt }], stream: false,
-      image_config: { aspect_ratio: "1:1", image_size: GEMINI_IMAGE_SIZES.get(size) } },
-  });
-  if (response.status !== 200) throw imageFailure(response);
-  const images = JSON.parse(response.text)?.choices?.[0]?.message?.images;
-  const url = Array.isArray(images) ? images[0]?.image_url?.url : undefined;
-  const match = /^data:([a-z0-9+.-]+\/[a-z0-9+.-]+);base64,([A-Za-z0-9+/=\s]+)$/s.exec(typeof url === "string" ? url : "");
-  if (!match) throw new Error("聊天响应未携带 base64 图片数据。");
-  return { mime: match[1], base64: match[2].replace(/\s/g, "") };
+  throw new Error("未支持的生图渠道。");
 }
 
 /** 解码并写入数据目录 generated/；文件名含时间、模型与随机后缀，返回绝对路径与字节数。 */
@@ -99,10 +83,11 @@ async function saveImage(config, { model, mime, base64 }) {
  */
 export async function generateImage(config, { family, prompt, model, size = DEFAULT_IMAGE_SIZE, signal }) {
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("生图提示词必须是非空字符串。");
-  if (family === "gemini" && !GEMINI_IMAGE_SIZES.has(size)) {
-    const safeMessage = "Gemini 生图尺寸仅支持 1K、2K、4K 或对应的 1024x1024、2048x2048、4096x4096 方图。";
-    throw Object.assign(new Error(safeMessage), { safeMessage, code: "ERR_INVALID_ARG_VALUE" });
+  if (family === "gemini") {
+    const safeMessage = "当前 ACP 适配尚未验证图片生成能力；Gemini 生图不可用，不会回退旧 Google 通道。";
+    throw Object.assign(new Error(safeMessage), { safeMessage, code: "ACP_IMAGE_UNSUPPORTED" });
   }
+  if (family !== "gpt") throw new Error("未支持的生图渠道。");
   const models = model ? [model] : await listImageModels(config, family, signal);
   if (!models.length) {
     throw Object.assign(new Error(`当前没有可用的 ${family} 生图模型；请检查账号授权或管理页模型列表。`),
@@ -112,5 +97,5 @@ export async function generateImage(config, { family, prompt, model, size = DEFA
   const chosen = models[0];
   const image = await requestImage(config, { family, model: chosen, prompt, size }, signal);
   const saved = await saveImage(config, { model: chosen, ...image });
-  return { generated: true, family, model: chosen, ...(family === "gemini" ? { requestedSize: size } : { size }), ...saved };
+  return { generated: true, family, model: chosen, size, ...saved };
 }

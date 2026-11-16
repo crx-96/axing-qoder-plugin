@@ -1,7 +1,7 @@
 import { connectOwned } from "./owned-http.mjs";
 import { parseConfigYaml, appendConfigBlock, replaceConfigScalar } from "./config-yaml.mjs";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, readFile, writeFile, readdir, unlink, rename, link, access, chmod } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, readlink, unlink, rename, link, access, chmod } from "node:fs/promises";
 import { constants, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,9 @@ import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
 import { ensureApprovalRouting } from "./approval-routing.mjs";
 import { prepareApprovalRouter, inspectApprovalRouter, ensureApprovalPluginConfig, assertApprovalPluginRegistered } from "./approval-plugin.mjs";
 import { readEffectiveProxyUrl, syncProxyUrl } from "./system-proxy.mjs";
+import { createAcpService, getAcpService } from "./acp-service.mjs";
+import { readAcpModels } from "./acp-provider.mjs";
+import { archiveGoogleModels, configureGoogleExclusions, disableGoogleAuthFiles, disableGoogleCredentials } from "./google-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 const inFlight = new Map();
@@ -143,9 +146,24 @@ export async function ensureDataDir(config, { readProxy = readEffectiveProxyUrl 
   if (proxy.recorded !== undefined) await replacePrivateFile(config.proxyStatePath, `${proxy.recorded}\n`);
 }
 
-/** Windows 创建时间与完整命令行共同防止 PID 回收及同名 exe 误杀。 */
+/** PID 必须连同启动身份核对，不能仅凭仍存活或同名程序判断归属。 */
 export async function processIdentity(pid) {
-  if (!Number.isInteger(pid) || pid < 1 || process.platform !== "win32") return null;
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const [executablePath, commandLine] = await Promise.all([readlink(`/proc/${pid}/exe`), readFile(`/proc/${pid}/cmdline`, "utf8")]);
+      return { pid, executablePath, commandLine, creationDate: fields[19] };
+    } catch (error) { if (error.code === "ENOENT" || error.code === "ESRCH") return null; throw error; }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const { stdout } = await execFileAsync("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="], { timeout: 5000, maxBuffer: 32768, env: { ...process.env, LC_ALL: "C" } });
+      return stdout.trim() ? { pid, signature: stdout.trim() } : null;
+    } catch (error) { if (error.code === 1) return null; throw error; }
+  }
+  if (process.platform !== "win32") return null;
   const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if($p){ [pscustomobject]@{pid=[int]$p.ProcessId; executablePath=$p.ExecutablePath; commandLine=$p.CommandLine; creationDate=$p.CreationDate.ToUniversalTime().ToString('o')} | ConvertTo-Json -Compress }`;
   const { stdout } = await execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true, timeout: 5000, maxBuffer: 32768,
@@ -187,6 +205,32 @@ async function trackedProcess(config) {
     // 升级会改变安装目录；先按记录自身路径认证旧实例，再单独判定是否属于当前配置。
     : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: record?.configPath });
   return { record, identity, owned: sameProcess(record, identity, config) };
+}
+
+export async function requestAcpControl(config, operation, args = {}, signal) {
+  if (!["status", "connect", "authenticate", "stop"].includes(operation)) throw bridgeError("ACP 管理操作无效。");
+  const local = getAcpService(config);
+  if (local) return local.manage(operation, args, signal);
+  const tracked = await trackedProcess(config);
+  const endpoint = tracked?.record.acp;
+  if (!tracked?.owned || tracked.record.panelRevision !== PANEL_REVISION || !endpoint ||
+      !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 ||
+      !/^[a-f0-9]{64}$/.test(endpoint.key)) throw bridgeError("ACP 管理服务尚未就绪，请先启动订阅桥。");
+  const target = { host: "127.0.0.1", port: endpoint.port, apiKey: endpoint.key };
+  const socket = await connectOwned(target, async () => {
+    const current = await trackedProcess(config);
+    if (!current?.owned || !isDeepStrictEqual(current.record, tracked.record)) return null;
+    const identity = await processIdentity(endpoint.owner?.pid);
+    return identity && isDeepStrictEqual(identity, endpoint.owner) ? identity : null;
+  }, signal);
+  const response = await requestLocal(target, "/control/" + operation, {
+    method: operation === "status" ? "GET" : "POST", body: operation === "status" ? undefined : args,
+    authenticated: true, socket, signal, timeoutMs: operation === "status" ? 5000 : 1200000,
+  });
+  let result;
+  try { result = JSON.parse(response.text); } catch { throw bridgeError("ACP 管理服务返回无效响应。"); }
+  if (response.status !== 200) throw bridgeError(result.error?.message ?? "ACP 操作未完成，请检查状态。");
+  return result;
 }
 
 /** 读取并认证同一安装的托管身份，再由操作系统认证实际连接接收者。 */
@@ -275,24 +319,40 @@ async function launch(config, signal) {
   const panelDirectory = await prepareManagementPanel(config);
   // 配置迁移留在 launch 内，纯 ensureDataDir 不依赖编译产物；发布前仍核对并发写入。
   const original = await readFile(config.configPath, "utf8");
-  const updated = ensureApprovalPluginConfig(original, config, approvalRouter.directory);
-  validateExistingConfig(config, updated);
-  if (updated !== original) await replacePrivateFile(config.configPath, updated, original);
-  signal?.throwIfAborted();
-  if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
-  const child = process.platform !== "win32" ? spawnPosixSupervisor(config, panelDirectory) : spawn(powerShell, [
-    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
-    "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
-    "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
-    "-LogPath", join(config.dataDir, "bridge.log"),
-  ], {
-    windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    // 只对子进程指定受控页面，不能让宿主环境把管理端指向外部静态资产。
-    env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
-  });
-  const owned = { child, config, identity: null };
+  const acp = createAcpService(config, { initialModels: readAcpModels(original), onModels: async (_models, _endpoint, _key, signal) => withLifecycleLock(config, async () => {
+    const before = await readFile(config.configPath, "utf8");
+    const after = acp.configure(before);
+    validateExistingConfig(config, after);
+    await replacePrivateFile(config.configPath, after, before);
+  }, 25000, signal) });
+  try {
+    await disableGoogleAuthFiles(config, replacePrivateFile);
+    await acp.listen();
+    const removedModels = [];
+    const updated = acp.configure(configureGoogleExclusions(ensureApprovalPluginConfig(original, config, approvalRouter.directory), removedModels));
+    validateExistingConfig(config, updated);
+    await archiveGoogleModels(config, removedModels, replacePrivateFile);
+    if (updated !== original) await replacePrivateFile(config.configPath, updated, original);
+    signal?.throwIfAborted();
+  } catch (error) { await acp.close(); throw error; }
+  let child;
+  try {
+    if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
+    child = process.platform !== "win32" ? spawnPosixSupervisor(config, panelDirectory) : spawn(powerShell, [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
+      "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
+      "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
+      "-LogPath", join(config.dataDir, "bridge.log"),
+    ], {
+      windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+      // 只对子进程指定受控页面，不能让宿主环境把管理端指向外部静态资产。
+      env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
+    });
+  } catch (error) { await acp.close(); throw error; }
+  const owned = { child, config, identity: null, acp };
   supervisors.set(config.dataDir, owned);
   child.once("exit", () => {
+    void acp.close();
     if (supervisors.get(config.dataDir) === owned) supervisors.delete(config.dataDir);
   });
   child.stderr.resume();
@@ -335,7 +395,10 @@ async function launch(config, signal) {
       ? await processIdentity(launched.pid)
       : await queryPosixSupervisor({ ...launched, binPath: config.binPath, configPath: config.configPath }, config);
     if (!identity) throw bridgeError("代理在启动时退出，请检查 data/bridge.log");
-    owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION, approvalRouterSha256: approvalRouter.sha256 };
+    const owner = await processIdentity(process.pid);
+    if (!owner) throw bridgeError("无法确认 ACP 管理进程身份，未发布管理入口。");
+    owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION, approvalRouterSha256: approvalRouter.sha256,
+      acp: { ...acp.controlEndpoint, owner } };
     await savePid(config, owned.identity);
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
@@ -343,6 +406,7 @@ async function launch(config, signal) {
       if (closing || child.exitCode !== null || child.signalCode !== null) throw bridgeError("代理启动已中止");
       const probe = await probeBridge(config);
       if (probe.state === "bridge") {
+        await disableGoogleCredentials(config, requestOwned);
         await probeModels(config);
         await probeApprovalRouter(config, approvalRouter.directory);
         signal?.throwIfAborted();
@@ -354,6 +418,7 @@ async function launch(config, signal) {
     throw bridgeError("代理未在启动时限内就绪，已回收本次启动的进程");
   } catch (error) {
     await closeSupervisor(child);
+    await acp.close();
     throw error;
   }
 }
@@ -363,8 +428,9 @@ export async function shutdownOwnedBridges() {
   for (const controller of startControllers.values()) controller.abort();
   await Promise.allSettled([...inFlight.values()]);
   // 只关闭本 MCP 持有的 Job 或租约；不按 PID 文件或进程名称清理其他会话。
-  await Promise.all([...supervisors.values()].map(async ({ child, config, identity }) => {
+  await Promise.all([...supervisors.values()].map(async ({ child, config, identity, acp }) => {
     await closeSupervisor(child);
+    await acp?.close();
     if (process.platform === "win32" || !identity || child.exitCode !== 0 || child.signalCode !== null) return;
     // 先确认 guardian 回收，再持锁比对完整记录；watchdog 已发布的新实例不能被旧 owner 删除。
     await withLifecycleLock(config, async () => {
@@ -546,6 +612,7 @@ export async function getStatus(config) {
     dataDir: config.dataDir, configPath: config.configPath,
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
     authCount, models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
+    acp: await requestAcpControl(config, "status").catch(() => ({ state: "unavailable", ready: false })),
     core: await getCoreStatus(config),
     loginHint: `点击 Qoder 更多菜单中的订阅代理管理，或让 AI 调用 bridge_open_management，在系统默认浏览器从固定端口 ${MANAGEMENT_PORT} 免输密码进入管理页。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。`,
   };

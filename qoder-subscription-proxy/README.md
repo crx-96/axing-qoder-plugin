@@ -1,184 +1,130 @@
-# qoder订阅代理 · 1.0.10
+# qoder订阅代理 · 1.0.11
 
-基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Qoder Desktop 第三方插件：将本人合法授权的订阅接入本机 OpenAI 兼容 API，并提供 Qoder「更多 → 订阅代理管理」入口，点击即可在系统默认浏览器打开免密管理页。不赠送订阅、额度或账号权限，不是 Qoder、CLIProxyAPI、OpenAI 或 Google 官方产品。
+面向 Qoder Desktop 的第三方本机代理，使用 CLIProxyAPI `v8.0.74` 与官方 Antigravity ACP `1.5.0`。Google 模型通过 ACP 接入，Qoder 继续负责工具校验、审批和执行；非 Google 渠道保留原有接入方式。
 
-> 管理密码和模型 API Key 都保存在本机用户数据目录。请保护该目录，并让代理仅在本机回环地址提供服务。[免责声明](DISCLAIMER.md) · [第三方软件与许可证](THIRD_PARTY_NOTICES.md)
+本项目不是 Qoder、Google 或其他服务商的官方产品，不提供订阅或账号权限。[免责声明](DISCLAIMER.md) · [第三方软件与许可证](THIRD_PARTY_NOTICES.md)
 
-## 安装与兼容范围
+## 安装与升级
 
-从本地构建目录 `dist/` 或 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 选择安装包，按[仓库下载与安装说明](../README.md#下载与安装)在 Desktop **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入。当前源码构建的安装包按平台拆分并内置对应核心及原生扩展（审批路由与空补全处理），普通安装者无需 Rust，也不在线下载或编译扩展；此说明不代表变更已发布或安装已验收。平台文件名为：Windows x64 为 `qoder-subscription-proxy-v1.0.10-win32-x64.zip`，macOS/Linux 按系统架构选择 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 同名 ZIP；不要下载自动生成的源码归档作为安装包。
+在 Qoder Desktop 的 **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 导入对应平台安装包，启用并连接 MCP。不要选择 GitHub 自动生成的源码 ZIP。
 
-| 项目 | 范围与验证边界 |
+| 平台 | 包名 |
 | --- | --- |
-| Qoder | 管理应用按 Desktop `0.5.12` 随附 MCP Apps 规范实现，宿主实机验收待执行；CN 版程序为 `Qoder CN.exe`，国际版为 `Qoder.exe` |
-| 内置运行时 | Electron 内置 Node mode 或系统 Node 22+；Windows 启动器依赖 PowerShell 5.1、.NET Framework 与 Job Object |
-| Windows | Windows 10 22H2 x64 / Windows 11 x64 为兼容目标；Windows 10 尚未单独验收 |
-| macOS / Linux | x64 / ARM64；依赖 `/bin/sh` 与系统进程工具；尚未实机验证 |
-| 核心 | 固定 CLIProxyAPI `v8.0.72` 原样不改，安装包内置当前平台核心，校验 SHA256 后安装到本机缓存，无需首启下载 |
-| 原生扩展 | Rust `native/approval-router` cdylib，通过核心 `ModelRouter` 与响应拦截接口加载；随包提供当前平台库，不支持运行时下载/编译 |
-| 不支持 | Windows 32 位、原生 Windows ARM64 及其他平台/架构 |
+| Windows x64 | `qoder-subscription-proxy-v1.0.11-win32-x64.zip` |
+| macOS x64 / arm64 | 对应 `darwin-x64` / `darwin-arm64` 后缀 |
+| Linux x64 / arm64 | 对应 `linux-x64` / `linux-arm64` 后缀 |
 
-## 订阅代理管理入口
+这是源码支持范围，不代表所有平台已通过实机验收。Windows ARM64、32 位系统不在插件支持范围。每个包内置本平台核心与 Codex 审批扩展；官方 ACP 不随包再分发，首次需要时下载。
 
-启用插件并连接 `qoder-subscription-proxy` stdio 连接器后，点击 Qoder 左下角 **更多 → 订阅代理管理**，直接在**系统默认浏览器**打开已登录的完整管理页，无需先发送聊天消息或进入插件详情页。入口名称仍为「订阅代理管理」，支持固定到导航栏的客户端可将它固定。
+升级前等待当前任务结束，调用 `bridge_stop`，再导入新版本、重连 MCP 并调用 `bridge_start`。不会自动热替换正在服务旧请求的程序。不要自动降级恢复旧 Google 通道。
 
-全局入口使用 MCP Apps `2026-01-26` 协议，按宿主实际能力声明展示。本实现依据 Qoder Desktop `0.5.12` 随附规范；未声明 MCP Apps 的客户端可通过 `bridge_open_management` 打开同一浏览器管理页。尚未接入从插件直接唤起 Qoder 内置浏览器的接口，不把系统浏览器称为内置浏览器。
+旧 Google 账号会被停用但保留数据；首次需在独立 ACP 配置中完成官方认证，并将 Qoder 的旧 Google Model ID 改为目录中的 `acp/…` ID。模型入口和客户端 API Key 不变。已成功连接的 ACP 模型目录会保留，桥重启后在首次模型请求时惰性重连；主动停用 ACP 会清空活动目录，不会被模型请求自动恢复。
 
-- 点击菜单时由入口工具执行一次浏览器打开操作；成功后通过 `ui/notifications/request-teardown` 请求宿主回收独立应用页。正常路径不显示中间页或“再次打开”按钮，宿主完成回收后，下次点击菜单会创建新入口并生成新的浏览器登录链接。
-- 页面初始化不会重复调用打开工具；失败或取消才展示原因与 **重试打开浏览器** 按钮，不自动重试。仅独立视图请求自动关闭；若宿主没有完成回收，会明确提示手动关闭，不假称已退出。此生命周期行为仍须在实际 Qoder 版本中确认。
-- 票据 1 分钟内一次性使用，浏览器管理会话最长 30 分钟；过期后重新点击更多菜单。入口页回收不会调用停止代理工具，MCP 连接退出仍按既有生命周期撤销票据与会话。
-- 账号授权、配置、上传和导出均在系统浏览器中使用原有完整面板；不再受插件内嵌文件传输大小限制。
-- 不声明旧的 `management-page` HTTP 连接器，不借“待授权”状态保留按钮。
-
-网关随 stdio 连接器监听固定回环端口 `19788`，管理页面禁止被 iframe 嵌入，票据兑换和管理 API 继续要求同源。长期管理密钥不会交给页面；一次性票据只传给系统浏览器，不返回给模型或应用页面。端口被占用或核心未就绪时显示错误，`bridge_status` 提供诊断；打开入口不会擅自启动用户已暂停的代理。
-
-## 固定端口
+## 固定端口与数据
 
 | 端口 | 用途 |
 | --- | --- |
-| `19787` | 模型 API（OpenAI 兼容 `/v1`）与核心原生管理面板 |
-| `19788` | 管理页网关：浏览器免密登录入口与管理 API 同源代理 |
+| `19787` | 模型入口 `http://127.0.0.1:19787/v1`，以及核心原生管理接口 |
+| `19788` | 本机浏览器管理网关 |
 
-两个端口互不相同，作为常量固定，**不随版本更新变动**；模型客户端地址与管理应用都依赖该约定。仅高级环境变量 `BRIDGE_PORT` 可覆盖模型端口，覆盖后须同步修改供应商 Base URL（管理网关仍为 19788）。
+默认数据目录：`~/.qoder/qoder-subscription-proxy/data`。CN 版与国际版共用该插件专属目录，它不是 Qoder 应用设置目录。升级保留用户数据，不复制兄弟插件数据。
 
-## 首次使用
+- `launcher-secrets.json`：独立的模型 `apiKey` 与管理 `mgmtKey`。
+- `config.yaml`、`auths/`：敏感配置及授权。旧 Google 授权停用但不删除。
+- `runtimes/`：固定核心及 ACP 私有运行时，按版本、平台隔离。
+- `approval-router/`：经验证的 Codex 原生扩展。
+- `management-panel/`、`generated/`：管理页副本及 GPT 生图结果。
+- `bridge.pid`、`bridge.paused`、`bridge.proxy`：进程归属、持久暂停与系统代理归属。
 
-1. 安装、启用插件并确认 stdio 连接器已连接。握手只等待本地配置，随包核心与原生扩展在后台校验安装并自动启动代理，无需联网下载，也无需先有聊天模型。扩展必须被核心真实注册并启用，否则不能进入就绪状态。
-2. 点击 **更多 → 订阅代理管理**，直接在系统默认浏览器打开免密管理页；首次接入订阅时选择服务商，由本人登录并同意授权。
-3. 在 Qoder 模型/供应商设置中添加 OpenAI 兼容服务：
-   - **Base URL**：`http://127.0.0.1:19787/v1`
-   - **API Key**：数据目录 `launcher-secrets.json` 中的 `apiKey`
-   - **协议和模型**：按管理页或 `bridge_status` 实际列出的聊天模型选择 Chat Completions 或 Responses
-4. 有可用聊天模型后，可让 AI 调用 `bridge_status` 查看就绪状态、核心准备情况与模型样例。`ready: true` 仅表示本机代理和模型列表接口可用，不保证订阅权限。
+不要公开回环端口、上传数据目录或分享密钥。卸载不会自动删除凭据，也不等于撤销服务商授权。
 
-**手动登录**　也可在代理就绪后打开 <http://127.0.0.1:19787/management.html>，输入数据目录 `launcher-secrets.json` 中的 `mgmtKey`。只向已确认属于本插件的本机管理页输入凭据。
+## 管理入口
 
-API Key 与管理密钥首次随机生成并持久保存，升级不自动轮换或清空授权。不要将密钥、账号 token 或授权 URL 发给 AI、公开截图或提交仓库。
+点击 **更多 → 订阅代理管理**，或调用 `bridge_open_management`，在系统默认浏览器打开一次性登录入口。票据 1 分钟内有效且只能使用一次，浏览器管理会话最长 30 分钟；过期后从 Qoder 重新打开。
 
-**Antigravity（Google 账号）授权**　管理页默认自动接收 `localhost:51121` 回调，无需手动粘贴。只有核心明确报告回调监听启动失败时，页面才自动重试为手动模式，并显示手动回填提示；网络错误、鉴权失败或取消不会触发此重试。手动模式下，完成 Google 授权后复制地址栏完整回调 URL，回到原管理页提交；回调页无法访问不影响手动提交，请勿向占用该端口的其他页面输入授权信息。回调须包含本次授权的 `code` 和匹配的 `state`，请在 5 分钟内完成。独立的 Windows 授权助手仍使用手动回填。
+打开管理入口不会自动解除 `bridge_stop` 的暂停。网关端口占用或核心未就绪会明确报错。MCP Apps 页面只负责浏览器交接；发送打开请求后保留居中的浏览器操作提示，不主动销毁页面。返回入口时可点击“再次打开管理页”，只有真实调用失败才显示错误原因。管理网关与 ACP 即使属于不同 MCP 会话，也能通过独立控制密钥及进程、连接归属校验查询和操作同一个 ACP 服务；模型请求密钥不能用于管理。
 
-## 核心配置策略
+非 Google 授权继续在原管理面板完成。Google 用户点击面板中的 **Antigravity ACP 管理**。不要在旧 Google OAuth 卡片中登录或重新启用旧账号。
 
-插件生成的 `config.yaml` 只包含本机安全必需字段：回环监听与固定端口、仅本机管理（`allow-remote: false`）、固定随包管理页、客户端 API Key、授权目录。**重试、冷却、流式心跳、启动缓冲等请求参数一律沿用 CLIProxyAPI 上游默认值**，插件不写入、不复位、不迁移；如需调整请在管理页或 `config.yaml` 中自行设置。Antigravity 纯思考空补全的插件侧续写不属于这些核心重试参数，见[空补全自动续写](#空补全自动续写)。
+为防止重新启用旧 Google 路由，网关检查供应商及授权修改，不接受 JSON/YAML 完整配置覆盖；非 Google 配置使用各供应商的独立设置入口。不应通过核心原生管理接口或手工修改绕过该策略。管理接口仍是持有管理密钥的本机管理员能力，不是对恶意本机管理员的安全沙箱。
 
-配置校验支持块式映射/列表、单行内联列表与映射、大小写及下划线键、带空格的单行字符串；仍拒绝重复键、锚点、别名、合并、标签及多文档，防止与核心对安全字段产生不同解释。内联配置的编辑与旧审批规则迁移仅改动对应范围，保留同行其他配置。
+## Antigravity ACP 首次连接
 
-第一个功能性例外是终端自动审批兼容：模型切换统一交给原生 `ModelRouter`，在协议翻译前完成；`requests.payload.override` 现在只为审核模型附加原有 `terminalGuidance` 终端风险判断指引，不再承担模型切换。冷启动启用 `plugins.enabled`，仅配置 `qoder-approval-router`，并将 `plugins.dir` 指向经校验的扩展独立目录，不扫描其他目录。已有自定义 `plugins.dir` 或其他扩展配置会明确报冲突，不覆盖用户配置。路由识别与失败边界见下节。
+1. 打开 ACP 管理页，点击 **检测并连接**。
+2. 插件优先检查显式 `BRIDGE_ACP_BIN`，再检查 PATH 中的官方 ACP 程序，最后使用私有缓存。
+3. 候选程序及伴随文件必须匹配固定官方发行并通过 ACP 握手。仅存在 Antigravity 桌面应用不代表提供 ACP 可执行入口。
+4. 自动发现的运行时缺失或不兼容时，下载官方版本到私有缓存；不覆盖宿主安装、不修改全局 PATH、不修改宿主程序执行权限。显式配置错误不静默回退。
+5. 需要认证时选择官方认证方式并点击 **启动官方认证**，本人完成官方交互。连接或安装不等于已登录；插件不解析、复制其他客户端 token。
+6. 获取模型目录后，在 Qoder 添加 **OpenAI Compatible → Chat Completions API**，Base URL 使用现有模型入口，API Key 使用本机 `apiKey`，Model ID 使用管理页列出的完整 `acp/…` ID。
 
-第二个例外是上游出口代理：核心只读取 `requests.proxy-url` 与 `HTTPS_PROXY` 等环境变量，**不读取 Windows 的「系统代理」设置**。冷启动会读取 `HKCU` 的 Internet Settings，把启用中的 HTTP(S) 系统代理写入 `requests.proxy-url`，包括默认端口 80/443；系统代理关闭时写回空值，**空值仍允许核心使用环境代理，不代表强制直连**。同步只改写插件上次写入的值（记录在数据目录 `bridge.proxy`），或用户已清空/删除的代理字段；你自行设置的非空代理（含 `direct`、`none` 或任意自定义地址）原样保留，没有归属记录时即使与系统代理相同也不接管。清空或删除该字段即可恢复跟随。切换代理模式或端口后需 `bridge_stop` 再 `bridge_start`；只调用 `bridge_start` 会复用正在运行的桥，多会话下重连一个连接器也不保证重启共享桥。
+官方程序由 Google 提供并受其条款约束。个人订阅支持某个编辑器不等于允许全部第三方主模型用途；请确认当前用途及认证方式适用。插件如实标识客户端，不伪装官方身份、不规避识别或风控。
 
-系统代理与 TUN 可以并存。地址可建立 TCP 连接时继续使用显式代理，但这不保证代理协议或上游可用，也不保证实际网络只有一跳。地址不可达时才检查活动网卡及路由表：只有 IPv4 的优选默认路由（或覆盖两半地址空间的 `/1` 路由）均指向已连接隧道网卡，且存在非链路本地 IPv6 地址时 IPv6 也满足对应条件，才写入 **`direct` 显式直连，绕过遗留环境代理**；自动写入的 `direct` 同样登记归属，后续冷启动可恢复系统代理。只连接内网的 Tailscale/企业 VPN、非隧道优先路由、等价混合出口、查询失败或超时都不足以触发回退，此时保留系统代理地址，允许客户端恢复后自行连通。路由证据不等于目标服务可用，更具体的路由、客户端分流和上游故障仍可能影响访问；需要固定出口时自行填写代理字段。
+首次下载可能较大：Windows/macOS 约 100 MiB，Linux 约 260 MiB，Linux 解压约 820 MiB。安装使用跨进程锁、摘要校验和临时目录原子发布；失败保留已有版本，不无限重试。下载和登录状态分开显示。
 
-系统代理关闭时不探测地址或网卡，空配置沿用环境代理；要明确禁用环境代理可手填 `direct`/`none`。PAC 自动配置脚本和仅 SOCKS 的系统代理不自动转换为 HTTP(S) 地址，需要固定出口时手工配置。macOS/Linux 不读取 Windows 注册表，沿用核心环境代理。
+宿主程序更新或移除后需重新检测。未支持的参数、模型和认证交互明确报错，不宣称已经生效。
 
-正常安装无需下载核心；仅从源码直接运行等未随包场景才回退下载，并复用上述系统代理发现。下载优先保留显式 `QODER_HTTP_PROXY`、`https_proxy`、`HTTPS_PROXY`、`all_proxy`、`ALL_PROXY`（含显式空值）；这些变量均未设置时才使用系统代理或已确认的隧道直连策略，`NO_PROXY`/`no_proxy` 例外继续生效。下载代理只注入该次 curl 子进程，不修改宿主环境或 Windows 设置。下载失败不自动重试；仅当其他进程的核心准备被取消时，仍有效的等待者会接续获取准备锁，这不属于下载失败重试。
+## ACP 行为与限制
 
-## 原生审批路由
+- 每个主对话回合独立创建官方会话；工具回传阶段保留原 prompt，校验请求历史、模型、工具目录及工具 ID。
+- Qoder 执行工具，适配器不代替 Qoder 自动执行。官方内置文件/终端能力不开放；仅挂载当前请求的受控工具桥。
+- 独立审批请求不强制改投 Gemini Flash，不降低其思考档位，也不与等待工具的主对话共用会话。
+- 流式输出文本；工具结果回填后继续原生成。拒绝、取消、超时、会话失效不会触发旧 Google 通道回退或自动重放副作用工具。
+- 有界并发与等待时间。等待工具结果超过 15 分钟会回收会话；客户端取消将结束对应活动请求。
+- 使用官方 `GEMINI_HOME` 将配置及认证状态隔离到 `dataDir/acp-profile`，不自动合并其他客户端的 MCP、Hooks 或 Skills；宿主程序复用不等于导入宿主登录数据。
+- system/developer 约束通过官方 `systemPrompt.append` 追加，不降级为用户历史，也不替换官方系统指令。不全局删改 Qoder 字样，不额外注入界面状态、无关环境变量或完整日志。
+- 图片理解仅接受内嵌 PNG/JPEG/WebP/GIF，不自动抓取外部图片 URL。
+- 当前不支持任意采样参数、输出 token 上限、多个候选及强制工具选择；收到不支持的参数会明确拒绝。思考档位必须由官方会话声明支持。
+- 使用中若 Qoder 为某个模型默认附加上述不支持参数，需要匹配客户端能力设置，不能通过静默忽略参数假称兼容。
+- 真实账号、真实模型及具体 Qoder 版本的端到端效果须实测；模拟测试和握手不能替代该验收。
 
-扩展只读取宿主模型目录中的 provider 和 model 索引识别模型来源，不读取 Token。同名模型属于多个 provider 时不猜测，保留原路由。Antigravity 与 Codex 都只匹配已知 CN/国际版安全分类器的独立审批请求，普通安全助手对话、引用提示、带工具或混合历史不匹配；Codex 还要求 Responses 的首条 system/developer 消息为单个文本块、仅跟随一条 user 消息，且推理级别为 `none` / `low`。
+## Google 迁移与原生审批路由
 
-| 来源 | 匹配范围 | 翻译前的目标路由 |
-| --- | --- | --- |
-| Antigravity | 独立审批，包含 Claude、Gemini、GPT-OSS；支持 Responses、Chat Completions、Claude Messages、Gemini 原生入口 | `gemini-3.8-flash-high`，推理级别 `low` |
-| Codex | 独立审批，仅 `gpt-*`、Responses，推理级别为 `none` / `low` | `codex-auto-review`，推理级别 `low` |
+冷启动在核心接受请求前停用旧 Google OAuth 文件，并保留全部凭据字段。Google 原生 API Key 配置加入模型排除规则；OpenAI 兼容供应商不支持该字段，纯 Google 供应商设为 disabled，混合供应商将已识别的 Gemini 定义保存至私有 `acp-disabled-models.json` 后从活动模型列表移出，保留凭据和非 Google 模型。已有自定义别名应核对真实上游，无法识别的来源不能假定属于某个模型家族。
 
-正常切换只记录 **INFO**，含渠道、源模型、目标模型和 `low`，不记录提示正文或凭据；真实调用失败仍正常报错。审核输出不改，不伪造允许。已选定路由后，目标模型无权限或不可用时返回错误，不自动回到昂贵模型。未匹配、来源不唯一时保留原路由；如果扩展无法读取模型目录或自身运行异常，核心也可能保留原路由并记录异常，因此这些异常情况下不保证节省额度，但不会跳过宿主审批。
+核心就绪前还通过其管理 API 停用旧 Google 授权；管理网关阻止旧 Google 登录、导入和重新启用。直接调用旧模型应报错，不能作为 ACP 故障时的备选。
 
-ZIP 中的 `server/approval-router/manifest.json` 与当前平台 `qoder-approval-router.dll` / `.dylib` / `.so` 经平台、ABI 和 SHA256 校验后安装到 `dataDir/approval-router/<sha256>/`。扩展缺失、损坏、未被核心真实注册启用都会阻止就绪，不能跳过校验或在线补编译。升级不会自动重启正在处理请求的旧桥；等待请求结束后调用 `bridge_stop`，再 `bridge_start` 才会加载新版扩展，仅重连 MCP 不保证重启共享桥。现有端口和 API 不变。
+Gemini 固定审批分流及旧 Antigravity 空补全续写已移除。Rust 扩展仅保留 **Codex 独立审批**：来源明确为 Codex、`gpt-*`、Responses、推理档位 `none`/`low` 且符合原分类器结构时转给 `codex-auto-review(low)`。普通对话与来源不唯一的请求不匹配。Qoder 原生审批不被移除或伪造。
 
-## 空补全自动续写
-
-Antigravity 可能出现**纯思考空补全**：HTTP 200 正常结束，包含思考内容，但没有可见文本或工具调用。插件保留针对这种结果的单次续写。CLIProxyAPI 从 `v8.0.69` 升至 `v8.0.72` 的[上游变更](https://github.com/router-for-me/CLIProxyAPI/compare/v8.0.69...v8.0.72)新增了异常终止零输出、仅签名且缺少结束原因的空流保护；这些错误与正常结束的纯思考输出应区分，不将上游修复概括成所有空补全都已解决。新版核心与现有续写扩展的兼容性纳入升级回归验证。
-
-插件随包的原生扩展为此注册响应拦截能力，作为**插件侧的临时兼容**：
-
-- 仅处理 **OpenAI Chat Completions** 入口且模型经宿主模型目录确认属于 **Antigravity** 的请求；OpenAI 入口下的其他渠道或模型只记录诊断，不额外调用模型，其他协议不参与空补全检测。
-- 流式在终止分片、非流式在完整响应中检测到“正常结束但零可见文本/工具调用”时，使用宿主模型执行接口带原会话追加一条继续指令，同步续写一次，并合并文本、工具调用与两次调用的 usage。每个请求最多续写一次。
-- `finish_reason` 为 `length`（输出上限截断）或 `content_filter` 时不视为空补全，保持上游原行为。
-- 已由 `ModelRouter` 改投审核模型的审批分类请求不续写，避免追加指令破坏分类器签名或绕过审批路由；这类请求仍按客户端原逻辑重试。
-- 续写成功、失败或跳过都会以 INFO/WARN 写入 `bridge.log`（`空补全已自动续写` / `空补全续写失败` / `空补全未续写`），只含模型、渠道、计费与原因，不记录提示正文或凭据。
-- 续写会额外消耗一次模型调用额度；这是恢复可用性的主动取舍，不是核心配置里的请求重试，也不会改变重试、冷却或心跳等上游默认值。
-
-**移除条件**：当上游原生覆盖相同的“正常结束、纯思考、零可见输出”场景并经过回归确认后，删除重复的插件续写，直接采用上游行为。当前固定核心版本为 `v8.0.72`；插件兼容仍只覆盖 Chat Completions，Responses、Claude Messages、Gemini 原生入口不由本插件追加续写。上游在 HTTP 200 提交前拒绝的异常空流交由核心处理；完全没有可拦截分片的响应也无法由插件注入内容。自定义 `BRIDGE_BIN` 须支持响应拦截与宿主模型执行回调。
+扩展仍必须通过平台、ABI、SHA256 和真实注册检查。已有用户扩展目录冲突时不覆盖；普通安装者无需 Rust。上游核心的路由插件失败可能继续原路由，因此旧 Google 通道的停用不依赖路由异常。
 
 ## MCP 工具与生图
 
 | 工具 | 用途 |
 | --- | --- |
-| `bridge_status` | 查询就绪、核心准备及失败原因、管理地址、凭据数量和模型，不返回 token 或 API Key |
-| `bridge_start` / `bridge_stop` | 解除暂停并启动 / 持久暂停并停止可确认归属的代理 |
-| `bridge_management_app` | 仅应用可见；点击「订阅代理管理」全局入口时直接打开系统默认浏览器 |
-| `bridge_open_management` | 通过对话或应用按钮在系统默认浏览器打开免密管理页 |
-| `image_gen_gpt` | 经本机代理 OpenAI 图片接口生图（`gpt-image-*` 系） |
-| `image_gen_gemini` | 经本机代理聊天接口生图（`gemini-*-image` 系） |
+| `bridge_status` | 本机桥、核心和共享 ACP 状态，不返回密钥 |
+| `bridge_start` / `bridge_stop` | 启动或持久暂停，只处理插件拥有的进程 |
+| `bridge_open_management` | 打开浏览器管理入口 |
+| `bridge_management_app` | 仅应用可见的更多菜单入口 |
+| `image_gen_gpt` | GPT 生图，保存到 `generated/`，返回文件路径 |
 
-生图工具省略 `model` 时按族内可用模型自动决策：仅一个直接生成；多个返回 `needsModelChoice` 与候选列表，由宿主弹窗交用户选择后带 `model` 重调。图片 base64 不落对话，统一解码保存到数据目录 `generated/`，工具只返回路径与元数据。说"GPT/OpenAI 生图"或"Gemini/谷歌生图"即触发对应工具；不使用宿主内置 ImageGen 通道。
+Gemini 生图尚未验证 ACP 支持，工具列表不公开该能力；旧调用会明确返回不可用，不触及旧 Google 接口。GPT 省略 model 且候选不唯一时仍由用户选择，不由插件擅自选模型。
 
-GPT 的 `size` 直接交给图片接口。Gemini 的 `size` 支持方图 `1K`、`2K`、`4K`，或对应的 `1024x1024`、`2048x2048`、`4096x4096`，默认 `1K`；插件将其转换为核心支持的 `image_config`，其他尺寸在请求前明确拒绝，不再静默忽略。具体模型是否支持该档位由上游决定；返回的 `requestedSize` 表示请求参数，不是实测图片尺寸。HTTP 失败保留状态码与本地诊断，不回显上游正文。
+## 核心配置策略
 
-## 数据与安全
+非 ACP 渠道的重试、冷却和流式参数沿用上游默认值；ACP 专用上游设置零额外重试，避免对有状态 prompt 盲目重放。Google 模型排除、受控管理页、Codex 审批指引及运行时注册是显式受管配置。
 
-默认数据目录 **`~/.qoder/qoder-subscription-proxy/data`**（Windows 为 `%USERPROFILE%\.qoder\qoder-subscription-proxy\data`），CN 版与国际版共用该插件专属稳定目录，升级保留已有授权。
+Windows 冷启动按原约定同步系统 HTTP(S) 代理到 `requests.proxy-url`，仅修改插件自己管理的值，用户自定义非空值不被覆盖。系统代理关闭时空值仍可使用环境代理；只有路由证据确认隧道承载出口才使用显式 direct。PAC 和仅 SOCKS 配置不自动转换。macOS/Linux 沿用环境代理。
 
-| 路径 | 内容 |
+| 变量 | 用途 |
 | --- | --- |
-| `launcher-secrets.json` | 随机模型 API Key（`apiKey`）和本安装的管理密码（`mgmtKey`） |
-| `config.yaml`、`auths/` | 运行配置及敏感授权凭据 |
-| `bridge.log` | 日志可能包含上游账号或请求信息，分享前须脱敏 |
-| `bridge.pid`、`bridge.paused` | 归属记录与持久暂停状态 |
-| `bridge.proxy` | 插件上次同步进 `requests.proxy-url` 的系统代理值，用于区分用户自管代理 |
-| `runtimes/` | 经校验的固定版本、当前平台核心 |
-| `approval-router/<sha256>/` | 经平台、ABI 和摘要校验的原生扩展（审批路由与空补全处理），核心只扫描此独立目录 |
-| `management-panel/`、`generated/` | 生成的管理页与生图工具输出 |
-
-保持 `management.allow-remote: false`，仅在可信本机使用；不要通过代理或隧道公开管理服务。Windows 权限由用户目录 ACL 决定，POSIX 新建私有目录用 `0700`、敏感文件用 `0600`。卸载不自动删除授权、密钥、日志和图片，也不等于撤销服务商授权。
-
-### 高级环境变量
-
-| 变量 | 说明 |
-| --- | --- |
-| `BRIDGE_DATA_DIR` | 自定义独立数据目录，不自动迁移数据 |
-| `BRIDGE_PORT` | 模型端口，十进制 `1–65535`，默认 `19787`；变更需同步供应商地址 |
-| `BRIDGE_HOST` | 只允许 `127.0.0.1` |
-| `BRIDGE_API_KEY` | 覆盖模型客户端密钥，须满足 HTTP 请求头要求并与已有配置一致 |
-| `BRIDGE_MGMT_KEY` | 通常留空；管理密码由本机生成，不允许覆盖 |
-| `BRIDGE_BIN` | 可信兼容的 CLIProxyAPI v8 可执行文件；不下载、不替换 |
-| `QODER_HTTP_PROXY` | 未随包时核心 HTTPS 回退下载的优先代理；只影响下载，模型出口见「核心配置策略」的系统代理同步 |
-
-## 自动启动与退出清理
-
-- 自动启动以宿主已拉起 stdio 连接器为前提，不注册系统服务、计划任务或开机启动项。
-- Windows 启动器查找实际 `Qoder.exe` / `Qoder CN.exe` 祖先进程，Job Object 在宿主退出或包装器被强杀时回收 MCP 与核心；POSIX 由 supervisor 持有 guardian 的私有 stdin/EOF 租约，guardian 持有核心并先 TERM、超时再 KILL。外层 supervisor 被强杀时，存活的 guardian 仍会回收核心；这不等于 guardian 也被强杀时的内核回收保证。
-- `bridge_stop` 持久暂停自动恢复并关闭本会话管理网关；`bridge_start` 解除暂停并重试下载或启动，核心就绪后恢复网关，监听成功时清除旧诊断。多任务可复用代理，非创建者结束不主动杀共享代理。
-- 启停与凭据发送前验证进程归属，不按进程名批量杀进程。POSIX 创建者正常退出并确认核心回收后，仅清理仍与本实例完整身份一致的记录；异常退出或其他会话更新过的记录保留。Linux 在 TCP 握手完成但服务端尚未 accept 的窗口内有界等待，归属确认前不发送凭据。
-
-## 故障排查
-
-- **Windows 启动报 CIM/WMI 错误**：检查 Windows Management Instrumentation 服务和进程查询权限；仅安装 Node.js 不能修复系统查询故障。插件仍需验证宿主与核心进程归属，不会在查询失败时绕过验证启动。
-- **按钮点击无反应**：确认 stdio 连接器已连接（网关随其监听）；`bridge_status` 的 `gatewayError` 会说明 19788 占用等原因。
-- **管理页打不开**：等待后台核心准备完成或检查 `bridge_status`；修复失败原因后重连或 `bridge_start`。
-- **模型 API 401**：核对供应商 API Key 与本机 `launcher-secrets.json`。
-- **管理页登录失败**：重新点击更多菜单打开新的登录链接；入口执行失败时可点击“重试打开浏览器”，手动登录时核对 `mgmtKey` 与端口。
-- **403 / 429 / 5xx**：先检查权限、配额、网络和上游异常，不反复重启本机进程。
-- **随包核心校验失败**：提示 SHA256 不匹配或随包核心无效时，重新下载对应平台的官方 ZIP 并重装；哈希不匹配不得跳过校验。
-- **审批扩展缺失 / 损坏 / 未启用**：安装包用户重新获取匹配平台的可信 ZIP；源码用户先构建本平台扩展。核对平台、ABI、SHA256 与核心实际注册状态，不绕过就绪检查。自定义 `BRIDGE_BIN` 也须支持此扩展。
-- **扩展配置冲突**：已有自定义 `plugins.dir` 或其他扩展时会停止准备，不覆盖；先由用户协调配置归属，不把其他扩展复制进审批扩展目录。
-- **审批目标模型报错**：核对对应渠道权限、模型可用性及上游错误；不会伪造审批通过，也不自动切回原昂贵模型。
-- **模型偶发空回复或回合失败**：Antigravity 的纯思考空补全会由原生扩展自动续写一次；在 `bridge.log` 搜索 `空补全` 查看是否命中、续写是否成功。未命中时确认入口为 Chat Completions、模型渠道为 Antigravity，并检查扩展是否实际加载；其他协议或渠道目前只诊断、不续写。若续写仍为空，可降低思考档位或更换模型后重试，不反复重启本机代理。
-- **下载失败（仅未随包的源码运行）**：检查 curl、HTTPS、代理与目录权限后重试；此下载回退仅适用于核心，不适用于原生扩展。
-- **切换 TUN / 系统代理后出口不符合预期**：同步只发生在冷启动，`bridge_stop` 再 `bridge_start`；系统代理不可达且默认路由确认由隧道承载时才写入显式 `direct`。空值仍可能使用环境代理，需要固定出口请自行填写 `requests.proxy-url`，清空或删除可恢复跟随。
+| `BRIDGE_DATA_DIR` | 独立数据目录，不自动迁移 |
+| `BRIDGE_PORT` / `BRIDGE_HOST` | 默认 19787；Host 仅允许 127.0.0.1 |
+| `BRIDGE_API_KEY` | 模型客户端密钥覆盖，须与已有配置一致 |
+| `BRIDGE_BIN` | 自定义兼容核心，不自动下载替换 |
+| `BRIDGE_ACP_BIN` | 官方 ACP 可执行文件绝对路径，仍校验固定发行与伴随程序 |
+| `GEMINI_API_KEY` | 仅在主动选择 API Key 认证时传给官方程序，不写入提示词或日志 |
+| `QODER_HTTP_PROXY` | 下载代理优先值；否则沿用 HTTPS/ALL/NO_PROXY 或系统代理 |
 
 ## 开发验证
 
-源码启动和打包前，须先构建本平台扩展。开发者需要 Node 22+、Rust/Cargo（crate 声明最低 Rust 1.85，工具链须支持锁定依赖）以及宿主本地链接工具链：Windows MSVC Build Tools/Windows SDK、macOS Xcode Command Line Tools 或 Linux C 编译/链接工具链。在仓库根目录运行：
+从仓库根目录运行：
 
 ```sh
-# 默认当前宿主平台；内部执行 cargo build --locked --release
 node qoder-subscription-proxy/scripts/build-approval-router.mjs
 cargo test --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml
 node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
 ```
 
-`Cargo.lock` 固定扩展依赖；输出位于插件目录 `.approval-build/<platform>/`。脚本拒绝在单个宿主伪跨编译其他平台；五平台 Release 由对应 GitHub 原生 runner 分别构建、测试、打各自 ZIP，再汇总上传。完整的本平台 build → fetch → package 命令见[从源码打包](../README.md#从源码打包)。普通安装者不需要这些工具。
+`BRIDGE_TEST_BIN` 指向校验匹配的核心可启用原生核心集成测试。普通测试不联网或使用真实账号；真实 ACP 测试须显式提供官方测试程序/归档，并在隔离账号目录运行。不要使用生产凭据进行自动回归。
 
-普通测试不联网下载核心；原生核心测试需显式设置 `BRIDGE_TEST_BIN` 指向匹配固定 SHA256 的核心。设置 `BRIDGE_TEST_BROWSER` 可运行管理页浏览器交接测试。Windows Job 与 POSIX 生命周期测试须在对应系统执行。
+打包方式见[仓库说明](../README.md#从源码打包)。安装包不包含账号、缓存、测试材料及旧 Google 授权助手；发布与安装需独立执行和验收。

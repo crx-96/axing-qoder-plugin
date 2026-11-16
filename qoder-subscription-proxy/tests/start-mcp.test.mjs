@@ -198,11 +198,11 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     return;
   }
   const initialized = await request("中文握手", "initialize", initializeParams);
-  assert.equal(initialized.serverInfo.version, "1.0.10");
+  assert.equal(initialized.serverInfo.version, "1.0.11");
   assert.equal(initialized.protocolVersion, "2025-06-18");
   assert.deepEqual(await request("中文往返-引号\"-反斜杠\\", "ping"), {});
   const tools = await request("工具清单", "tools/list");
-  assert.equal(tools.tools.length, 6);
+  assert.equal(tools.tools.length, 5);
   assert.ok(tools.tools.some((tool) => tool.name === "bridge_open_management"));
   assert.ok(!tools.tools.some(tool => tool.name === "bridge_generate_image"));
   if (killWrapper) {

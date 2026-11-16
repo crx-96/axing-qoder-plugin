@@ -1,23 +1,22 @@
 const main = document.querySelector("main");
 const status = document.querySelector("#status");
+const heading = document.querySelector("h1");
 const open = document.querySelector("#open");
 const pending = new Map();
 let sequence = 0;
 let ready = false;
 let closed = false;
 let busy = false;
-let closingRequested = false;
-let closeTimer;
-let displayMode;
 let initialResult;
 const send = message => window.parent.postMessage({ jsonrpc: "2.0", ...message }, "*");
 
-function report(text, retry = false) {
+function report(text, canOpen = false, title = "订阅代理管理") {
+  heading.textContent = title;
   status.textContent = text;
-  open.hidden = !retry;
+  open.hidden = !canOpen;
   main.hidden = false;
 }
-function controls() { open.disabled = !ready || closed || busy || closingRequested; }
+function controls() { open.disabled = !ready || closed || busy; }
 function request(method, params) {
   if (closed || pending.size >= 2) return Promise.reject(Error("应用未连接，请重新打开。"));
   const id = `management-${++sequence}`;
@@ -29,27 +28,16 @@ function request(method, params) {
   });
 }
 function render(result) {
-  if (closingRequested || closed) return;
+  if (closed) return;
   if (result?.isError) {
-    report(result.content?.find(item => item.type === "text")?.text || "管理页打开失败，请检查代理状态后重试。", true);
+    report(result.content?.find(item => item.type === "text")?.text || "管理页打开失败，请检查代理状态后重试。", ready);
     return;
   }
-  if (displayMode !== "fullscreen") {
-    report("已请求在系统默认浏览器打开管理页。当前容器不支持自动关闭，请关闭此页后再从更多菜单打开。");
-    return;
-  }
-  closingRequested = true;
-  main.hidden = true;
-  controls();
-  // 宿主复用已挂载的全局页面；成功后请求回收，下一次菜单点击才会重新执行入口工具。
-  closeTimer = setTimeout(() => {
-    if (!closed) report("已请求打开浏览器，但 Qoder 尚未关闭入口页。请关闭当前页面后重新进入。");
-  }, 5000);
-  send({ method: "ui/notifications/request-teardown", params: {} });
+  // 回收通知只销毁页面实例，不保证退出全局入口；保留页面避免宿主显示失效占位。
+  report("已向系统默认浏览器发送打开请求。请切换到浏览器，继续管理订阅与账号。", ready, "请在浏览器中继续");
 }
 function hostContext(context) {
   if (["light", "dark"].includes(context?.theme)) document.documentElement.style.colorScheme = context.theme;
-  if (context?.displayMode) displayMode = context.displayMode;
 }
 function receive(event) {
   if (closed || event.source !== window.parent) return;
@@ -74,10 +62,10 @@ function receive(event) {
   }
 }
 async function openManagement() {
-  if (!ready || busy || closed || closingRequested) return;
+  if (!ready || busy || closed) return;
   busy = true;
   controls();
-  main.hidden = true;
+  report("正在请求系统默认浏览器打开管理页…", true);
   try {
     const result = await request("tools/call", { name: "bridge_open_management", arguments: {} });
     if (!closed) render(result);
@@ -87,7 +75,6 @@ async function openManagement() {
 function dispose() {
   if (closed) return;
   closed = true;
-  clearTimeout(closeTimer);
   for (const task of pending.values()) { clearTimeout(task.timer); task.reject(Error("应用已关闭。")); }
   pending.clear();
   window.removeEventListener("message", receive);

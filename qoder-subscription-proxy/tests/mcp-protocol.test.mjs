@@ -176,7 +176,7 @@ test("本地配置准备完成后initialize成功，之前拒绝工具且不重�
   ready.resolve();
   assert.ok((await h.response(1)).result.serverInfo);
   h.send(request(5, "tools/list"));
-  assert.equal((await h.response(5)).result.tools.length, 6);
+  assert.equal((await h.response(5)).result.tools.length, 5);
   assert.equal(prepared, 1);
 });
 
@@ -237,7 +237,7 @@ test("工具发现公布管理与生图工具，旧生图调用按未知工具�
   const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18" }), { config });
   assert.equal(initialized.result.instructions, undefined);
   const { result } = await handleMessage(request(2, "tools/list"), { config });
-  assert.deepEqual(result.tools.map(tool => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management", "image_gen_gpt", "image_gen_gemini"]);
+  assert.deepEqual(result.tools.map(tool => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management", "image_gen_gpt"]);
   for (const tool of result.tools.filter((entry) => entry.name.startsWith("bridge_"))) {
     assert.deepEqual(tool.inputSchema, { type: "object", properties: {}, additionalProperties: false });
     for (const args of [null, [], { force: true }]) {

@@ -284,8 +284,9 @@ test("prepare：生成独立市场、原样 catalog、POSIX 清单，不复制�
   assert.equal(copied["server/local-debug-only.mjs"], undefined);
   assert.equal(copied["commands/private.md"], undefined);
   assert.ok(copied["scripts/proxy-supervisor.mjs"]);
-  assert.ok(copied["Antigravity授权.cmd"]);
-  assert.ok(copied["scripts/antigravity-login.ps1"]);
+  assert.equal(copied["Antigravity授权.cmd"], undefined);
+  assert.equal(copied["scripts/antigravity-login.ps1"], undefined);
+  assert.ok(copied["server/acp-runtime.mjs"]);
   assert.ok(copied["scripts/start-mcp.ps1"]);
   for (const file of Object.keys(copied)) assert.doesNotMatch(file, /(^|\/)data\/|(^|\/)tests\/|unknown\.tmp/);
   assert.ok(copied["server/core-runtime.mjs"]);
