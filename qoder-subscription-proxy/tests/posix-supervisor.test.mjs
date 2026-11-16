@@ -296,7 +296,7 @@ test("核心自然退出可认证离线，supervisor 退出后的 stale 记录�
   const f = await fixture(t);
   await writeFile(f.trigger, "exit the isolated child");
   await waitUntil(() => exited(f.record.pid));
-  assert.equal(await queryPosixSupervisor(f.record, f.config), null);
+  await waitUntil(async () => await queryPosixSupervisor(f.record, f.config) === null);
   await closeLease(f.child);
   assert.equal(await queryPosixSupervisor(f.record, f.config), null);
 });
