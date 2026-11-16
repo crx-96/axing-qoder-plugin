@@ -84,7 +84,7 @@ async function copyRuntime(root) {
   const modules = (await readdir(join(pluginRoot, "server")))
     .filter((name) => name.endsWith(".mjs")).map((name) => join("server", name));
   for (const path of [...modules, "scripts/proxy-supervisor.mjs",
-    "server/bin/platforms.json", "server/panel/management.upstream.html"]) {
+    "server/acp-platforms.json", "server/bin/platforms.json", "server/panel/management.upstream.html", "server/panel/acp.html"]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await copyFile(join(pluginRoot, path), join(root, path));
   }
@@ -100,6 +100,9 @@ test("隔离运行副本包含已校验的当前平台审批扩展", { skip: nat
   await copyRuntime(directory);
   const expected = readApprovalArtifact(pluginRoot, `${process.platform}-${process.arch}`);
   for (const [path, bytes] of expected) assert.deepEqual(await readFile(join(directory, path)), bytes);
+  for (const path of ["server/acp-platforms.json", "server/panel/acp.html"]) {
+    assert.deepEqual(await readFile(join(directory, path)), await readFile(join(pluginRoot, path)));
+  }
   assert.deepEqual((await readdir(join(directory, "server/approval-router"))).sort(),
     [...expected.keys()].map(path => path.split("/").at(-1)).sort());
 });
@@ -421,8 +424,15 @@ test("POSIX 升级核心路径时不接管存活旧实例，owner SIGKILL 保留
   ];
   const originalData = await readData();
   const originalAuths = await readdir(f.config.authDir);
-  async function assertDataUnchanged() {
-    assert.deepEqual(await readData(), originalData);
+  async function assertDataUnchanged(restarted = false) {
+    const currentData = await readData();
+    if (restarted) {
+      const normalize = text => replaceConfigScalar(replaceConfigScalar(text,
+        ["api-keys", "openai-compatibility", 0, "base-url"], "managed-acp-endpoint"),
+        ["api-keys", "openai-compatibility", 0, "keys", 0, "api-key"], "managed-acp-key");
+      assert.notEqual(currentData[0], originalData[0], "新 ACP 实例重新签发内部端口和密钥");
+      assert.deepEqual([normalize(currentData[0]), currentData[1]], [normalize(originalData[0]), originalData[1]]);
+    } else assert.deepEqual(currentData, originalData);
     assert.deepEqual(await readdir(newConfig.authDir), originalAuths);
     await assert.rejects(readFile(newConfig.pausedPath), { code: "ENOENT" });
   }
@@ -446,7 +456,7 @@ test("POSIX 升级核心路径时不接管存活旧实例，owner SIGKILL 保留
     assert.equal(upgraded.binPath, newBin);
     assert.notEqual(upgraded.creationDate, oldRecord.creationDate);
     assert.equal((await getStatus(newConfig)).ready, true);
-    await assertDataUnchanged();
+    await assertDataUnchanged(true);
   } finally {
     // 在旧 fixture 删除目录前清理路径 B；只经已验证控制端点停止，不按未知 PID 发信号。
     await stopBridge(newConfig);

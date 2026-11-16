@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.0.11
+# qoder订阅代理 · 1.0.12
 
 面向 Qoder Desktop 的第三方本机代理，使用 CLIProxyAPI `v8.0.74` 与官方 Antigravity ACP `1.5.0`。Google 模型通过 ACP 接入，Qoder 继续负责工具校验、审批和执行；非 Google 渠道保留原有接入方式。
 
@@ -10,7 +10,7 @@
 
 | 平台 | 包名 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.0.11-win32-x64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.0.12-win32-x64.zip` |
 | macOS x64 / arm64 | 对应 `darwin-x64` / `darwin-arm64` 后缀 |
 | Linux x64 / arm64 | 对应 `linux-x64` / `linux-arm64` 后缀 |
 

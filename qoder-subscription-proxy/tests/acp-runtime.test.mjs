@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, delimiter, resolve } from "node:path";
 import { ensureAcpRuntime, hostAcpCandidates, assertAcpRuntimeUnchanged } from "../server/acp-runtime.mjs";
 
 async function fixture(t) {
-  const dataDir = await mkdtemp(join(tmpdir(), "qoder-acp-runtime-"));
+  const dataDir = await realpath(await mkdtemp(join(tmpdir(), "qoder-acp-runtime-")));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   return { dataDir, port: 19787 };
 }
