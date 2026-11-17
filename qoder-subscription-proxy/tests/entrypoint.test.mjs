@@ -18,13 +18,17 @@ async function fixture(t, extra = {}) {
   await once(server, "listening");
   const port = server.address().port;
   await new Promise((resolve) => server.close(resolve));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const managementPort = server.address().port;
+  await new Promise(resolve => server.close(resolve));
   const dataDir = join(directory, "data");
   if (extra.paused) {
     await mkdir(dataDir);
     await writeFile(join(dataDir, "bridge.paused"), "user stopped\n");
   }
   const child = spawn(process.execPath, [entry], {
-    env: { ...process.env, BRIDGE_DATA_DIR: dataDir, BRIDGE_PORT: String(port),
+    env: { ...process.env, BRIDGE_DATA_DIR: dataDir, BRIDGE_PORT: String(port), BRIDGE_MANAGEMENT_PORT: String(managementPort),
       BRIDGE_HOST: "127.0.0.1", BRIDGE_MGMT_KEY: "123456", BRIDGE_API_KEY: "test-secret-do-not-return",
       BRIDGE_BIN: join(directory, "missing-core"), ...extra.env },
     stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
@@ -95,7 +99,7 @@ test("缺失自定义核心只导致后台启动失败，MCP仍可查询状态�
 
 test("已暂停时允许管理MCP连接，不启动或下载核心", { timeout: 10000 }, async (t) => {
   const f = await fixture(t, { paused: true, env: { BRIDGE_BIN: process.execPath } });
-  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "1.0.11");
+  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "1.1.0");
   const status = JSON.parse((await f.request("tools/call", { name: "bridge_status", arguments: {} })).result.content[0].text);
   assert.equal(status.ready, false);
   assert.equal(status.autoRecoveryPaused, true);

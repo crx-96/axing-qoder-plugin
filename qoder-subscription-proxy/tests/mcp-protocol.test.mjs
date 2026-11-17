@@ -84,7 +84,7 @@ function harness(t, overrides = {}, options = {}) {
   return { input, output, messages, done, send, wait, response: (id) => wait((message) => message.id === id) };
 }
 
-test("MCP Apps 全局管理入口直接打开浏览器，结果不包含票据", async () => {
+test("MCP Apps 全局管理入口只读核心状态", async () => {
   const ctx = { config };
   const capabilities = { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } } };
   const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18", capabilities }), ctx);
@@ -102,13 +102,16 @@ test("MCP Apps 全局管理入口直接打开浏览器，结果不包含票据",
   assert.ok(resource.text.includes("订阅代理管理"));
   assert.ok(!resource.text.includes(config.mgmtKey));
   assert.equal((await handleMessage(request(4, "resources/read", { uri: "file:///private" }), ctx)).error.code, -32602);
+  assert.equal(app.annotations.readOnlyHint, true);
+  assert.equal(tools.filter(tool => tool._meta?.ui?.visibility?.includes("app")).length, 1);
   let opened = 0;
-  const ticket = "a".repeat(64);
-  const response = await handleMessage(call(5, "bridge_management_app"), ctx, { handlers: { openManagement: async () => { opened++; return ticket; } } });
-  assert.equal(opened, 1);
-  assert.equal(response.result._meta, undefined);
-  assert.match(response.result.content[0].text, /系统浏览器/);
-  assert.ok(!JSON.stringify(response).includes(ticket));
+  const state = { ready: false, reason: "核心暂停" };
+  const response = await handleMessage(call(5, "bridge_management_app"), ctx, { handlers: {
+    openManagement: () => { opened++; }, getStatus: async () => state,
+  } });
+  assert.equal(opened, 0);
+  assert.deepEqual(JSON.parse(response.result.content[0].text), state);
+  assert.ok(!JSON.stringify(response).includes(config.mgmtKey));
   const legacy = { config };
   await handleMessage(request(6, "initialize", { protocolVersion: "2025-06-18" }), legacy);
   assert.equal((await handleMessage(call(7, "bridge_management_app"), legacy)).error.code, -32602);
@@ -248,8 +251,12 @@ test("工具发现公布管理与生图工具，旧生图调用按未知工具�
     assert.deepEqual(tool.inputSchema.required, ["prompt"]);
     assert.equal(tool.inputSchema.additionalProperties, false);
   }
-  const removed = await handleMessage(call(4, "bridge_generate_image", { prompt: "test" }), { config });
-  assert.equal(removed.error.code, -32602);
+  for (const supportsApps of [false, true]) {
+    for (const name of ["bridge_generate_image", "bridge_configure_approval", "bridge_approval_list", "bridge_approval_save", "bridge_approval_delete", "image_gen_gemini", "bridge_setup_antigravity"]) {
+      const removed = await handleMessage(call(4, name, {}), { config, supportsApps });
+      assert.equal(removed.error.code, -32602);
+    }
+  }
 });
 
 test("start 传递取消信号，start/stop 投影结果并标识未就绪", async () => {

@@ -15,6 +15,12 @@ function assertNoLinks(filename) {
   }
 }
 
+/** ZIP 成员必须是插件内的 POSIX 相对文件路径，不能包含空段、盘符、控制字符或目录穿越。 */
+function isPackagePath(name) {
+  return typeof name === 'string' && !/[\\:\x00-\x1f\x7f]/.test(name)
+    && !name.split('/').some(part => !part || part === '.' || part === '..');
+}
+
 /** 按源码白名单生成指定平台的安装 ZIP，并内置该平台已校验的核心二进制。仅向已存在的目录发布全新的文件。 */
 async function packagePlugin(platform, requested) {
   if (!PLATFORMS.includes(platform) || !requested?.trim() || !requested.toLowerCase().endsWith('.zip')) {
@@ -42,12 +48,14 @@ async function packagePlugin(platform, requested) {
   const manifest = path.join(root, 'scripts/distribution-files.txt');
   assertNoLinks(manifest);
   if (!lstatSync(manifest).isFile()) throw new Error('分发清单必须是常规文件');
-  // 核心元数据只读固定清单；构建产物必须先由 fetch-core.mjs 下载并通过 SHA256 校验。
+  // 只从固定清单读取双摘要元数据；下载归档已由 fetch-core 校验，打包再次校验最终核心快照。
   const platformsFile = path.join(root, 'server/bin/platforms.json');
   assertNoLinks(platformsFile);
-  const release = JSON.parse(readFileSync(platformsFile, 'utf8')).platforms[platform];
-  if (!release || typeof release.path !== 'string' || !/^[a-f0-9]{64}$/.test(release.binarySha256)) {
-    throw new Error(`平台清单缺少 ${platform} 的有效条目`);
+  if (!lstatSync(platformsFile).isFile()) throw new Error('平台清单必须是常规文件');
+  const release = JSON.parse(readFileSync(platformsFile, 'utf8'))?.platforms?.[platform];
+  if (!release || !isPackagePath(release.path)
+    || !/^[a-f0-9]{64}$/.test(release.binarySha256) || !/^[a-f0-9]{64}$/.test(release.archiveSha256)) {
+    throw new Error(`平台清单缺少 ${platform} 的有效路径或双摘要`);
   }
   const coreEntry = `server/bin/${release.path}`;
   const coreSource = path.join(root, '.core-build', platform, path.posix.basename(release.path));
@@ -62,14 +70,10 @@ async function packagePlugin(platform, requested) {
   if (createHash('sha256').update(coreData).digest('hex') !== release.binarySha256) {
     throw new Error(`${platform} 构建核心 SHA256 与平台清单不一致，拒绝打包`);
   }
-  // 校验构建期模块路径后复用原生扩展校验；扩展源码不进入静态分发清单。
-  assertNoLinks(path.join(root, 'scripts/build-approval-router.mjs'));
-  const { readApprovalArtifact } = await import('./build-approval-router.mjs');
-  const approvalEntries = readApprovalArtifact(root, platform);
-  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/), coreEntry, ...approvalEntries.keys()];
+  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/), coreEntry];
   if (new Set(files).size !== files.length) throw new Error('分发清单包含重复路径');
   for (const name of files) {
-    if (/[\\:\r\n]/.test(name) || name.split('/').some(part => !part || part === '.' || part === '..')) {
+    if (!isPackagePath(name)) {
       throw new Error('分发清单仅允许插件内相对路径');
     }
   }
@@ -84,15 +88,12 @@ async function packagePlugin(platform, requested) {
   let offset = 0;
   let centralSize = 0;
   for (const name of files) {
-    // 核心和扩展使用已校验快照；其余按白名单读源码，POSIX 替换 MCP 入口。
-    let data = approvalEntries.get(name);
-    if (!data) {
-      const source = name === coreEntry ? coreSource
-        : path.join(root, name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name);
-      assertNoLinks(source);
-      if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);
-      data = name === coreEntry ? coreData : readFileSync(source);
-    }
+    const source = name === coreEntry ? coreSource
+      : path.join(root, name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name);
+    assertNoLinks(source);
+    if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);
+    // 核心使用已校验快照；源码与核心均只受 ZIP32 边界约束，不能套用轻量包的大小门槛。
+    const data = name === coreEntry ? coreData : readFileSync(source);
     const compressed = deflateRawSync(data, { level: 9 });
     const encoded = Buffer.from(name, 'utf8');
     if (data.length >= 0xffffffff || compressed.length >= 0xffffffff || encoded.length > 0xffff) {

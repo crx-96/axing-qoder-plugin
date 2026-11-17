@@ -76,35 +76,59 @@ done < "$list"
 # 独立市场使用 POSIX 入口，源码中的默认 Windows 清单不进入此位置。
 cp "$copy_root/mcp.posix.json" "$copy_root/mcp.json"
 
-# 市场也必须内置当前 POSIX 平台审批扩展。校验失败由现有 trap 清理整个新副本。
+# 市场只内置当前 POSIX 平台的原始核心；不下载、不编译。失败由 trap 清理新副本。
 case "$(uname -s)" in
     Linux) platform=linux ;;
     Darwin) platform=darwin ;;
-    *) fail '审批路由市场仅支持 macOS/Linux。' ;;
+    *) fail '核心市场仅支持 macOS/Linux。' ;;
 esac
 case "$(uname -m)" in
     x86_64|amd64) platform="$platform-x64" ;;
     arm64|aarch64) platform="$platform-arm64" ;;
-    *) fail '审批路由市场仅支持 x64/arm64。' ;;
+    *) fail '核心市场仅支持 x64/arm64。' ;;
 esac
 command -v node >/dev/null 2>&1 || fail '构建市场需要 PATH 中可用的 Node.js。'
 node --input-type=module - "$plugin_root" "$copy_root" "$platform" <<'NODE'
-import { lstatSync, mkdirSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+
+/** 本次源插件、新副本的绝对路径与已经 shell 校验的宿主平台键。 */
 const [root, copy, platform] = process.argv.slice(2);
-// 在导入构建脚本前逐层检查路径，拒绝源目录链接；不运行 Cargo。
-const helper = path.join(root, 'scripts/build-approval-router.mjs');
-for (let current = helper; ; current = path.dirname(current)) {
-  if (lstatSync(current).isSymbolicLink()) throw new Error(`拒绝符号链接：${current}`);
-  if (path.dirname(current) === current) break;
+
+/** 拒绝路径及祖先中的链接；缺失路径直接失败，不跟随外部缓存或真实数据。 */
+function assertNoLinks(file) {
+  for (let current = file; ; current = path.dirname(current)) {
+    if (lstatSync(current).isSymbolicLink()) throw new Error(`核心拒绝符号链接：${current}`);
+    if (path.dirname(current) === current) break;
+  }
 }
-const { readApprovalArtifact, assertNoLinks } = await import(pathToFileURL(helper));
-const entries = readApprovalArtifact(root, platform);
+
+// 从已复制的白名单清单读取元数据，并限定当前平台路径，防止路径穿越或混入其他平台。
 assertNoLinks(copy);
-mkdirSync(path.join(copy, 'server/approval-router'));
-// 只排他写入两份已验证的字节，不再读取构建目录，且不复制其他平台。
-for (const [relative, bytes] of entries) writeFileSync(path.join(copy, relative), bytes, { flag: 'wx' });
+/** 本地分发清单，不从网络或其他已安装插件读取。 */
+const manifestPath = path.join(copy, 'server/bin/platforms.json');
+assertNoLinks(manifestPath);
+/** 当前平台的核心路径及固定 SHA256。 */
+const entry = JSON.parse(readFileSync(manifestPath, 'utf8')).platforms?.[platform];
+if (!entry || entry.path !== `${platform}/magpie` || !/^[a-f0-9]{64}$/.test(entry.binarySha256)) {
+  throw new Error('核心平台清单路径或 SHA256 无效');
+}
+/** fetch-core 预先准备的当前平台核心；不会自动下载或运行。 */
+const source = path.join(root, '.core-build', platform, path.basename(entry.path));
+assertNoLinks(source);
+if (!lstatSync(source).isFile()) throw new Error('核心缓存不是常规文件');
+/** 只复制同一份经过校验的原始字节，避免校验后再次读取源文件。 */
+const bytes = readFileSync(source);
+if (createHash('sha256').update(bytes).digest('hex') !== entry.binarySha256) {
+  throw new Error('核心 SHA256 不匹配');
+}
+// 独立副本中的平台目录排他创建；只写当前平台核心，不复制缓存、归档或未知文件。
+/** 白名单核心最终分发位置。 */
+const destination = path.join(copy, 'server/bin', entry.path);
+mkdirSync(path.dirname(destination));
+writeFileSync(destination, bytes, { flag: 'wx', mode: 0o755 });
+chmodSync(destination, 0o755);
 NODE
 owned=
 

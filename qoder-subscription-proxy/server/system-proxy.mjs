@@ -1,27 +1,26 @@
-/** Windows 系统代理发现与归属同步；隧道回退必须有默认路由证据，空值仍允许核心继承环境代理。 */
+/** 为核心下载发现 Windows 系统代理；隧道回退必须有默认路由证据，不修改核心配置或宿主环境。 */
 
 import { execFile } from "node:child_process";
 import { createConnection } from "node:net";
 import { promisify } from "node:util";
 import { join } from "node:path";
-import { appendConfigBlock, parseConfigYaml, replaceConfigScalar } from "./config-yaml.mjs";
 
+/** 不经过 shell 的异步子进程执行器，供系统代理与路由读取复用。 */
 const execFileAsync = promisify(execFile);
+/** 系统自带 PowerShell 的绝对路径，不依赖 PATH 选择可执行文件。 */
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 /** 注册表与网卡读取时限；读取慢或失败都按不可用处理，不得拖长或阻塞冷启动。 */
 const READ_TIMEOUT_MS = 5000;
 /** 代理可达性探测时限；本机监听是毫秒级，该预算只用于兜住被丢包的陈旧地址。 */
 const PROBE_TIMEOUT_MS = 1200;
-/** 核心与随包示例中的上游代理字段路径。 */
-const PROXY_PATH = ["requests", "proxy-url"];
 
 /**
  * 归一化 WinINET 的 ProxyServer 值。
  * 该值可能是单一 `host:port`，也可能是 `http=host:port;https=host:port;socks=host:port` 的分协议形式，
- * 极少数工具还会带上协议前缀。只接受能表达为 `proxy-url` 的 HTTP(S) 代理。
+ * 极少数工具还会带上协议前缀。只接受用于核心下载的 HTTP(S) 代理。
  * @param {string} server 注册表中的原始 ProxyServer 字符串
- * @returns {string|null} 可直接写入 `proxy-url` 的地址；`""` 表示没有可用的 HTTP 代理（允许继承环境代理），
- *   `null` 表示值无法解析，调用方须跳过同步而不是改写配置
+ * @returns {string|null} 可传给下载器的代理地址；`""` 表示没有可用的 HTTP 代理（不覆盖环境代理），
+ *   `null` 表示值无法解析，调用方不应将其推断为显式直连
  */
 export function normalizeProxyServer(server) {
   const text = typeof server === "string" ? server.trim() : "";
@@ -49,7 +48,7 @@ export function normalizeProxyServer(server) {
 }
 
 /**
- * 由注册表的 ProxyEnable/ProxyServer 计算期望写入的上游代理地址。
+ * 由注册表的 ProxyEnable/ProxyServer 计算下载器可使用的系统代理地址。
  * @param {object} settings 注册表读取结果
  * @param {number|string|boolean} [settings.enable] ProxyEnable；只有明确启用才使用地址
  * @param {string} [settings.server] ProxyServer 原始值
@@ -62,15 +61,15 @@ export function desiredProxyUrl({ enable, server } = {}) {
 }
 
 /**
- * 读取当前 Windows 系统代理设置。任何失败都不抛出：本信息只用于决定是否改写配置，
- * 读取不到时保持现有配置，不能因此让代理无法启动。
+ * 读取当前 Windows 系统代理设置。任何失败都不抛出：本信息只供下载器选择代理，
+ * 读取不到时返回不可用状态，不修改核心配置或宿主环境。
  * @param {object} [options] 依赖注入项
  * @param {string} [options.platform=process.platform] Node 平台标识，允许测试注入
  * @param {Function} [options.exec=execFileAsync] PowerShell 执行实现，只供测试注入；生产沿用系统环境
  * @returns {Promise<string|null>} `""` 表示未指定系统代理，`null` 表示系统代理状态不可用
  */
 export async function readSystemProxyUrl({ platform = process.platform, exec = execFileAsync } = {}) {
-  // macOS/Linux 没有等价的系统代理注册表；核心自身已读取环境变量代理，插件不额外写入。
+  // macOS/Linux 不读取 Windows 注册表；curl 下载器保留自身的环境代理处理。
   if (platform !== "win32") return "";
   // 脚本内不含任何外部输入，注册表路径为常量；输出走 ConvertTo-Json 避免解析本地化的 reg.exe 文本。
   const script = [
@@ -97,7 +96,7 @@ export async function readSystemProxyUrl({ platform = process.platform, exec = e
 /**
  * 探测代理地址能否建立 TCP 连接。只验证连通，不发送任何代理协议数据。
  * 非回环地址可能被 TUN 提前应答；TCP 连通不能证明代理协议或上游可用。
- * @param {string} url 期望写入的上游代理地址
+ * @param {string} url 待验证的下载代理地址
  * @param {object} [options] 依赖注入项
  * @param {number} [options.timeout=PROBE_TIMEOUT_MS] 连接时限（毫秒）
  * @param {Function} [options.connect=createConnection] TCP 连接实现，只供测试注入；生产沿用系统环境
@@ -130,8 +129,16 @@ export async function isProxyReachable(url, { timeout = PROBE_TIMEOUT_MS, connec
   });
 }
 
+/**
+ * 读取 Windows 活跃网卡和路由，确认可用 IP 协议族的默认出口均由隧道承载。
+ * @param {object} [options] 平台与进程执行依赖；测试可注入，不改变系统路由
+ * @param {string} [options.platform=process.platform] Node 平台标识；非 Windows 返回 false
+ * @param {Function} [options.exec=execFileAsync] PowerShell 执行实现
+ * @returns {Promise<boolean>} 仅证据完整时返回 true；读取失败或路由有歧义时返回 false
+ */
 export async function hasTunnelEgress({ platform = process.platform, exec = execFileAsync } = {}) {
   if (platform !== "win32") return false;
+  // 只读取活跃网卡与默认路由候选；网卡名称疑似隧道还不足以认定出口已被接管。
   const script = [
     "$ErrorActionPreference='Stop';",
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);",
@@ -160,6 +167,7 @@ export async function hasTunnelEgress({ platform = process.platform, exec = exec
   if (!Array.isArray(snapshot?.interfaces) || !Array.isArray(snapshot?.routes)) return false;
   const interfaces = snapshot.interfaces.filter((item) => item && typeof item === "object");
   const routes = snapshot.routes.filter((route) => route && Number.isInteger(route.index) && Number.isFinite(route.metric) && route.metric >= 0);
+  /** 按更具体前缀和路由指标选择出口；两半地址空间的最优候选必须全部属于隧道。 */
   const routedThroughTunnel = (family, fallback, halves) => {
     const active = new Set(interfaces.map((item) => item[family]).filter(Number.isInteger));
     const tunnels = new Set(interfaces.filter((item) => item.tunnel === true).map((item) => item[family]).filter(Number.isInteger));
@@ -183,35 +191,4 @@ export async function readEffectiveProxyUrl({ read = readSystemProxyUrl, probe =
   if (url === null || url === "") return url;
   if (await probe(url)) return url;
   return await tunnel() ? "direct" : url;
-}
-
-/**
- * 幂等同步 config.yaml 的 `requests.proxy-url`，只改写插件上次写入的值。
- * 用户自行设置的代理（包括核心的 `direct`/`none` 显式直连）一律原样保留，也不接管归属。
- * @param {string} text 现有 config.yaml 文本
- * @param {object} options 同步输入
- * @param {string} options.desired 期望值，`""` 允许继承环境代理，`direct` 显式直连
- * @param {string|null} options.recorded 上次由插件写入并记录的值；`null` 表示尚无归属记录
- * @returns {{text: string, recorded?: string}} `recorded` 存在时表示归属记录需要更新为该值
- */
-export function syncProxyUrl(text, { desired, recorded }) {
-  const parsed = parseConfigYaml(text);
-  const key = JSON.stringify(PROXY_PATH);
-  const node = parsed.nodes.get(key);
-  // 映射或列表形式的 proxy-url 不是插件写入的标量，视为用户自管结构，既不改写也不接管。
-  if (node && node.kind !== null) return { text };
-  const value = parsed.values.get(key);
-  // 缺失与空键（`proxy-url:`）都表示尚未设置；数字、布尔等标量同样不是插件写入的形式。
-  const current = typeof value === "string" ? value : value === undefined || value === null ? "" : null;
-  if (current === null) return { text };
-  const owned = current === "" || (recorded !== null && current === recorded);
-  if (!owned) return { text };
-  if (current === desired) {
-    return recorded !== null && recorded !== desired ? { text, recorded: desired } : { text };
-  }
-  // allowNull 兼容核心或用户留下的 `proxy-url:` 空键与显式 null；这两种形式都表示尚未设置代理。
-  const updated = node
-    ? replaceConfigScalar(text, PROXY_PATH, desired, { allowNull: true })
-    : appendConfigBlock(parsed, ["requests"], "map", (indent) => `${" ".repeat(indent)}proxy-url: ${JSON.stringify(desired)}`);
-  return { text: updated, recorded: desired };
 }

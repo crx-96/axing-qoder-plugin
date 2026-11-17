@@ -1,10 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createWriteStream } from "node:fs";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { open } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { magpieArguments, magpieEnvironment } from "../server/config.mjs";
 import {
   CONTROL_MESSAGE_LIMIT, CONTROL_REQUEST_TIMEOUT_MS, encodePosixMessage,
   createPosixControlMessage, posixSupervisorError, validatePosixControlMessage, validatePosixIdentity, validatePosixPaths,
@@ -25,12 +28,36 @@ async function waitForExit(exited, timeoutMs) {
   } finally { clearTimeout(timer); }
 }
 
+export function createRedactedLog(secret) {
+  if (typeof secret !== "string" || !secret || /[\r\n]/.test(secret)) throw posixSupervisorError();
+  const token = Buffer.from(secret);
+  let pending = Buffer.alloc(0);
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      const bytes = Buffer.concat([pending, chunk]);
+      let start = 0;
+      for (let index = bytes.indexOf(token); index !== -1; index = bytes.indexOf(token, start)) {
+        this.push(bytes.subarray(start, index));
+        this.push("[REDACTED]");
+        start = index + token.length;
+      }
+      // 只保留可能跨块的密钥前缀；按字节透传，避免截断 UTF-8 字符。
+      const end = Math.max(start, bytes.lastIndexOf(10) + 1, bytes.length - token.length + 1);
+      this.push(bytes.subarray(start, end));
+      pending = Buffer.from(bytes.subarray(end));
+      callback();
+    },
+    flush(callback) { this.push(pending); callback(); },
+  });
+}
+
 // 私有租约让存活 guardian 回收被强杀的外层 supervisor 的核心，不承诺全进程强杀回收。
-export async function runCoreGuardian(config, panelDirectory, { spawnChild = spawn } = {}) {
-  validatePosixPaths(config, panelDirectory);
+export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
+  validatePosixPaths(config, true);
   let child;
   let childExited = true;
   let childExit = Promise.resolve();
+  let logDrained = Promise.resolve();
   let identity;
   let log;
   let server;
@@ -74,6 +101,12 @@ export async function runCoreGuardian(config, panelDirectory, { spawnChild = spa
       for (const socket of sockets) socket.destroy();
       try {
         if (server?.listening) await new Promise((resolve) => server.close(resolve));
+        if (!await waitForExit(logDrained, KILL_CONFIRM_MS)) {
+          exitCode = 1;
+          child?.stdout.destroy();
+          child?.stderr.destroy();
+        }
+        await logDrained;
         if (log) await log.close();
       } catch { exitCode = 1; }
       finally {
@@ -143,7 +176,7 @@ export async function runCoreGuardian(config, panelDirectory, { spawnChild = spa
   process.stdout.on("close", onOutputError);
 
   try {
-    // 文件描述符直接传给核心，stdout/stderr 不可能混进 supervisor 的单行协议。
+    // 原始核心输出可能含长期管理密钥，必须在落盘前脱敏且不能混进身份协议。
     const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW || 0);
     log = await open(join(config.dataDir, "bridge.log"), flags, 0o600);
     if (!(await log.stat()).isFile()) throw posixSupervisorError();
@@ -157,10 +190,15 @@ export async function runCoreGuardian(config, panelDirectory, { spawnChild = spa
       server.on("error", () => requestShutdown(true));
     }
     if (!closing) {
-      child = spawnChild(config.binPath, ["-config", config.configPath], {
-        cwd: config.dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
-        stdio: ["ignore", log.fd, log.fd], windowsHide: true,
+      const redactors = [createRedactedLog(config.mgmtKey), createRedactedLog(config.mgmtKey)];
+      child = spawnChild(config.binPath, magpieArguments(config), {
+        cwd: config.dataDir, env: magpieEnvironment(config),
+        stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
       });
+      logDrained = Promise.all([child.stdout, child.stderr].map((stream, index) =>
+        pipeline(stream, redactors[index], createWriteStream("", { fd: log.fd, autoClose: false }))
+          .catch(() => { requestShutdown(true); }),
+      ));
       childExited = false;
       childExit = new Promise((resolve) => {
         // spawn 失败没有 exit；error 在没有 pid 时也结束持有状态并触发启动回滚。
@@ -173,7 +211,7 @@ export async function runCoreGuardian(config, panelDirectory, { spawnChild = spa
       if (!closing && !childExited) {
         identity = {
           pid: child.pid, creationDate: randomUUID(),
-          commandLine: JSON.stringify([config.binPath, "-config", config.configPath]),
+          commandLine: JSON.stringify([config.binPath, ...magpieArguments(config)]),
           executablePath: config.binPath, controlPort: server.address().port,
           controlToken: randomBytes(32).toString("hex"),
         };
@@ -198,8 +236,8 @@ export async function runCoreGuardian(config, panelDirectory, { spawnChild = spa
 }
 
 // 外层只转发身份并持有私有租约，guardian 保留真实核心句柄和既有认证控制端点。
-export async function runPosixSupervisor(config, panelDirectory, { spawnGuardian = spawn } = {}) {
-  validatePosixPaths(config, panelDirectory);
+export async function runPosixSupervisor(config, { spawnGuardian = spawn } = {}) {
+  validatePosixPaths(config, true);
   let guardian;
   let closing = false;
   let failed = false;
@@ -247,8 +285,8 @@ export async function runPosixSupervisor(config, panelDirectory, { spawnGuardian
     await new Promise((resolve) => setImmediate(resolve));
     if (!closing) {
       guardian = spawnGuardian(process.execPath, [fileURLToPath(import.meta.url), "--core-guardian",
-        config.binPath, config.configPath, config.dataDir, panelDirectory], {
-        cwd: config.dataDir, env: process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+        config.binPath, config.configPath, config.dataDir, String(config.managementPort)], {
+        cwd: config.dataDir, env: magpieEnvironment(config), windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
       });
       guardian.stdin.on("error", onOutputError);
       guardian.stdout.on("data", onAnnouncement);
@@ -286,10 +324,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const args = process.argv.slice(2);
   const guardianMode = args[0] === "--core-guardian";
   if (guardianMode) args.shift();
-  const [binPath, configPath, dataDir, panelDirectory, ...extra] = args;
+  const [binPath, configPath, dataDir, managementPortText, ...extra] = args;
   try {
-    if (extra.length) throw posixSupervisorError();
-    process.exitCode = await (guardianMode ? runCoreGuardian : runPosixSupervisor)({ binPath, configPath, dataDir }, panelDirectory);
+    // 端口只接受十进制整数；敏感值通过私有父子环境传递，不进入 argv 或身份公告。
+    if (extra.length || !/^[1-9]\d{0,4}$/.test(managementPortText ?? "")) throw posixSupervisorError();
+    const address = /^127\.0\.0\.1:([1-9]\d{0,4})$/.exec(process.env.MAGPIE_ADDR ?? "");
+    if (!address || Number(address[1]) > 65535 || !process.env.MAGPIE_WEB_KEY) throw posixSupervisorError();
+    const config = { binPath, configPath, dataDir, managementPort: Number(managementPortText),
+      host: "127.0.0.1", port: Number(address[1]), mgmtKey: process.env.MAGPIE_WEB_KEY };
+    process.exitCode = await (guardianMode ? runCoreGuardian : runPosixSupervisor)(config);
   } catch {
     process.stderr.write("POSIX supervisor initialization failed.\n");
     process.exitCode = 1;

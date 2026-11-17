@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -36,10 +36,16 @@ async function fixture(t, { failDownload = false, shortDownload = false } = {}) 
   await once(reserved, "listening");
   const port = reserved.address().port;
   await new Promise((resolve) => reserved.close(resolve));
+  const management = createServer();
+  management.listen(0, "127.0.0.1");
+  await once(management, "listening");
+  const managementPort = management.address().port;
+  await new Promise(resolve => management.close(resolve));
   const env = {
     ...process.env,
     BRIDGE_DATA_DIR: join(directory, "data"), BRIDGE_HOST: "127.0.0.1", BRIDGE_PORT: String(port),
     BRIDGE_API_KEY: "isolated-lazy-lifecycle-api", BRIDGE_MGMT_KEY: "123456",
+    BRIDGE_MANAGEMENT_PORT: String(managementPort),
     QODER_HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: "", no_proxy: "",
   };
   delete env.BRIDGE_BIN;
@@ -100,7 +106,7 @@ async function waitStatus(f, predicate) {
 async function assertNoTemporaryCore(dataDir) {
   const paths = await readdir(dataDir, { recursive: true });
   assert.ok(!paths.some((path) => path.includes(".core-download-")), "取消后必须清理本次临时下载目录");
-  assert.ok(!paths.some((path) => /qoder-plugin-subscription-proxy(?:\.exe)?$/.test(path)), "未完成的核心不得发布");
+  assert.ok(!paths.some((path) => /magpie(?:\.exe)?$/.test(path)), "未完成的核心不得发布");
 }
 
 test("核心下载被阻塞时握手、工具发现、状态和ping均可用；显式启动合并等待，EOF清理", { timeout: 15000 }, async (t) => {
@@ -122,7 +128,6 @@ test("核心下载被阻塞时握手、工具发现、状态和ping均可用；�
   assert.equal((await f.exited)[0], 0, f.errors());
   await assertNoTemporaryCore(f.env.BRIDGE_DATA_DIR);
 });
-
 test("下载中主动停止会取消后台准备并保持MCP连接，显式启动可解除暂停重试", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
   assert.ok((await f.initialize.response).result.serverInfo);
@@ -155,7 +160,6 @@ test("后台下载使用独立10分钟预算，超时保留MCP并清理临时文
   assert.equal(f.attempts(), 1);
   await assertNoTemporaryCore(f.env.BRIDGE_DATA_DIR);
 });
-
 test("后台下载失败保留MCP供状态查询，不自动重试，显式start可在同一连接重试", { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { failDownload: true });
   assert.ok((await f.initialize.response).result.serverInfo);
@@ -172,68 +176,4 @@ test("后台下载失败保留MCP供状态查询，不自动重试，显式start
   assert.match(f.errors(), /下载失败/);
   assert.doesNotMatch(JSON.stringify([...f.messages.values()]) + f.errors(), /isolated-lazy-lifecycle-api/);
   await assertNoTemporaryCore(f.env.BRIDGE_DATA_DIR);
-});
-
-test("管理网关占用解除及停止启动后恢复监听，成功时清除旧诊断", { timeout: 15000 }, () => {
-  const gateway = pathToFileURL(fileURLToPath(new URL("../server/management-gateway.mjs", import.meta.url))).href;
-  const script = `
-    import assert from 'node:assert/strict';
-    import vm from 'node:vm';
-    import { readFile } from 'node:fs/promises';
-    import { createServer } from 'node:net';
-    import { once, EventEmitter } from 'node:events';
-    import { dirname, join } from 'node:path';
-    import { fileURLToPath } from 'node:url';
-    import { createManagementLogin } from ${JSON.stringify(gateway)};
-    const occupied = createServer();
-    occupied.listen(0, '127.0.0.1');
-    await once(occupied, 'listening');
-    const port = occupied.address().port;
-    const url = 'http://127.0.0.1:' + port + '/management.html';
-    const processStub = new EventEmitter();
-    processStub.stdin = { destroy() {} };
-    processStub.stderr = { write() {} };
-    const context = vm.createContext({ process: processStub, URL });
-    const dependencies = {
-      './management-gateway.mjs': { createManagementLogin: config => createManagementLogin(config, { port, launchBrowser: async () => {} }) },
-      'node:url': { fileURLToPath }, 'node:path': { dirname, join },
-      './config.mjs': { loadConfig: async () => ({}) },
-      './supervisor.mjs': {
-        ensureRunning: async () => ({ ready: true }), getStatus: async () => ({ ready: true }),
-        stopBridge: async () => ({ stopped: true }), startWatchdog: () => async () => {}, shutdownOwnedBridges: async () => {},
-      },
-      './mcp-protocol.mjs': { runMcp: async (ctx, { handlers, prepare }) => {
-        await prepare(new AbortController().signal);
-        assert.match(ctx.gatewayError, /占用/);
-        await new Promise(resolve => occupied.close(resolve));
-        const check = async () => {
-          const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
-          assert.equal(response.status, 200);
-          await response.text();
-          assert.equal(ctx.gatewayError, null);
-        };
-        await handlers.ensureRunning({}, {});
-        await check();
-        await handlers.ensureRunning({}, {});
-        await check();
-        await handlers.stopBridge();
-        await assert.rejects(fetch(url, { signal: AbortSignal.timeout(2000) }));
-        await handlers.ensureRunning({}, {});
-        await check();
-      } },
-    };
-    const module = new vm.SourceTextModule(await readFile(${JSON.stringify(entry)}, 'utf8'), {
-      context, initializeImportMeta(meta) { meta.url = ${JSON.stringify(pathToFileURL(entry).href)}; },
-    });
-    try {
-      await module.link(specifier => new vm.SyntheticModule(Object.keys(dependencies[specifier]), function () {
-        for (const [key, value] of Object.entries(dependencies[specifier])) this.setExport(key, value);
-      }, { context }));
-      await module.evaluate();
-    } finally { if (occupied.listening) await new Promise(resolve => occupied.close(resolve)); }
-  `;
-  const result = spawnSync(process.execPath, ["--experimental-vm-modules", "--input-type=module", "-e", script], {
-    encoding: "utf8", timeout: 12000, windowsHide: true,
-  });
-  assert.equal(result.status, 0, result.stderr || result.error?.message);
 });

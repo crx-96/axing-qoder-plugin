@@ -3,7 +3,9 @@ param(
     [string]$BinPath,
     [string]$ConfigPath,
     [string]$WorkingDirectory,
-    [string]$LogPath
+    [string]$LogPath,
+    # Native web port; the gateway address comes from the isolated parent environment.
+    [ValidateRange(1, 65535)][int]$ManagementPort
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +24,7 @@ try {
     # Keep compiler diagnostics and PowerShell object formatting off the MCP pipes.
     Add-Type -Path (Join-Path $PSScriptRoot 'ProxyJob.cs') -ErrorAction Stop | Out-Null
     $result = [Qoder.SubscriptionProxy.ProxyJob]::Run(
-        $OwnerPid, $BinPath, $ConfigPath, $WorkingDirectory, $LogPath
+        $OwnerPid, $BinPath, $ConfigPath, $WorkingDirectory, $LogPath, $ManagementPort
     )
     exit $result
 }

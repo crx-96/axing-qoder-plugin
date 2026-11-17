@@ -1,45 +1,45 @@
 {
-  "upstream": "router-for-me/CLIProxyAPI",
-  "version": "v8.0.74",
+  "upstream": "yetone/magpie",
+  "version": "v0.1.4330",
   "platforms": {
     "win32-x64": {
-      "path": "qoder-plugin-subscription-proxy.exe",
-      "binarySha256": "be9efadefff7e59cb837b47729a22b437d8120a1b5d0676a7f0f45f219fcfb22",
-      "archive": "CLIProxyAPI_8.0.74_windows_amd64.zip",
-      "archiveSha256": "d84243f7a67086c2cbea17103ddc0da6f4ab709f3210803a7cf2241a2b492504",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.74/CLIProxyAPI_8.0.74_windows_amd64.zip"
+      "path": "magpie.exe",
+      "binarySha256": "9b7b1dcd64413a13c75c162c53367fde312da9d2c0df3caffa616e7c1a4aa43c",
+      "archive": "magpie-cli-windows-amd64.exe",
+      "archiveSha256": "9b7b1dcd64413a13c75c162c53367fde312da9d2c0df3caffa616e7c1a4aa43c",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-windows-amd64.exe"
     },
     "darwin-x64": {
-      "path": "darwin-x64/qoder-plugin-subscription-proxy",
+      "path": "darwin-x64/magpie",
       "mode": "0755",
-      "binarySha256": "f468ed2cd7c5819e24de8875c125a6048d1e1b1f7564c92efeb7f41e050a8255",
-      "archive": "CLIProxyAPI_8.0.74_darwin_amd64.tar.gz",
-      "archiveSha256": "788eed3efddb18d1bc9df89022201f88a4373e6e53c8711e16ae74fbef97c1b7",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.74/CLIProxyAPI_8.0.74_darwin_amd64.tar.gz"
+      "binarySha256": "43d83512ac84bfbda41e4e1bf1b2d932d281d43c6a96e1a516b670e12e83080e",
+      "archive": "magpie-cli-darwin-amd64",
+      "archiveSha256": "43d83512ac84bfbda41e4e1bf1b2d932d281d43c6a96e1a516b670e12e83080e",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-darwin-amd64"
     },
     "darwin-arm64": {
-      "path": "darwin-arm64/qoder-plugin-subscription-proxy",
+      "path": "darwin-arm64/magpie",
       "mode": "0755",
-      "binarySha256": "318acb3eebac60ecab276e8b5a3044e7b5a5cc1c44cf4cbbda891da5a17aa7d1",
-      "archive": "CLIProxyAPI_8.0.74_darwin_aarch64.tar.gz",
-      "archiveSha256": "22f29feb8646aee6b124ba0b4a974a92fbffd71d4c875da7e21ef36d698635f4",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.74/CLIProxyAPI_8.0.74_darwin_aarch64.tar.gz"
+      "binarySha256": "2d77eeb55b9fe207e7a6b27efde2aeba264be9aad1bbcb5f8b997bb45eb9db7b",
+      "archive": "magpie-cli-darwin-arm64",
+      "archiveSha256": "2d77eeb55b9fe207e7a6b27efde2aeba264be9aad1bbcb5f8b997bb45eb9db7b",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-darwin-arm64"
     },
     "linux-x64": {
-      "path": "linux-x64/qoder-plugin-subscription-proxy",
+      "path": "linux-x64/magpie",
       "mode": "0755",
-      "binarySha256": "810a9f64ecc7f5a704bff666fec4549e262426efd2a0b9202cccfa0b56a73986",
-      "archive": "CLIProxyAPI_8.0.74_linux_amd64.tar.gz",
-      "archiveSha256": "94205d5be11464c57fab5e05ebd44d73a89190f9410a13e9e78c67987738c26f",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.74/CLIProxyAPI_8.0.74_linux_amd64.tar.gz"
+      "binarySha256": "adb1fef9af35ee3b27d06960f41b124c04a2f1f116751e429344c595451a564f",
+      "archive": "magpie-cli-linux-amd64",
+      "archiveSha256": "adb1fef9af35ee3b27d06960f41b124c04a2f1f116751e429344c595451a564f",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-linux-amd64"
     },
     "linux-arm64": {
-      "path": "linux-arm64/qoder-plugin-subscription-proxy",
+      "path": "linux-arm64/magpie",
       "mode": "0755",
-      "binarySha256": "b5aa9ae0e1f3e2a2fcb0aa0d9350d016765d96b19e07e2cc739e15a6261ae02c",
-      "archive": "CLIProxyAPI_8.0.74_linux_aarch64.tar.gz",
-      "archiveSha256": "f783d366ee4660448e5365be21db82e32dfa1c0f5c5175addf79ee27828649c5",
-      "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.74/CLIProxyAPI_8.0.74_linux_aarch64.tar.gz"
+      "binarySha256": "07aa97614a1f9aa20d4d2acf1cbe261dae9c3de224f2ecb8d5fd5250dd719815",
+      "archive": "magpie-cli-linux-arm64",
+      "archiveSha256": "07aa97614a1f9aa20d4d2acf1cbe261dae9c3de224f2ecb8d5fd5250dd719815",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-linux-arm64"
     }
   }
 }

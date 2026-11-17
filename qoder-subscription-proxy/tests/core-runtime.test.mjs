@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { deflateRawSync, gzipSync } from "node:zlib";
 import test from "node:test";
 import { createCoreRuntime, ensureCore, getCoreRelease, getCoreStatus, resolveCoreBinaryPath } from "../server/core-runtime.mjs";
 
@@ -17,100 +16,10 @@ const moduleUrl = new URL("../server/core-runtime.mjs", import.meta.url).href;
 const binary = Buffer.from("synthetic core bytes; never executed\n".repeat(17));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-function tarEntry(name, data = Buffer.alloc(0), { type = "0", linkName = "", prefix = "" } = {}) {
-  const content = Buffer.from(data);
-  const header = Buffer.alloc(512);
-  header.write(name, 0, 100, "ascii");
-  header.write("0000755\0", 100, 8, "ascii");
-  header.write("0000000\0", 108, 8, "ascii");
-  header.write("0000000\0", 116, 8, "ascii");
-  header.write(content.length.toString(8).padStart(11, "0") + "\0", 124, 12, "ascii");
-  header.write("00000000000\0", 136, 12, "ascii");
-  header.fill(32, 148, 156);
-  header.write(type, 156, 1, "ascii");
-  header.write(linkName, 157, 100, "ascii");
-  header.write("ustar\0", 257, 6, "ascii");
-  header.write("00", 263, 2, "ascii");
-  header.write(prefix, 345, 155, "ascii");
-  const checksum = header.reduce((sum, byte) => sum + byte, 0);
-  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "ascii");
-  return Buffer.concat([header, content, Buffer.alloc((512 - content.length % 512) % 512)]);
-}
-
-function tarArchive(entries = [{ name: "cli-proxy-api", data: binary }]) {
-  return gzipSync(Buffer.concat([...entries.map(({ name, data, ...options }) => tarEntry(name, data, options)), Buffer.alloc(1024)]));
-}
-
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function zipArchive(entries = [{ name: "cli-proxy-api.exe", data: binary }]) {
-  const locals = [];
-  const directory = [];
-  let position = 0;
-  for (const { name, data = Buffer.alloc(0), localName = name, mode = 0o100755, method = 8, descriptor = true, extra = Buffer.alloc(0) } of entries) {
-    const content = Buffer.from(data);
-    const packed = method === 8 ? deflateRawSync(content) : content;
-    const nameBytes = Buffer.from(name);
-    const localNameBytes = Buffer.from(localName);
-    const crc = crc32(content);
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(descriptor ? 8 : 0, 6);
-    local.writeUInt16LE(method, 8);
-    if (!descriptor) {
-      local.writeUInt32LE(crc, 14);
-      local.writeUInt32LE(packed.length, 18);
-      local.writeUInt32LE(content.length, 22);
-    }
-    local.writeUInt16LE(localNameBytes.length, 26);
-    local.writeUInt16LE(extra.length, 28);
-    const footer = Buffer.alloc(descriptor ? 16 : 0);
-    if (descriptor) {
-      footer.writeUInt32LE(0x08074b50, 0);
-      footer.writeUInt32LE(crc, 4);
-      footer.writeUInt32LE(packed.length, 8);
-      footer.writeUInt32LE(content.length, 12);
-    }
-    const localRecord = Buffer.concat([local, localNameBytes, extra, packed, footer]);
-    locals.push(localRecord);
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(0x0314, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(descriptor ? 8 : 0, 8);
-    central.writeUInt16LE(method, 10);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(packed.length, 20);
-    central.writeUInt32LE(content.length, 24);
-    central.writeUInt16LE(nameBytes.length, 28);
-    central.writeUInt16LE(extra.length, 30);
-    central.writeUInt32LE((mode << 16) >>> 0, 38);
-    central.writeUInt32LE(position, 42);
-    directory.push(Buffer.concat([central, nameBytes, extra]));
-    position += localRecord.length;
-  }
-  const directoryBytes = Buffer.concat(directory);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(directoryBytes.length, 12);
-  end.writeUInt32LE(position, 16);
-  return Buffer.concat([...locals, directoryBytes, end]);
-}
-
 async function fixture(t, { platform = "linux", arch = "x64", archive, expectedBinary = binary, bundle, download, spawnProcess, env = {}, readProxy = async () => "" } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "qoder-core-test-")));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
-  const bytes = archive ?? (platform === "win32" ? zipArchive() : tarArchive());
+  const bytes = archive ?? binary;
   const catalog = structuredClone(manifest);
   const entry = catalog.platforms[`${platform}-${arch}`];
   entry.archiveSha256 = hash(bytes);
@@ -204,10 +113,8 @@ test("自定义 BRIDGE_BIN 不读文件、不下载、不 chmod，由生命周�
 });
 
 for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"], ["win32", "x64"]]) {
-  test(`${platform}-${arch} 只下载当前平台、只提取官方核心且复用缓存`, async (t) => {
-    const archive = platform === "win32"
-      ? zipArchive([{ name: "LICENSE", data: "license" }, { name: "cli-proxy-api.exe", data: binary }, { name: "config.example.yaml", data: "never install" }])
-      : tarArchive([{ name: "LICENSE", data: "license" }, { name: "cli-proxy-api", data: binary }, { name: "config.example.yaml", data: "never install" }]);
+  test(`${platform}-${arch} 只下载当前平台、原样保存官方核心且复用缓存`, async (t) => {
+    const archive = binary;
     let requested;
     const { runtime, config, calls } = await fixture(t, { platform, arch, archive, download: async (options, bytes) => {
       requested = options;
@@ -284,11 +191,10 @@ test("归档 hash 错误不发布；allowDownload=false 不重试也不抛恢复
   await assertClean(config);
 });
 
-test("解压后的 binary hash 错误不发布", async (t) => {
-  const { runtime, config } = await fixture(t, { expectedBinary: Buffer.from("different binary") });
-  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BINARY_HASH"));
-  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
-  await assertClean(config);
+test("原始资源要求下载摘要与核心摘要一致", () => {
+  const catalog = structuredClone(manifest);
+  catalog.platforms["linux-x64"].binarySha256 = hash(Buffer.from("different binary"));
+  assert.throws(() => createCoreRuntime({ manifest: catalog }), expectSafeError("CORE_CONFIG"));
 });
 
 test("stat 改变使旧 hash 缓存失效，损坏缓存可原子替换", async (t) => {
@@ -401,70 +307,59 @@ test("一个并发等待者取消不影响另一个等待者", async (t) => {
   assert.equal(calls(), 1);
 });
 
-const unsafeTarCases = [
-  ["父目录路径", [{ name: "../escape", data: "x" }]],
-  ["绝对路径", [{ name: "/escape", data: "x" }]],
-  ["Windows 盘符", [{ name: "C:/escape", data: "x" }]],
-  ["反斜杠穿越", [{ name: "..\\escape", data: "x" }]],
-  ["符号链接", [{ name: "alias", type: "2", linkName: "cli-proxy-api" }]],
-  ["硬链接", [{ name: "alias", type: "1", linkName: "cli-proxy-api" }]],
-  ["特殊设备", [{ name: "device", type: "3" }]],
-  ["重复目标", [{ name: "cli-proxy-api", data: binary }]],
-  ["PAX 路径覆盖", [{ name: "PaxHeaders/core", type: "x", data: "18 path=../escape\n" }]],
-  ["前缀路径穿越", [{ name: "escape", prefix: "..", data: "x" }]],
-];
-for (const [label, extras] of unsafeTarCases) {
-  test(`tar 拒绝${label}，归档摘要正确也不能绕过`, async (t) => {
-    const { runtime, config } = await fixture(t, { archive: tarArchive([{ name: "cli-proxy-api", data: binary }, ...extras]) });
-    await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE"));
-    await assertClean(config);
-  });
-}
-
-test("tar 必须有唯一根级官方名称，不按 basename 或可执行权限猜测", async (t) => {
-  const { runtime, config } = await fixture(t, { archive: tarArchive([{ name: "nested/cli-proxy-api", data: binary }]) });
-  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE"));
-});
-
-test("tar 接受无路径语义的 PAX 时间戳与普通安全目录", async (t) => {
-  const { runtime, config } = await fixture(t, { archive: tarArchive([
-    { name: "docs/", type: "5" }, { name: "PaxHeaders/core", type: "x", data: "11 mtime=0\n" }, { name: "cli-proxy-api", data: binary },
-  ]) });
-  assert.equal((await runtime.ensureCore(config)).available, true);
+test("空原始资源拒绝发布且清理临时目录", async (t) => {
+  const { runtime, config } = await fixture(t, { archive: Buffer.alloc(0), expectedBinary: Buffer.alloc(0) });
+  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_SIZE"));
+  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
   await assertClean(config);
 });
 
-const unsafeZipCases = [
-  ["父目录路径", { name: "../escape", data: "x" }],
-  ["绝对路径", { name: "/escape", data: "x" }],
-  ["替代数据流", { name: "file:stream", data: "x" }],
-  ["符号链接", { name: "alias", data: "cli-proxy-api.exe", mode: 0o120777 }],
-  ["特殊文件", { name: "device", mode: 0o020600 }],
-  ["本地头名称不一致", { name: "safe.txt", localName: "evil.txt", data: "x" }],
-  ["重复核心", { name: "cli-proxy-api.exe", data: binary }],
-  ["未知扩展", { name: "safe.txt", data: "x", extra: Buffer.from([0x6e, 0x75, 0, 0]) }],
-];
-for (const [label, extra] of unsafeZipCases) {
-  test(`zip 拒绝${label}，不提取任何成员`, async (t) => {
-    const { runtime, config } = await fixture(t, { platform: "win32", archive: zipArchive([{ name: "cli-proxy-api.exe", data: binary }, extra]) });
-    await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE"));
+test("下载原始资源截断或替换为归档时摘要失败，不尝试解压", async (t) => {
+  for (const bytes of [binary.subarray(0, 5), Buffer.from("504b03046e6f742061207261772072656c65617365", "hex")]) {
+    const { runtime, config } = await fixture(t, { download: ({ destination }) => writeFile(destination, bytes, { flag: "wx" }) });
+    await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE_HASH"));
+    await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
     await assertClean(config);
-  });
-}
-
-test("zip 同时支持 store 与 deflate、数据描述符与精确尺寸本地头", async (t) => {
-  for (const method of [0, 8]) {
-    const { runtime, config } = await fixture(t, { platform: "win32", archive: zipArchive([{ name: "cli-proxy-api.exe", data: binary, method, descriptor: false }]) });
-    assert.equal((await runtime.ensureCore(config)).available, true);
   }
 });
 
-test("错误/截断归档只返回安全错误", async (t) => {
-  for (const [platform, archive] of [["win32", Buffer.from("bad zip")], ["linux", Buffer.from("bad gzip")], ["linux", gzipSync(Buffer.alloc(512))]]) {
-    const { runtime, config } = await fixture(t, { platform, archive });
-    await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE"));
-    await assertClean(config);
+test("原始下载超过 128 MiB 在读取前拒绝，保留已有缓存", async (t) => {
+  const { runtime, config } = await fixture(t, { download: async ({ destination }) => {
+    const file = await open(destination, "wx");
+    try { await file.truncate(128 * 1024 * 1024 + 1); } finally { await file.close(); }
+  } });
+  await mkdir(dirname(config.binPath), { recursive: true });
+  await writeFile(config.binPath, "old cache");
+  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_SIZE"));
+  assert.equal(await readFile(config.binPath, "utf8"), "old cache");
+  await assertClean(config);
+});
+
+test("下载产物为硬链接时拒绝发布，不修改链接源文件", async (t) => {
+  let original;
+  const { runtime, config, root } = await fixture(t, { download: ({ destination }) => link(original, destination) });
+  original = join(root, "original-core");
+  await writeFile(original, binary);
+  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE"));
+  assert.deepEqual(await readFile(original), binary);
+  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
+  await assertClean(config);
+});
+
+test("固定 Magpie 来源、平台命名、摘要和随包路径不可绕过", () => {
+  for (const override of [
+    { archive: "magpie-cli-linux-amd64.tar.gz" },
+    { url: "http://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-linux-amd64" },
+    { path: "../magpie" }, { path: "/magpie" }, { path: "linux-x64/other" },
+    { archiveSha256: "z".repeat(64) },
+  ]) {
+    const catalog = structuredClone(manifest);
+    Object.assign(catalog.platforms["linux-x64"], override);
+    assert.throws(() => createCoreRuntime({ manifest: catalog }), expectSafeError("CORE_CONFIG"));
   }
+  const catalog = structuredClone(manifest);
+  catalog.upstream = "other/magpie";
+  assert.throws(() => createCoreRuntime({ manifest: catalog }), expectSafeError("CORE_CONFIG"));
 });
 
 test("默认缓存若为目录、硬链接则拒绝，损坏对象不盲删", async (t) => {
@@ -537,7 +432,7 @@ function mockCurl(output, { exit = 0, failStart = false, hang = false } = {}) {
 }
 
 test("系统 curl 固定 HTTPS、禁用 curlrc/shell/retry；代理优先级正确且不出现在命令参数", async (t) => {
-  const archive = tarArchive();
+  const archive = binary;
   const fake = mockCurl(archive);
   const env = { SystemRoot: "C:\\Windows", QODER_HTTP_PROXY: "http://secret:password@127.0.0.1:1234", HTTPS_PROXY: "https://other.invalid", https_proxy: "https://lower.invalid", NO_PROXY: "127.0.0.1,localhost" };
   const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, env });
@@ -562,7 +457,7 @@ test("系统 curl 固定 HTTPS、禁用 curlrc/shell/retry；代理优先级正�
 
 test("无显式环境代理时仅向 curl 注入系统 HTTP(S) 代理，保留 NO_PROXY", async (t) => {
   for (const systemProxy of ["http://127.0.0.1:7890", "https://127.0.0.1:7890"]) {
-    const archive = tarArchive();
+    const archive = binary;
     const fake = mockCurl(archive);
     const env = Object.freeze({ NO_PROXY: "localhost", no_proxy: "github.com" });
     const hostEnv = { ...process.env };
@@ -611,7 +506,7 @@ test("真实 curl 的首次下载使用发现的系统代理，不连接外网�
 test("显式 QODER/HTTPS/ALL 代理包括空值均不调用系统 reader", async (t) => {
   for (const key of ["QODER_HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]) {
     for (const value of ["http://127.0.0.1:1234", ""]) {
-      const archive = tarArchive();
+      const archive = binary;
       const fake = mockCurl(archive);
       const env = Object.freeze({ [key]: value, NO_PROXY: "localhost" });
       let reads = 0;
@@ -628,7 +523,7 @@ test("显式 QODER/HTTPS/ALL 代理包括空值均不调用系统 reader", async
 });
 
 test("系统 direct 明确清空 curl HTTPS/ALL 代理而不取消 NO_PROXY", async (t) => {
-  const archive = tarArchive();
+  const archive = binary;
   const fake = mockCurl(archive);
   const env = Object.freeze({ NO_PROXY: "localhost" });
   const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, env, readProxy: async () => "direct" });
@@ -641,7 +536,7 @@ test("系统 direct 明确清空 curl HTTPS/ALL 代理而不取消 NO_PROXY", as
 
 test("系统代理为空或读取失败时不产生代理且继续下载", async (t) => {
   for (const state of ["", null]) {
-    const archive = tarArchive();
+    const archive = binary;
     const fake = mockCurl(archive);
     const { runtime, config } = await fixture(t, { archive, spawnProcess: fake.implementation, readProxy: async () => state });
     assert.equal((await runtime.ensureCore(config)).available, true);
@@ -651,7 +546,7 @@ test("系统代理为空或读取失败时不产生代理且继续下载", async
 });
 
 test("等待系统代理检测时取消不启动 curl，清理临时目录并允许重试", async (t) => {
-  const archive = tarArchive();
+  const archive = binary;
   const fake = mockCurl(archive);
   let entered;
   let release;

@@ -34,13 +34,6 @@ const IMAGE_SCHEMA = {
   required: ["prompt"],
   additionalProperties: false,
 };
-const GEMINI_IMAGE_SCHEMA = {
-  ...IMAGE_SCHEMA,
-  properties: {
-    ...IMAGE_SCHEMA.properties,
-    size: { type: "string", description: "可选方图分辨率：1K、2K、4K，或对应的 1024x1024、2048x2048、4096x4096；默认 1K，实际支持范围取决于模型" },
-  },
-};
 /** 宿主可发现的代理管理工具；管理工具不接受参数，生图工具按 IMAGE_SCHEMA 校验。 */
 const TOOLS = [
   {
@@ -60,37 +53,44 @@ const TOOLS = [
   },
   {
     name: "bridge_open_management",
-    description: "经用户要求在系统浏览器打开本插件已登录的管理页，供用户本人授权与管理账号。",
+    description: "经用户要求在系统浏览器打开本插件已登录的管理页，供用户本人授权、管理账号及自行安装和管理插件。",
     inputSchema: EMPTY_SCHEMA,
   },
   {
     name: "image_gen_gpt",
-    description: "经本机订阅代理的 OpenAI 图片接口生图（gpt-image 系模型）。用户说 GPT/OpenAI 生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体。",
+    description: "经 Magpie 原生图片接口生图（如 codex/gpt-image-2 或目录中的 provider/gpt-image-* 模型）。用户说 GPT/OpenAI 生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体。",
     inputSchema: IMAGE_SCHEMA,
-  },
-  {
-    name: "image_gen_gemini",
-    description: "旧版 Gemini 生图入口已停用，不在工具列表公开；调用仅返回 ACP 图片生成尚未验证的错误，不触及旧 Google 接口。",
-    inputSchema: GEMINI_IMAGE_SCHEMA,
   },
 ];
 const MANAGEMENT_APP_TOOL = {
   name: "bridge_management_app",
   title: "订阅代理管理",
-  description: "从 Qoder 更多菜单直接在系统默认浏览器打开已登录的订阅代理管理页；不返回登录票据。",
+  description: "打开订阅代理管理入口，只读取核心状态；启动核心与打开原生管理页由用户在页面明确操作。",
   inputSchema: EMPTY_SCHEMA,
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   _meta: {
     ui: { resourceUri: MANAGEMENT_APP_URI, visibility: ["app"] },
     "qoder/ui": { entrypoints: [{ type: "global" }] },
   },
 };
 
+const APP_TOOLS = [MANAGEMENT_APP_TOOL];
+
+function validToolArguments(tool, args) {
+  if (!isObject(args)) return false;
+  const properties = tool.inputSchema.properties ?? {};
+  if (Object.keys(args).some(key => !Object.hasOwn(properties, key))) return false;
+  for (const [key, value] of Object.entries(args)) {
+    if (properties[key].type !== "string" || typeof value !== "string") return false;
+  }
+  return (tool.inputSchema.required ?? []).every(key => Object.hasOwn(args, key) && args[key].trim().length > 0);
+}
+
 /** 只允许稳定错误标识出现在异常响应中，不转发异常 message、stack 或响应正文。 */
 const SAFE_CODES = new Set([
   "ABORT_ERR", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "EACCES", "EPERM",
   "ENOTFOUND", "EAI_AGAIN", "ERR_INVALID_ARG_VALUE", "ERR_INVALID_ARG_TYPE",
-  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED", "ACP_IMAGE_UNSUPPORTED",
+  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED", "IMAGE_OUTPUT_UNAVAILABLE", "IMAGE_MODELS_UNAVAILABLE",
   "CORE_CONFIG", "CORE_CANCELLED", "CORE_TIMEOUT", "CORE_CURL", "CORE_DOWNLOAD", "CORE_SIZE",
   "CORE_ARCHIVE_HASH", "CORE_BINARY_HASH", "CORE_ARCHIVE", "CORE_PATH", "CORE_CACHE",
   "CORE_PUBLISH", "CORE_CLEANUP", "CORE_LOCK",
@@ -160,6 +160,7 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
   const { config } = ctx;
   signal?.throwIfAborted();
   switch (name) {
+    case "bridge_management_app":
     case "bridge_status": {
       const status = await handlers.getStatus(config);
       // 启动故障走脱敏摘要；网关端口占用等诊断本身已是固定安全文案。
@@ -179,14 +180,11 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       const stopped = result?.stopped === true;
       return textResult({ stopped, reason: safeReason(result?.reason, stopped ? "已停止" : "未能停止", config) }, !stopped);
     }
-    case "bridge_management_app":
     case "bridge_open_management": {
       // 由本机入口直接唤起浏览器；即使实现返回了内部票据，协议响应也只包含固定结果。
       await handlers.openManagement(config, { signal });
       return textResult("已请求系统浏览器打开授权与账号管理页。");
     }
-    case "image_gen_gemini":
-      return textResult("ACP 图片生成尚未验证，Gemini 生图不可用；不会回退旧 Google 通道。", true);
     case "image_gen_gpt": {
       // 族内模型决策与落盘由生图模块完成；多模型待选结果原样返回供宿主弹窗。
       const family = "gpt";
@@ -219,7 +217,7 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
     case "ping":
       return ok(id, {});
     case "tools/list":
-      return ok(id, { tools: (ctx.supportsApps ? [...TOOLS, MANAGEMENT_APP_TOOL] : TOOLS).filter(tool => tool.name !== "image_gen_gemini") });
+      return ok(id, { tools: ctx.supportsApps ? [...TOOLS, ...APP_TOOLS] : TOOLS });
     case "resources/list":
       return ok(id, { resources: ctx.supportsApps ? [{ uri: MANAGEMENT_APP_URI, name: "订阅代理管理", mimeType: MANAGEMENT_APP_MIME }] : [] });
     case "resources/read": {
@@ -228,20 +226,11 @@ export async function handleMessage(message, ctx, { handlers = {}, signal } = {}
       catch { return fail(id, -32603, "无法读取订阅代理管理页面，请检查插件文件。"); }
     }
     case "tools/call": {
-      const tool = ctx.supportsApps && params?.name === MANAGEMENT_APP_TOOL.name
-        ? MANAGEMENT_APP_TOOL : TOOLS.find(({ name }) => name === params?.name);
+      const tool = TOOLS.find(({ name }) => name === params?.name) ??
+        (ctx.supportsApps ? APP_TOOLS.find(({ name }) => name === params?.name) : undefined);
       if (!tool) return fail(id, -32602, "未知工具或缺少工具名称。");
       const args = params.arguments === undefined ? {} : params.arguments;
-      // 按工具 schema 逐项校验：管理工具为空 schema，自然拒绝任何非空参数；生图工具只接受声明的字符串参数。
-      if (!isObject(args)) return fail(id, -32602, "arguments 必须是对象。");
-      const properties = tool.inputSchema.properties ?? {};
-      if (Object.keys(args).some((key) => !Object.hasOwn(properties, key)) ||
-          Object.values(args).some((value) => typeof value !== "string")) {
-        return fail(id, -32602, "工具参数只接受 schema 声明的字符串字段。");
-      }
-      if ((tool.inputSchema.required ?? []).some((key) => typeof args[key] !== "string" || !args[key].trim())) {
-        return fail(id, -32602, "缺少必需的非空字符串参数。");
-      }
+      if (!validToolArguments(tool, args)) return fail(id, -32602, "工具参数不符合声明的字段、类型或必填要求。");
       if (params._meta !== undefined && (!isObject(params._meta)
         || (Object.hasOwn(params._meta, "progressToken") && !isId(params._meta.progressToken)))) {
         return fail(id, -32602, "无效的进度元数据。");

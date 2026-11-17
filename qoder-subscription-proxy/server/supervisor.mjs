@@ -1,7 +1,6 @@
 import { connectOwned } from "./owned-http.mjs";
-import { parseConfigYaml, appendConfigBlock, replaceConfigScalar } from "./config-yaml.mjs";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, readFile, writeFile, readdir, readlink, unlink, rename, link, access, chmod } from "node:fs/promises";
+import { readFile, writeFile, readlink, unlink, rename, access, chmod } from "node:fs/promises";
 import { constants, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,17 +9,12 @@ export { withLifecycleLock };
 import { randomUUID } from "node:crypto";
 import { promisify, isDeepStrictEqual } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { MANAGEMENT_PORT, renderConfigYaml, validateExistingConfig } from "./config.mjs";
+import { ensureMagpieConfig, magpieEnvironment } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
-import { prepareManagementPanel, PANEL_REVISION } from "./management-panel.mjs";
-import { ensureApprovalRouting } from "./approval-routing.mjs";
-import { prepareApprovalRouter, inspectApprovalRouter, ensureApprovalPluginConfig, assertApprovalPluginRegistered } from "./approval-plugin.mjs";
-import { readEffectiveProxyUrl, syncProxyUrl } from "./system-proxy.mjs";
-import { createAcpService, getAcpService } from "./acp-service.mjs";
-import { readAcpModels } from "./acp-provider.mjs";
-import { archiveGoogleModels, configureGoogleExclusions, disableGoogleAuthFiles, disableGoogleCredentials } from "./google-policy.mjs";
+/** 原生 Magpie 托管协议版本；旧 PID 记录不能用于发送认证请求。 */
+const RUNTIME_REVISION = "magpie-v1";
 
 const execFileAsync = promisify(execFile);
 const inFlight = new Map();
@@ -43,24 +37,23 @@ async function readOptional(path) {
   catch (error) { if (error.code === "ENOENT") return null; throw error; }
 }
 
-/** 先用不带凭据的应用签名识别桥；HTTP 存活不代表它属于此版本。 */
+/** 在模型端口用无凭据 /api/hello 识别 Magpie；管理端需登录，签名本身不证明进程归属。 */
 export async function probeBridge(config) {
   let response;
-  try { response = await requestLocal(config, "/"); }
+  try { response = await requestLocal(config, "/api/hello"); }
   catch (error) {
     if (error.code === "ECONNREFUSED") return { state: "offline" };
     return { state: "unreachable", reason: "本机端点无响应；不会据此重复启动或终止进程" };
   }
   let body;
   try { body = JSON.parse(response.text); } catch { /* 非 JSON 服务不属于本桥。 */ }
-  if (response.status !== 200 || body?.message !== "CLI Proxy API Server" ||
-      !Array.isArray(body.endpoints) || !body.endpoints.includes("GET /v1/models")) {
-    return { state: "foreign", reason: "端口由非 CLIProxyAPI 服务占用" };
+  if (response.status !== 200 || body?.name !== "magpie" || typeof body.version !== "string") {
+    return { state: "foreign", reason: "端口由非 Magpie 服务占用" };
   }
   return { state: "bridge" };
 }
 
-/** 每次带密钥请求前确认回环端点类型，且认证/响应错误与离线分开报告。 */
+/** 在同一核心 PID 已验证的连接上查询模型；认证或响应错误不当作离线。 */
 async function probeModels(config) {
   const response = await requestOwned(config, "/v1/models", { authenticated: true });
   if (response.status !== 200) throw httpFailure(response.status, "模型查询");
@@ -72,25 +65,17 @@ async function probeModels(config) {
   return body.data.map((model) => model.id);
 }
 
-/** 在同目录发布完整的私有状态。基于旧内容迁移时，在替换前复核，避免覆盖并行保存的配置。 */
-async function replacePrivateFile(path, text, original) {
+/** 生命周期锁内原子发布完整私有 PID 状态；失败时清理本次临时文件。 */
+async function replacePrivateFile(path, text) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, text, { flag: "wx", mode: 0o600 });
-    // Windows 核心保存配置后的短时文件句柄可能不共享删除权限。只为配置替换保留一秒重试预算。
-    const deadline = Date.now() + 1000;
-    for (;;) {
-      if (original !== undefined && await readOptional(path) !== original) {
-        throw bridgeError("本地配置已变化，请重试配置同步。");
-      }
-      try {
-        await rename(temporary, path);
-        return;
-      } catch (error) {
-        if (original === undefined || process.platform !== "win32" ||
-            !["EPERM", "EACCES", "EBUSY"].includes(error.code) || Date.now() >= deadline) throw error;
-        // 保留完整临时文件，下一轮先核对并发保存的内容，再尝试原子发布。
-        await delay(50);
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temporary, path); break; }
+      catch (error) {
+        // Windows 上并发状态读取可能短暂占用目标；保留原文件，仅有界重试原子替换。
+        if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt === 5) throw error;
+        await delay(20 * 2 ** attempt);
       }
     }
   } finally {
@@ -98,52 +83,9 @@ async function replacePrivateFile(path, text, original) {
   }
 }
 
-/**
- * 按 Windows 系统代理同步 requests.proxy-url；核心不读系统代理设置，只在冷启动时由插件写入。
- * 读取失败或平台无系统代理概念时保持现有配置，用户自管的代理值不接管也不改写。
- * 系统代理不可达且路由确认隧道出口时写入显式 direct，避免遗留环境代理覆盖回退决策。
- * @param {string} text 已通过安全字段校验的 config.yaml 文本
- * @param {object} config loadConfig 返回的运行配置
- * @param {Function} readProxy 系统代理读取实现
- * @returns {Promise<{text: string, recorded?: string}>} recorded 存在时需要发布新的归属记录
- */
-async function syncUpstreamProxy(text, config, readProxy) {
-  const desired = await readProxy();
-  // null 表示系统代理状态不可用（注册表读取失败或值无法解析）；此时既不清空也不写入。
-  if (desired === null) return { text };
-  const recorded = (await readOptional(config.proxyStatePath))?.trim() ?? null;
-  return syncProxyUrl(text, { desired, recorded });
-}
-
-/**
- * 在生命周期锁内核对并补齐现有配置的安全字段；请求参数一律沿用核心上游默认值，插件不做迁移。
- * 审批规则与 requests.proxy-url 是既有例外：后者按 Windows 系统代理同步，且只改写插件自己写过的值。
- * readProxy 只供独立测试注入，生产调用沿用系统环境。
- */
-export async function ensureDataDir(config, { readProxy = readEffectiveProxyUrl } = {}) {
-  // 先创建私有授权目录，新安装直接发布已合并默认策略的完整配置。
-  await mkdir(config.authDir, { recursive: true, mode: 0o700 });
-  if (await readOptional(config.configPath) === null) {
-    const temporary = `${config.configPath}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, ensureApprovalRouting(renderConfigYaml(config)), { flag: "wx", mode: 0o600 });
-      try { await link(temporary, config.configPath); }
-      catch (error) { if (error.code !== "EEXIST") throw error; }
-    } finally {
-      await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
-    }
-  }
-  // 校验既有安全字段再迁移；仅在内容变化时原子发布并清理临时文件。
-  const original = await readFile(config.configPath, "utf8");
-  validateExistingConfig(config, original);
-  const proxy = await syncUpstreamProxy(syncManagementSecret(ensureApprovalRouting(original), config.mgmtKey), config, readProxy);
-  if (proxy.recorded === undefined && proxy.text === original) return;
-  if (proxy.text !== original) {
-    validateExistingConfig(config, proxy.text);
-    await replacePrivateFile(config.configPath, proxy.text, original);
-  }
-  // 归属记录必须在配置发布成功之后写入；顺序颠倒会让下次冷启动误判为用户自管而停止跟随系统代理。
-  if (proxy.recorded !== undefined) await replacePrivateFile(config.proxyStatePath, `${proxy.recorded}\n`);
+/** 只创建和校验隔离的 Magpie JSON 设置，不读取或迁移旧核心配置。 */
+export async function ensureDataDir(config) {
+  await ensureMagpieConfig(config);
 }
 
 /** PID 必须连同启动身份核对，不能仅凭仍存活或同名程序判断归属。 */
@@ -186,77 +128,54 @@ function sameExecutablePath(actual, expected) {
   catch { return false; }
 }
 
+/** 同时核对 OS 实例、安装路径、隔离设置路径及管理端口，不把同名核心当作当前实例。 */
 export function sameProcess(record, identity, config) {
   return Boolean(record && identity && record.pid === identity.pid &&
     record.creationDate === identity.creationDate && record.commandLine === identity.commandLine &&
     typeof record.binPath === "string" && typeof record.configPath === "string" &&
     canonical(record.binPath) === canonical(config.binPath) &&
     canonical(record.configPath) === canonical(config.configPath) &&
+    record.managementPort === config.managementPort &&
     sameExecutablePath(identity.executablePath, config.binPath));
 }
 
+/** 读取私有 PID 记录并验证实际托管身份；升级后的路径差异仅影响归属，不允许误杀旧实例。 */
 async function trackedProcess(config) {
   const text = await readOptional(config.pidPath);
   if (text === null) return null;
   let record;
   try { record = JSON.parse(text); } catch { throw bridgeError("PID 记录损坏，拒绝自动接管"); }
+  if (process.platform !== "win32" && (record?.runtimeRevision !== RUNTIME_REVISION || record?.managementPort == null)) {
+    // 旧协议不能认证；signal 0 只有 ESRCH 能证明不存在，存活或 PID 复用均不得接管。
+    if (Number.isSafeInteger(record?.pid) && record.pid > 0 && record.pid <= 0x7fffffff) {
+      try { process.kill(record.pid, 0); }
+      catch (error) {
+        if (error.code === "ESRCH") return { record, identity: null, owned: false };
+      }
+    }
+    throw bridgeError("旧版本进程仍存在或无法确认已退出；请手动停止旧版本后重试，新版不会接管或按 PID 停止");
+  }
   const identity = process.platform === "win32"
     ? await processIdentity(record.pid)
-    // 升级会改变安装目录；先按记录自身路径认证旧实例，再单独判定是否属于当前配置。
-    : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: record?.configPath });
+    // 升级会改变安装目录；先按记录自身路径认证同协议实例，再单独判定是否属于当前配置。
+    : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: record?.configPath, managementPort: record?.managementPort });
   return { record, identity, owned: sameProcess(record, identity, config) };
 }
 
-export async function requestAcpControl(config, operation, args = {}, signal) {
-  if (!["status", "connect", "authenticate", "stop"].includes(operation)) throw bridgeError("ACP 管理操作无效。");
-  const local = getAcpService(config);
-  if (local) return local.manage(operation, args, signal);
-  const tracked = await trackedProcess(config);
-  const endpoint = tracked?.record.acp;
-  if (!tracked?.owned || tracked.record.panelRevision !== PANEL_REVISION || !endpoint ||
-      !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 ||
-      !/^[a-f0-9]{64}$/.test(endpoint.key)) throw bridgeError("ACP 管理服务尚未就绪，请先启动订阅桥。");
-  const target = { host: "127.0.0.1", port: endpoint.port, apiKey: endpoint.key };
-  const socket = await connectOwned(target, async () => {
-    const current = await trackedProcess(config);
-    if (!current?.owned || !isDeepStrictEqual(current.record, tracked.record)) return null;
-    const identity = await processIdentity(endpoint.owner?.pid);
-    return identity && isDeepStrictEqual(identity, endpoint.owner) ? identity : null;
-  }, signal);
-  const response = await requestLocal(target, "/control/" + operation, {
-    method: operation === "status" ? "GET" : "POST", body: operation === "status" ? undefined : args,
-    authenticated: true, socket, signal, timeoutMs: operation === "status" ? 5000 : 1200000,
-  });
-  let result;
-  try { result = JSON.parse(response.text); } catch { throw bridgeError("ACP 管理服务返回无效响应。"); }
-  if (response.status !== 200) throw bridgeError(result.error?.message ?? "ACP 操作未完成，请检查状态。");
-  return result;
-}
-
-/** 读取并认证同一安装的托管身份，再由操作系统认证实际连接接收者。 */
-export function openCoreConnection(config, signal) {
-  return connectOwned(config, async () => {
+/** 认证同一核心 PID；管理和模型端口不同，但不得放宽连接接收者归属验证。 */
+export function openCoreConnection(config, signal, targetPort = config.port) {
+  if (targetPort !== config.port && targetPort !== config.managementPort) throw bridgeError("目标端口不属于订阅桥");
+  return connectOwned({ ...config, port: targetPort }, async () => {
     const tracked = await trackedProcess(config);
-    return tracked?.owned && tracked.record.panelRevision === PANEL_REVISION ? tracked.identity : null;
+    return tracked?.owned && tracked.record.runtimeRevision === RUNTIME_REVISION ? tracked.identity : null;
   }, signal);
 }
 
-/** 只在认证过的同一条 socket 上发送模型或管理请求，HTTP 层不得重连。 */
+/** 只在认证过的同一条 socket 上发送模型请求，HTTP 层不得重连。 */
 export async function requestOwned(config, path, options = {}) {
   const socket = await openCoreConnection(config, options.signal);
   try { return await requestLocal(config, path, { ...options, socket }); }
   finally { socket.destroy(); }
-}
-
-/** 管理密钥由本机凭据唯一确定；在冷启动锁内替换旧密码或其 bcrypt 哈希。 */
-function syncManagementSecret(text, key) {
-  const path = ["management", "secret-key"];
-  const parsed = parseConfigYaml(text);
-  if (!parsed.nodes.has(JSON.stringify(path))) {
-    return appendConfigBlock(parsed, ["management"], "map", indent =>
-      " ".repeat(indent) + "secret-key: " + JSON.stringify(key));
-  }
-  return parsed.values.get(JSON.stringify(path)) === key ? text : replaceConfigScalar(text, path, key);
 }
 
 /** 原子发布本次启动的进程归属记录，避免并发会话读取到部分 PID 数据。 */
@@ -296,18 +215,7 @@ async function prepareExecutable(config) {
   }
 }
 
-/** 通过已认证连接验证实际注册；request 只用于隔离测试，生产始终沿用 requestOwned。 */
-export async function probeApprovalRouter(config, directory, { request = requestOwned } = {}) {
-  const response = await request(config, "/v0/management/plugins", { management: true });
-  if (response.status !== 200) throw httpFailure(response.status, "审批扩展加载检查");
-  let body;
-  try { body = JSON.parse(response.text); }
-  catch { throw bridgeError("核心返回的审批扩展加载状态不是 JSON。"); }
-  assertApprovalPluginRegistered(body, directory);
-  // 能力由已校验 SHA256 的专用库固定提供；官方接口只公开其实际注册和启用状态。
-}
-
-/** 在已持有生命周期锁时启动本机代理；先安装并配置原生审批扩展，再启动核心。 */
+/** 在生命周期锁内准备隔离设置，再启动具有租约或 Job 清理责任的 Magpie 核心。 */
 async function launch(config, signal) {
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
@@ -315,44 +223,21 @@ async function launch(config, signal) {
   if (previous) await closeSupervisor(previous.child);
   await prepareExecutable(config);
   await ensureDataDir(config);
-  const approvalRouter = await prepareApprovalRouter(config);
-  const panelDirectory = await prepareManagementPanel(config);
-  // 配置迁移留在 launch 内，纯 ensureDataDir 不依赖编译产物；发布前仍核对并发写入。
-  const original = await readFile(config.configPath, "utf8");
-  const acp = createAcpService(config, { initialModels: readAcpModels(original), onModels: async (_models, _endpoint, _key, signal) => withLifecycleLock(config, async () => {
-    const before = await readFile(config.configPath, "utf8");
-    const after = acp.configure(before);
-    validateExistingConfig(config, after);
-    await replacePrivateFile(config.configPath, after, before);
-  }, 25000, signal) });
-  try {
-    await disableGoogleAuthFiles(config, replacePrivateFile);
-    await acp.listen();
-    const removedModels = [];
-    const updated = acp.configure(configureGoogleExclusions(ensureApprovalPluginConfig(original, config, approvalRouter.directory), removedModels));
-    validateExistingConfig(config, updated);
-    await archiveGoogleModels(config, removedModels, replacePrivateFile);
-    if (updated !== original) await replacePrivateFile(config.configPath, updated, original);
-    signal?.throwIfAborted();
-  } catch (error) { await acp.close(); throw error; }
-  let child;
-  try {
-    if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
-    child = process.platform !== "win32" ? spawnPosixSupervisor(config, panelDirectory) : spawn(powerShell, [
-      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
-      "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
-      "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
-      "-LogPath", join(config.dataDir, "bridge.log"),
-    ], {
-      windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-      // 只对子进程指定受控页面，不能让宿主环境把管理端指向外部静态资产。
-      env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")), MANAGEMENT_STATIC_PATH: panelDirectory },
-    });
-  } catch (error) { await acp.close(); throw error; }
-  const owned = { child, config, identity: null, acp };
+  signal?.throwIfAborted();
+  if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
+  const child = process.platform !== "win32" ? spawnPosixSupervisor(config) : spawn(powerShell, [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
+    "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
+    "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
+    "-ManagementPort", String(config.managementPort), "-LogPath", join(config.dataDir, "bridge.log"),
+  ], {
+    windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    // 核心通过环境读取模型监听地址、管理密钥及隔离目录，不继承宿主 Magpie 配置。
+    env: magpieEnvironment(config),
+  });
+  const owned = { child, config, identity: null };
   supervisors.set(config.dataDir, owned);
   child.once("exit", () => {
-    void acp.close();
     if (supervisors.get(config.dataDir) === owned) supervisors.delete(config.dataDir);
   });
   child.stderr.resume();
@@ -395,10 +280,8 @@ async function launch(config, signal) {
       ? await processIdentity(launched.pid)
       : await queryPosixSupervisor({ ...launched, binPath: config.binPath, configPath: config.configPath }, config);
     if (!identity) throw bridgeError("代理在启动时退出，请检查 data/bridge.log");
-    const owner = await processIdentity(process.pid);
-    if (!owner) throw bridgeError("无法确认 ACP 管理进程身份，未发布管理入口。");
-    owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath, panelRevision: PANEL_REVISION, approvalRouterSha256: approvalRouter.sha256,
-      acp: { ...acp.controlEndpoint, owner } };
+    owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath,
+      managementPort: config.managementPort, runtimeRevision: RUNTIME_REVISION };
     await savePid(config, owned.identity);
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
@@ -406,9 +289,7 @@ async function launch(config, signal) {
       if (closing || child.exitCode !== null || child.signalCode !== null) throw bridgeError("代理启动已中止");
       const probe = await probeBridge(config);
       if (probe.state === "bridge") {
-        await disableGoogleCredentials(config, requestOwned);
         await probeModels(config);
-        await probeApprovalRouter(config, approvalRouter.directory);
         signal?.throwIfAborted();
         return { started: true, ready: true, reason: "qoder 订阅代理已启动并受进程生命周期托管" };
       }
@@ -418,19 +299,18 @@ async function launch(config, signal) {
     throw bridgeError("代理未在启动时限内就绪，已回收本次启动的进程");
   } catch (error) {
     await closeSupervisor(child);
-    await acp.close();
     throw error;
   }
 }
 
+/** 关闭本会话的启动任务和租约；只有已确认回收且记录未被替换时才清理 POSIX PID 文件。 */
 export async function shutdownOwnedBridges() {
   closing = true;
   for (const controller of startControllers.values()) controller.abort();
   await Promise.allSettled([...inFlight.values()]);
   // 只关闭本 MCP 持有的 Job 或租约；不按 PID 文件或进程名称清理其他会话。
-  await Promise.all([...supervisors.values()].map(async ({ child, config, identity, acp }) => {
+  await Promise.all([...supervisors.values()].map(async ({ child, config, identity }) => {
     await closeSupervisor(child);
-    await acp?.close();
     if (process.platform === "win32" || !identity || child.exitCode !== 0 || child.signalCode !== null) return;
     // 先确认 guardian 回收，再持锁比对完整记录；watchdog 已发布的新实例不能被旧 owner 删除。
     await withLifecycleLock(config, async () => {
@@ -448,16 +328,11 @@ async function inspectRunning(config) {
   const probe = await probeBridge(config);
   if (probe.state === "bridge") {
     const tracked = await trackedProcess(config);
-    if (!tracked?.owned) throw bridgeError("端口上是旧版或外部 CLIProxyAPI；请先手动停止旧版，新版不会接管");
-    if (tracked.record.panelRevision !== PANEL_REVISION) {
-      throw bridgeError("当前进程尚未加载网页授权修复；请先 bridge_stop，再 bridge_start。不会自动中断正在进行的请求。");
-    }
-    const approvalRouter = await inspectApprovalRouter(config);
-    if (tracked.record.approvalRouterSha256 !== approvalRouter.sha256) {
-      throw bridgeError("当前进程尚未加载本版本审批扩展；请先 bridge_stop，再 bridge_start。不会自动中断正在进行的请求。");
+    if (!tracked?.owned) throw bridgeError("端口上是旧版或外部 Magpie；请先手动停止，新版不会接管");
+    if (tracked.record.runtimeRevision !== RUNTIME_REVISION) {
+      throw bridgeError("当前进程不属于本版本托管协议；请先 bridge_stop，再 bridge_start。");
     }
     await probeModels(config);
-    await probeApprovalRouter(config, approvalRouter.directory);
     return { started: false, ready: true, reason: "复用本版本已验证的桥进程" };
   }
   if (probe.state !== "offline") throw bridgeError(probe.reason);
@@ -589,32 +464,23 @@ export async function getStatus(config) {
     try {
       const tracked = await trackedProcess(config);
       if (!tracked?.owned) throw bridgeError("端口服务不属于本插件，未向其发送 API Key");
-      if (tracked.record.panelRevision !== PANEL_REVISION) {
-        throw bridgeError("当前进程尚未加载网页授权修复；请先 bridge_stop，再 bridge_start。");
-      }
-      const approvalRouter = await inspectApprovalRouter(config);
-      if (tracked.record.approvalRouterSha256 !== approvalRouter.sha256) {
-        throw bridgeError("当前进程尚未加载本版本审批扩展；请先 bridge_stop，再 bridge_start。");
+      if (tracked.record.runtimeRevision !== RUNTIME_REVISION) {
+        throw bridgeError("当前进程不属于本版本托管协议；请先 bridge_stop，再 bridge_start。");
       }
       const ids = await probeModels(config);
-      await probeApprovalRouter(config, approvalRouter.directory);
       // 核心可能提供大量模型，状态只返回总数与有限样例。
       modelState = { count: ids.length, sample: ids.slice(0, 40) };
       ready = true;
     } catch (error) { modelState = { count: null, sample: [], note: error.message }; }
   }
-  let authCount = 0;
-  try { authCount = (await readdir(config.authDir)).filter((name) => name.endsWith(".json")).length; }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
   return {
     alive: probe.state === "bridge", ready, state: probe.state, reason: probe.reason,
     endpoint: config.endpoint, managementUrl: config.managementUrl,
     dataDir: config.dataDir, configPath: config.configPath,
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
-    authCount, models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
-    acp: await requestAcpControl(config, "status").catch(() => ({ state: "unavailable", ready: false })),
+    models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
     core: await getCoreStatus(config),
-    loginHint: `点击 Qoder 更多菜单中的订阅代理管理，或让 AI 调用 bridge_open_management，在系统默认浏览器从固定端口 ${MANAGEMENT_PORT} 免输密码进入管理页。手动登录使用本机 launcher-secrets.json 的 mgmtKey；模型请求使用独立 apiKey。`,
+    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号，这也允许 Magpie 发现本机其他客户端账号。管理端口 ${config.managementPort} 与模型端口由同一核心提供；手动登录使用 launcher-secrets.json 的 mgmtKey，模型请求使用独立 apiKey。`,
   };
 }
 

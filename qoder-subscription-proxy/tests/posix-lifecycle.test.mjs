@@ -9,14 +9,11 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../server/config.mjs";
+import { loadConfig, magpieArguments } from "../server/config.mjs";
 import { resolveCoreBinaryPath } from "../server/core-runtime.mjs";
-import { replaceConfigScalar } from "../server/config-yaml.mjs";
 import { copyTestCore, nativeCoreSkip, testCorePath } from "./helpers/native-core.mjs";
 import { ensureDataDir, ensureRunning, getStatus, stopBridge, withLifecycleLock, probeBridge } from "../server/supervisor.mjs";
 import { queryPosixSupervisor, spawnPosixSupervisor } from "../server/posix-supervisor.mjs";
-import { PANEL_REVISION, prepareManagementPanel } from "../server/management-panel.mjs";
-import { readApprovalArtifact } from "../scripts/build-approval-router.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const native = {
@@ -83,29 +80,11 @@ function assertContained(directory, path) {
 async function copyRuntime(root) {
   const modules = (await readdir(join(pluginRoot, "server")))
     .filter((name) => name.endsWith(".mjs")).map((name) => join("server", name));
-  for (const path of [...modules, "scripts/proxy-supervisor.mjs",
-    "server/acp-platforms.json", "server/bin/platforms.json", "server/panel/management.upstream.html", "server/panel/acp.html"]) {
+  for (const path of [...modules, "scripts/proxy-supervisor.mjs", "server/bin/platforms.json"]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await copyFile(join(pluginRoot, path), join(root, path));
   }
-  for (const [path, bytes] of readApprovalArtifact(pluginRoot, `${process.platform}-${process.arch}`)) {
-    await mkdir(dirname(join(root, path)), { recursive: true });
-    await writeFile(join(root, path), bytes);
-  }
 }
-
-test("隔离运行副本包含已校验的当前平台审批扩展", { skip: nativeCoreSkip }, async (t) => {
-  const directory = await realpath(await mkdtemp(join(tmpdir(), "isolated-runtime-")));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  await copyRuntime(directory);
-  const expected = readApprovalArtifact(pluginRoot, `${process.platform}-${process.arch}`);
-  for (const [path, bytes] of expected) assert.deepEqual(await readFile(join(directory, path)), bytes);
-  for (const path of ["server/acp-platforms.json", "server/panel/acp.html"]) {
-    assert.deepEqual(await readFile(join(directory, path)), await readFile(join(pluginRoot, path)));
-  }
-  assert.deepEqual((await readdir(join(directory, "server/approval-router"))).sort(),
-    [...expected.keys()].map(path => path.split("/").at(-1)).sort());
-});
 
 async function fixture(t, { cached = false } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "posix-bridge-中文 路径-")));
@@ -135,12 +114,12 @@ async function fixture(t, { cached = false } = {}) {
     XDG_CONFIG_HOME: join(directory, "xdg-config"), XDG_CACHE_HOME: join(directory, "xdg-cache"),
     XDG_DATA_HOME: join(directory, "xdg-data"),
     BRIDGE_BIN: binPath, BRIDGE_DATA_DIR: dataDir,
-    BRIDGE_HOST: "127.0.0.1", BRIDGE_PORT: String(await unusedPort()),
+    BRIDGE_HOST: "127.0.0.1", BRIDGE_PORT: String(await unusedPort()), BRIDGE_MANAGEMENT_PORT: String(await unusedPort()),
     BRIDGE_API_KEY: "isolated-posix-test-client-key", BRIDGE_MGMT_KEY: "123456",
   };
   if (cached) delete env.BRIDGE_BIN;
   config = await loadConfig({ pluginRoot: root, env });
-  for (const path of [config.binPath, config.dataDir, config.authDir, config.configPath, config.pidPath]) {
+  for (const path of [config.binPath, config.dataDir, config.profileDir, config.configPath, config.pidPath]) {
     assertContained(directory, path);
   }
   return { config, env, root, clients };
@@ -237,7 +216,7 @@ async function assertIdentity(config) {
   assert.match(record.controlToken, /^[0-9a-f]{64}$/);
   assert.ok(Number.isInteger(record.controlPort) && record.controlPort > 0 && record.controlPort <= 65535);
   assert.equal(record.executablePath, config.binPath);
-  assert.deepEqual(JSON.parse(record.commandLine), [config.binPath, "-config", config.configPath]);
+  assert.deepEqual(JSON.parse(record.commandLine), [config.binPath, ...magpieArguments(config)]);
   const identity = await queryPosixSupervisor(record, config);
   assert.ok(identity);
   for (const key of ["pid", "creationDate", "commandLine", "executablePath", "controlPort", "controlToken"]) {
@@ -250,7 +229,7 @@ async function assertIdentity(config) {
 test("POSIX 外层托管器强杀后回收原生核心，停止及重新启动可恢复", native, async (t) => {
   const f = await fixture(t);
   await ensureDataDir(f.config);
-  const child = spawnPosixSupervisor(f.config, await prepareManagementPanel(f.config));
+  const child = spawnPosixSupervisor(f.config);
   child.stderr.resume();
   child.stdin.on("error", () => {});
   const lines = createInterface({ input: child.stdout });
@@ -260,7 +239,7 @@ test("POSIX 外层托管器强杀后回收原生核心，停止及重新启动�
     lines.close();
   } });
   const [line] = await once(lines, "line", { signal: AbortSignal.timeout(10000) });
-  const record = { ...JSON.parse(line), binPath: f.config.binPath, configPath: f.config.configPath, panelRevision: PANEL_REVISION };
+  const record = { ...JSON.parse(line), binPath: f.config.binPath, configPath: f.config.configPath, managementPort: f.config.managementPort, runtimeRevision: "magpie-v1" };
   await writeFile(f.config.pidPath, JSON.stringify(record), { mode: 0o600 });
   await waitUntil(async () => (await probeBridge(f.config)).state === "bridge", "原生核心就绪");
   assert.equal(child.kill("SIGKILL"), true);
@@ -281,7 +260,7 @@ test("POSIX 隔离原生核心并发 start/status/stop，暂停自动恢复且�
   const status = await getStatus(config);
   assert.equal(status.alive, true);
   assert.equal(status.ready, true);
-  assert.equal(status.authCount, 0);
+  assert.equal(Object.hasOwn(status, "authCount"), false);
   assert.equal(status.autoRecoveryPaused, false);
   assert.ok(!JSON.stringify(status).includes(record.controlToken), "状态不得暴露控制令牌");
   assert.ok(!JSON.stringify(status).includes(config.apiKey), "状态不得暴露客户端密钥");
@@ -305,7 +284,6 @@ test("POSIX 无账号 MCP 握手后后台自动就绪，两个真实 MCP 复用�
   await waitUntil(async () => (await getStatus(f.config)).ready, "后台无需工具自动启动", 30000);
   const status = await getStatus(f.config);
   assert.equal(status.ready, true, "后台必须自动启动，不能靠 bridge_start 补启动");
-  assert.equal(status.authCount, 0, "不要求先登录账号或提供模型");
   const before = await assertIdentity(f.config);
   const borrower = await mcpClient(f);
   const reused = await borrower.call("bridge_start");
@@ -391,7 +369,7 @@ test("POSIX 控制端点消失时仅确认 PID 不存在才恢复陈旧记录", 
   assert.equal(await queryPosixSupervisor(stale, f.config), null);
   const otherBin = join(dirname(f.config.binPath), "其他版本核心");
   const otherRecord = { ...stale, binPath: otherBin, executablePath: otherBin,
-    commandLine: JSON.stringify([otherBin, "-config", f.config.configPath]) };
+    commandLine: JSON.stringify([otherBin, ...magpieArguments(f.config)]) };
   await saveRecord(otherRecord);
   assert.equal((await stopBridge(f.config)).stopped, true);
   assert.deepEqual(await readPid(f.config), otherRecord);
@@ -415,25 +393,16 @@ test("POSIX 升级核心路径时不接管存活旧实例，owner SIGKILL 保留
   await chmod(newBin, 0o755);
   const newConfig = await loadConfig({ pluginRoot: f.root, env: { ...f.env, BRIDGE_BIN: newBin } });
   assert.notEqual(newConfig.binPath, f.config.binPath);
-  for (const key of ["dataDir", "authDir", "configPath", "pidPath", "pausedPath", "port", "apiKey"]) {
+  for (const key of ["dataDir", "profileDir", "configPath", "pidPath", "pausedPath", "port", "apiKey"]) {
     assert.equal(newConfig[key], f.config[key], `升级仅改变核心路径，不改变 ${key}`);
   }
   const readData = async () => [
-    replaceConfigScalar(await readFile(f.config.configPath, "utf8"), ["management", "secret-key"], "managed-secret"),
+    JSON.parse(await readFile(f.config.configPath, "utf8")),
     await readFile(join(f.config.dataDir, "launcher-secrets.json")),
   ];
   const originalData = await readData();
-  const originalAuths = await readdir(f.config.authDir);
-  async function assertDataUnchanged(restarted = false) {
-    const currentData = await readData();
-    if (restarted) {
-      const normalize = text => replaceConfigScalar(replaceConfigScalar(text,
-        ["api-keys", "openai-compatibility", 0, "base-url"], "managed-acp-endpoint"),
-        ["api-keys", "openai-compatibility", 0, "keys", 0, "api-key"], "managed-acp-key");
-      assert.notEqual(currentData[0], originalData[0], "新 ACP 实例重新签发内部端口和密钥");
-      assert.deepEqual([normalize(currentData[0]), currentData[1]], [normalize(originalData[0]), originalData[1]]);
-    } else assert.deepEqual(currentData, originalData);
-    assert.deepEqual(await readdir(newConfig.authDir), originalAuths);
+  async function assertDataUnchanged() {
+    assert.deepEqual(await readData(), originalData);
     await assert.rejects(readFile(newConfig.pausedPath), { code: "ENOENT" });
   }
   try {

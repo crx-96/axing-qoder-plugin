@@ -3,6 +3,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createConnection } from "node:net";
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { magpieArguments, magpieEnvironment } from "./config.mjs";
 
 /** 请求、响应及首次身份公告的 UTF-8 上限，包含末尾换行。 */
 export const CONTROL_MESSAGE_LIMIT = 8 * 1024;
@@ -10,7 +11,7 @@ export const CONTROL_MESSAGE_LIMIT = 8 * 1024;
 export const CONTROL_REQUEST_TIMEOUT_MS = 2000;
 /** stop 最多五秒 TERM 加一秒 KILL 确认，余量用于控制消息传输。 */
 const CONTROL_STOP_TIMEOUT_MS = 8000;
-/** 入口不依赖 cwd；argv 只传路径，绝不序列化含密钥的完整 config。 */
+/** 入口不依赖 cwd；argv 只传路径和管理端口，绝不序列化含密钥的完整 config。 */
 const supervisorScript = fileURLToPath(new URL("../scripts/proxy-supervisor.mjs", import.meta.url));
 
 /** 错误使用固定安全文案，不把令牌、命令行或底层网络正文带入 MCP。 */
@@ -18,10 +19,11 @@ export function posixSupervisorError(message = "POSIX 托管器身份或控制�
   return Object.assign(new Error(message), { code: "BRIDGE_NOT_READY", safeMessage: message });
 }
 
-/** 只接受绝对路径，不读取配置正文、凭据或二进制内容。 */
-export function validatePosixPaths(config, panelDirectory) {
-  if (!config || typeof config !== "object") throw posixSupervisorError("POSIX 托管路径配置无效");
-  for (const path of [config.binPath, config.configPath, ...(arguments.length > 1 ? [config.dataDir, panelDirectory] : [])]) {
+/** 校验绝对路径和管理端口；requireDataDir 仅在启动时要求工作目录，不读取磁盘配置或凭据。 */
+export function validatePosixPaths(config, requireDataDir = false) {
+  if (!config || typeof config !== "object" || !Number.isInteger(config.managementPort) ||
+      config.managementPort < 1 || config.managementPort > 65535) throw posixSupervisorError("POSIX 托管路径或管理端口配置无效");
+  for (const path of [config.binPath, config.configPath, ...(requireDataDir ? [config.dataDir] : [])]) {
     if (typeof path !== "string" || !path || path.includes("\0") || !isAbsolute(path)) {
       throw posixSupervisorError("POSIX 托管路径必须为不含 NUL 的绝对路径");
     }
@@ -40,7 +42,7 @@ export function validatePosixIdentity(value, config) {
       typeof value.controlToken !== "string" || !/^[0-9a-f]{64}$/.test(value.controlToken) ||
       !Number.isInteger(value.controlPort) || value.controlPort < 1 || value.controlPort > 65535 ||
       value.executablePath !== config.binPath ||
-      value.commandLine !== JSON.stringify([config.binPath, "-config", config.configPath])) {
+      value.commandLine !== JSON.stringify([config.binPath, ...magpieArguments(config)])) {
     throw posixSupervisorError();
   }
   return {
@@ -102,11 +104,11 @@ export function encodePosixMessage(value) {
  * 同步返回 Node ChildProcess。stdin 必须保持打开，结束租约请调用 stdin.end()，不要 kill 托管器。
  * env 原样继承 ELECTRON_RUN_AS_NODE，防止 Electron 宿主的 execPath 被当作 GUI 应用启动。
  */
-export function spawnPosixSupervisor(config, panelDirectory) {
-  validatePosixPaths(config, panelDirectory);
-  return spawn(process.execPath, [supervisorScript, config.binPath, config.configPath, config.dataDir, panelDirectory], {
+export function spawnPosixSupervisor(config) {
+  validatePosixPaths(config, true);
+  return spawn(process.execPath, [supervisorScript, config.binPath, config.configPath, config.dataDir, String(config.managementPort)], {
     cwd: config.dataDir,
-    env: { ...process.env, MANAGEMENT_STATIC_PATH: panelDirectory },
+    env: magpieEnvironment(config),
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
   });

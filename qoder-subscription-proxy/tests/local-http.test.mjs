@@ -15,7 +15,7 @@ async function localServer(t, handler) {
     server.closeAllConnections();
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
-  return { server, config: { host: "127.0.0.1", port, apiKey: "unit-test-api-key" } };
+  return { server, config: { host: "127.0.0.1", port, apiKey: "unit-test-api-key", mgmtKey: "unit-test-management-key" } };
 }
 
 test("requestLocal 仅访问本地回环地址，并按需发送认证和 JSON", async (t) => {
@@ -35,6 +35,7 @@ test("requestLocal 仅访问本地回环地址，并按需发送认证和 JSON",
   assert.deepEqual(JSON.parse(result.text), { ok: true });
   assert.equal(requests[0].headers.authorization, undefined);
   assert.equal(requests[1].headers.authorization, `Bearer ${config.apiKey}`);
+  assert.ok(requests.every(request => !JSON.stringify(request.headers).includes(config.mgmtKey)));
   assert.equal(requests[1].method, "POST");
   assert.equal(requests[1].headers.connection, "close");
   assert.equal(requests[1].headers["content-type"], "application/json");
@@ -152,4 +153,6 @@ test("httpFailure 仅包含状态与本地诊断，不需要上游错误正文",
     assert.match(error.message, new RegExp(`HTTP ${status}`));
     assert.match(error.message, /单元测试失败/);
   }
+  assert.match(httpFailure(401, "模型查询").message, /服务商账号或凭据/);
+  assert.doesNotMatch(httpFailure(401, "模型查询").message, /本地 API Key/);
 });

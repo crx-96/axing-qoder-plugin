@@ -49,7 +49,7 @@ async function executable(path, content) {
 }
 
 async function runShell(script, args = [], options = {}) {
-  // Git Bash 仅模拟市场平台选择；合成库从不加载，真实平台在五 runner CI 验证。
+  // Git Bash 仅模拟市场平台选择；合成核心不执行，不代表真实平台运行验收。
   if (process.platform === 'win32' && script.endsWith('prepare-posix-marketplace.sh')) {
     const bin = join(dirname(script), 'fixture-bin');
     const env = { ...process.env };
@@ -136,19 +136,17 @@ async function sourceFixture(t) {
   await put(join(plugin, "scripts", "start-mcp.sh"), launcherText);
   const prepare = join(plugin, "scripts", "prepare-posix-marketplace.sh");
   await put(prepare, prepareText);
-  await copyFile(join(root, 'scripts/build-approval-router.mjs'), join(plugin, 'scripts/build-approval-router.mjs'));
   if (process.platform === 'win32') {
     await executable(join(plugin, 'scripts/fixture-bin/uname'), `case "$1" in -s) printf 'Linux\\n' ;; -m) printf 'x86_64\\n' ;; esac`);
     await executable(join(plugin, 'scripts/fixture-bin/node'), `exec ${quote(posixPath(process.execPath))} "$1" "$2" "$(cygpath -w "$3")" "$(cygpath -w "$4")" "$5"`);
   }
+  const platforms = {};
   for (const platform of ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']) {
-    const file = `qoder-approval-router.${platform.startsWith('darwin') ? 'dylib' : 'so'}`;
-    const bytes = Buffer.from(`synthetic library for ${platform}`);
-    await put(join(plugin, '.approval-build', platform, file), bytes);
-    await put(join(plugin, '.approval-build', platform, 'manifest.json'), JSON.stringify({
-      abiVersion: 1, platform, file, sha256: createHash('sha256').update(bytes).digest('hex'),
-    }));
+    const bytes = Buffer.from(`synthetic Magpie core for ${platform}`);
+    await put(join(plugin, '.core-build', platform, 'magpie'), bytes);
+    platforms[platform] = { path: `${platform}/magpie`, binarySha256: createHash('sha256').update(bytes).digest('hex') };
   }
+  await put(join(plugin, 'server/bin/platforms.json'), JSON.stringify({ version: 'v0.1.4330', platforms }));
   for (const file of ["data/auth.json", "server/data/auth.json", "tests/temporary/private.json", "unknown.tmp", "scripts/unknown.tmp", "server/unknown.tmp", "server/local-debug-only.mjs", "commands/private.md", "server/bin/unknown.tmp", "server/bin/CLIProxyAPI_8.0.60_windows_amd64.zip", "server/bin/CLIProxyAPI_8.0.60_linux_amd64.tar.gz", "server/bin/linux-x64/unknown.tmp", "server/panel/unknown.tmp", ".qoder-plugin/unknown.tmp"]) {
     await put(join(plugin, file), "must-not-copy-private-fixture\n");
   }
@@ -256,7 +254,7 @@ test("Git Bash/fake Darwin：HOME 标准 Qoder 候选仍执行版本探测", { s
   assert.equal((await runtimeRoundtrip(fixture)).stderr, "selected=home-electron\n");
 });
 
-test("prepare：生成独立市场、原样 catalog、POSIX 清单，不复制任何平台核心与归档，源文件不变", { skip: shellSkip }, async (t) => {
+test("prepare：生成独立市场、原样 catalog、POSIX 清单，只复制当前平台校验核心，源文件不变", { skip: shellSkip }, async (t) => {
   const fixture = await sourceFixture(t);
   const before = await snapshot(fixture.repository);
   const result = await runShell(fixture.prepare, [posixPath(fixture.target)]);
@@ -273,31 +271,25 @@ test("prepare：生成独立市场、原样 catalog、POSIX 清单，不复制�
   assert.equal(JSON.parse(await readFile(join(fixture.plugin, "mcp.json"))).mcpServers["qoder-subscription-proxy"].command, "powershell.exe");
   const copied = await snapshot(copy);
   const platform = process.platform === 'win32' ? 'linux-x64' : `${process.platform}-${process.arch}`;
-  const library = `qoder-approval-router.${platform.startsWith('darwin') ? 'dylib' : 'so'}`;
-  assert.deepEqual(Object.keys(copied).filter(file => file.startsWith('server/approval-router/')), [
-    'server/approval-router/manifest.json', `server/approval-router/${library}`,
-  ]);
-  for (const name of ['manifest.json', library]) {
-    assert.deepEqual(await readFile(join(copy, 'server/approval-router', name)), await readFile(join(fixture.plugin, '.approval-build', platform, name)));
-  }
+  assert.deepEqual(Object.keys(copied).filter(file => /^server\/bin\/(?:linux|darwin)-/.test(file)), [`server/bin/${platform}/magpie`]);
+  assert.deepEqual(await readFile(join(copy, 'server/bin', platform, 'magpie')), await readFile(join(fixture.plugin, '.core-build', platform, 'magpie')));
+  if (process.platform !== 'win32') assert.equal((await lstat(join(copy, 'server/bin', platform, 'magpie'))).mode & 0o777, 0o755);
+  assert.equal(Object.keys(copied).some(file => file.includes('approval-router')), false);
   assert.ok(copied["server/posix-supervisor.mjs"]);
   assert.equal(copied["server/local-debug-only.mjs"], undefined);
   assert.equal(copied["commands/private.md"], undefined);
   assert.ok(copied["scripts/proxy-supervisor.mjs"]);
-  assert.equal(copied["Antigravity授权.cmd"], undefined);
-  assert.equal(copied["scripts/antigravity-login.ps1"], undefined);
-  assert.ok(copied["server/acp-runtime.mjs"]);
   assert.ok(copied["scripts/start-mcp.ps1"]);
   for (const file of Object.keys(copied)) assert.doesNotMatch(file, /(^|\/)data\/|(^|\/)tests\/|unknown\.tmp/);
   assert.ok(copied["server/core-runtime.mjs"]);
-  assert.deepEqual(Object.keys(copied).filter((file) => file.startsWith("server/bin/")), [
-    "server/bin/LICENSE", "server/bin/README.md", "server/bin/README_CN.md",
-    "server/bin/config.example.yaml", "server/bin/platforms.json",
-  ]);
+  const distributed = (await readFile(join(root, 'scripts/distribution-files.txt'), 'utf8')).trimEnd().split(/\r?\n/);
+  assert.deepEqual(Object.keys(copied).filter(file => file.startsWith('server/bin/')).sort(), [
+    ...distributed.filter(file => file.startsWith('server/bin/')), `server/bin/${platform}/magpie`,
+  ].sort());
   for (const file of Object.keys(copied)) assert.doesNotMatch(file, /\.(?:exe|zip|gz)$|bridge\/bin\/(?:darwin|linux)-/);
 });
 
-test("prepare：源目录没有任何平台二进制仍能完整打包许可证和下载清单", { skip: shellSkip }, async (t) => {
+test("prepare：不依赖旧 server/bin 核心，仅使用 .core-build 并保留许可证清单", { skip: shellSkip }, async (t) => {
   const fixture = await sourceFixture(t);
   await rm(join(fixture.plugin, "server/bin/qoder-plugin-subscription-proxy.exe"));
   for (const platform of ["darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64"]) {
@@ -311,32 +303,32 @@ test("prepare：源目录没有任何平台二进制仍能完整打包许可证�
   assert.equal(Object.keys(copied).some((file) => /\.(?:exe|zip|gz)$|bridge\/bin\/(?:darwin|linux)-/.test(file)), false);
 });
 
-for (const failure of ['missing', 'library-missing', 'platform', 'abi', 'file', 'hash', 'directory']) {
-  test(`prepare：审批扩展 ${failure} 时拒绝并清理副本`, { skip: shellSkip }, async t => {
+for (const failure of ['missing', 'platform', 'file', 'cross-platform', 'hash', 'invalid-hash', 'directory']) {
+  test(`prepare：核心 ${failure} 时拒绝并清理副本`, { skip: shellSkip }, async t => {
     const fixture = await sourceFixture(t);
     const platform = process.platform === 'win32' ? 'linux-x64' : `${process.platform}-${process.arch}`;
-    const build = join(fixture.plugin, '.approval-build', platform);
-    const manifestFile = join(build, 'manifest.json');
+    const binary = join(fixture.plugin, '.core-build', platform, 'magpie');
+    const manifestFile = join(fixture.plugin, 'server/bin/platforms.json');
     const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
-    if (failure === 'missing') await rm(manifestFile);
-    else if (failure === 'library-missing') await rm(join(build, manifest.file));
-    else if (failure === 'directory') { await rm(join(build, manifest.file)); await mkdir(join(build, manifest.file)); }
+    if (failure === 'missing') await rm(binary);
+    else if (failure === 'directory') { await rm(binary); await mkdir(binary); }
     else {
-      if (failure === 'platform') manifest.platform = 'wrong-platform';
-      if (failure === 'abi') manifest.abiVersion = 2;
-      if (failure === 'file') manifest.file = '../external.so';
-      if (failure === 'hash') manifest.sha256 = '0'.repeat(64);
+      if (failure === 'platform') delete manifest.platforms[platform];
+      if (failure === 'file') manifest.platforms[platform].path = '../external';
+      if (failure === 'cross-platform') manifest.platforms[platform].path = 'win32-x64/magpie';
+      if (failure === 'hash') manifest.platforms[platform].binarySha256 = '0'.repeat(64);
+      if (failure === 'invalid-hash') manifest.platforms[platform].binarySha256 = 'invalid';
       await writeFile(manifestFile, JSON.stringify(manifest));
     }
-    await assert.rejects(runShell(fixture.prepare, [posixPath(fixture.target)]), error => /审批路由/.test(error.stderr));
+    await assert.rejects(runShell(fixture.prepare, [posixPath(fixture.target)]), error => /核心|ENOENT/.test(error.stderr));
     await assert.rejects(access(fixture.target), { code: 'ENOENT' });
   });
 }
 
-test('prepare：拒绝审批扩展目录链接并清理副本', { skip: shellSkip || (process.platform === 'win32' ? '真实 POSIX 验证链接' : false) }, async t => {
+test('prepare：拒绝核心缓存目录链接并清理副本', { skip: shellSkip || (process.platform === 'win32' ? '真实 POSIX 验证链接' : false) }, async t => {
   const fixture = await sourceFixture(t);
-  const build = join(fixture.plugin, '.approval-build', `${process.platform}-${process.arch}`);
-  const outside = join(fixture.directory, 'external-library');
+  const build = join(fixture.plugin, '.core-build', `${process.platform}-${process.arch}`);
+  const outside = join(fixture.directory, 'external-core');
   await mkdir(outside);
   await rm(build, { recursive: true });
   await symlink(outside, build);
@@ -393,8 +385,8 @@ test("prepare：拒绝符号链接目标及源分发目录，不跟随指向真�
   await assert.rejects(access(fixture.target), { code: "ENOENT" });
   await rm(join(fixture.repository, "README.md"));
   await writeFile(join(fixture.repository, "README.md"), marketReadme);
-  await rm(join(fixture.plugin, "server/panel"), { recursive: true });
-  await symlink(existing, join(fixture.plugin, "server/panel"));
+  await rm(join(fixture.plugin, "assets"), { recursive: true });
+  await symlink(existing, join(fixture.plugin, "assets"));
   await assert.rejects(runShell(fixture.prepare, [fixture.target]), (error) => /分发目录缺失或是符号链接/.test(error.stderr));
   await assert.rejects(access(fixture.target), { code: "ENOENT" });
   assert.deepEqual(await readdir(existing), []);

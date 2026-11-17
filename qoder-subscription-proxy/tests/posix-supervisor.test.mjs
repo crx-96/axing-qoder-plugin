@@ -12,8 +12,28 @@ import {
   CONTROL_MESSAGE_LIMIT, createPosixControlMessage, queryPosixSupervisor, spawnPosixSupervisor,
 } from "../server/posix-supervisor.mjs";
 
+import { magpieArguments } from "../server/config.mjs";
+import { createRedactedLog } from "../scripts/proxy-supervisor.mjs";
+
 const supervisorUrl = new URL("../scripts/proxy-supervisor.mjs", import.meta.url).href;
 const unixOnly = process.platform === "win32" ? "Unix 信号处理与文件权限须在 macOS/Linux 验证" : false;
+
+test("日志脱敏覆盖全部分块位置、UTF-8、重复密钥、无换行长行及 EOF 尾段", async () => {
+  const secret = "a1b2c3d4".repeat(8);
+  const text = `中文🙂 key=${secret}&next=x\n${secret}${secret}\n${"长".repeat(5000)} ${secret} 尾段`;
+  const bytes = Buffer.from(text);
+  for (const width of [1, 2, 3, 7, 63, 64, 65, 4096, bytes.length]) {
+    const chunks = [];
+    const stream = createRedactedLog(secret);
+    stream.on("data", chunk => chunks.push(chunk));
+    const done = once(stream, "end");
+    for (let offset = 0; offset < bytes.length; offset += width) stream.write(bytes.subarray(offset, offset + width));
+    stream.end();
+    await done;
+    assert.equal(Buffer.concat(chunks).toString(), text.replaceAll(secret, "[REDACTED]"));
+  }
+  for (const secret of [undefined, "", "unsafe\nkey"]) assert.throws(() => createRedactedLog(secret));
+});
 
 async function waitUntil(check, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
@@ -65,10 +85,9 @@ async function closeLease(child) {
 async function fixture(t, { ignoreTerm = false, owner = false, announcement = "normal" } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "posix-supervisor-中文 空格-")));
   const dataDir = join(directory, "数据 data");
-  const panelDirectory = join(directory, "受控 panel");
   await mkdir(dataDir);
-  await mkdir(panelDirectory);
-  const config = { binPath: join(directory, "模拟 核心.mjs"), configPath: join(dataDir, "配置 config.yaml"), dataDir };
+  const config = { binPath: join(directory, "模拟 核心.mjs"), configPath: join(dataDir, "settings.json"), dataDir,
+    managementPort: 12345, host: "127.0.0.1", port: 12346, mgmtKey: "test-private-web-key" };
   const observedPath = join(dataDir, "fake-observed.json");
   const trigger = join(dataDir, "fake-exit.trigger");
   await writeFile(config.configPath, "isolated fake configuration; no credentials\n");
@@ -76,9 +95,12 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     import { writeFileSync, existsSync } from 'node:fs';
     writeFileSync(${JSON.stringify(observedPath)}, JSON.stringify({
       pid:process.pid, cwd:process.cwd(), args:process.argv.slice(2),
-      panel:process.env.MANAGEMENT_STATIC_PATH, electron:process.env.ELECTRON_RUN_AS_NODE
+      configHome:process.env.XDG_CONFIG_HOME, address:process.env.MAGPIE_ADDR,
+      webKey:process.env.MAGPIE_WEB_KEY, rogue:process.env.MAGPIE_ROGUE, electron:process.env.ELECTRON_RUN_AS_NODE
     }));
     console.log('fake-core stdout'); console.error('fake-core stderr');
+    process.stdout.write('stdout-key=' + process.env.MAGPIE_WEB_KEY + '\\n');
+    process.stderr.write('stderr-key=' + process.env.MAGPIE_WEB_KEY + '\\n');
     ${ignoreTerm ? "process.on('SIGTERM',()=>{});" : "process.on('SIGTERM',()=>{writeFileSync('term-seen','yes');process.exit(0)});"}
     setInterval(()=>{if(existsSync(${JSON.stringify(trigger)}))process.exit(0)},20);
   `);
@@ -91,7 +113,7 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     writeFileSync(${JSON.stringify(guardianPidPath)},String(process.pid));
     ${announcement === "held" ? "process.stdout.write=()=>true;" : ""}
     const config=${JSON.stringify(config)};
-    process.exitCode=await runCoreGuardian(config,${JSON.stringify(panelDirectory)},{
+    process.exitCode=await runCoreGuardian(config,{
       spawnChild:(bin,args,options)=>spawn(process.execPath,[bin,...args],options)
     });
   `);
@@ -100,7 +122,7 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     import {spawn} from 'node:child_process';
     import {runPosixSupervisor} from ${JSON.stringify(supervisorUrl)};
     const config=${JSON.stringify(config)};
-    process.exitCode=await runPosixSupervisor(config,${JSON.stringify(panelDirectory)},{
+    process.exitCode=await runPosixSupervisor(config,{
       spawnGuardian:(bin,args,options)=>spawn(process.execPath,[${JSON.stringify(guardianPath)}],options)
     });
   `);
@@ -125,7 +147,7 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     `);
   }
   const child = spawn(process.execPath, [target], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", MANAGEMENT_STATIC_PATH: "must-be-overridden" },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", MAGPIE_ADDR: "must-be-overridden", MAGPIE_ROGUE: "must-not-inherit" },
     windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -151,7 +173,7 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
   identity ??= { pid: observed.pid };
   guardianPid = Number(await readFile(guardianPidPath, "utf8"));
   const record = { ...identity, binPath: config.binPath, configPath: config.configPath };
-  return { config, record, child, guardianPid, directory, panelDirectory, observedPath, trigger, stdout: () => stdout, stderr: () => stderr };
+  return { config, record, child, guardianPid, directory, observedPath, trigger, stdout: () => stdout, stderr: () => stderr };
 }
 
 async function rawRequest(record, message) {
@@ -180,26 +202,29 @@ async function fakeControl(t, response) {
     for (const socket of sockets) socket.destroy();
     if (server.listening) await new Promise((resolve) => server.close(resolve));
   });
-  const config = { binPath: process.execPath, configPath: join(tmpdir(), "only-synthetic-config.yaml") };
+  const config = { binPath: process.execPath, configPath: join(tmpdir(), "only-synthetic-settings.json"), managementPort: 12345 };
   const record = {
-    pid: process.pid, creationDate: randomUUID(), commandLine: JSON.stringify([config.binPath, "-config", config.configPath]),
+    pid: process.pid, creationDate: randomUUID(), commandLine: JSON.stringify([config.binPath, ...magpieArguments(config)]),
     executablePath: config.binPath, controlToken: randomBytes(32).toString("hex"),
     controlPort: server.address().port, ...config,
   };
   return { server, record, config };
 }
 
-test("中文空格路径的身份协议、日志隔离、cwd、受控面板及 Electron 环境继承", { timeout: 15000 }, async (t) => {
+test("中文空格路径的身份协议、日志隔离、cwd、Magpie 环境及 Electron 环境继承", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
   const identity = await queryPosixSupervisor(f.record, f.config);
   assert.equal(identity.pid, f.record.pid);
   assert.match(identity.creationDate, /^[0-9a-f-]{36}$/);
   assert.match(identity.controlToken, /^[0-9a-f]{64}$/);
-  assert.equal(identity.commandLine, JSON.stringify([f.config.binPath, "-config", f.config.configPath]));
+  assert.equal(identity.commandLine, JSON.stringify([f.config.binPath, ...magpieArguments(f.config)]));
   const observed = JSON.parse(await readFile(f.observedPath, "utf8"));
   assert.equal(observed.cwd, f.config.dataDir);
-  assert.deepEqual(observed.args, ["-config", f.config.configPath]);
-  assert.equal(observed.panel, f.panelDirectory);
+  assert.deepEqual(observed.args, ["serve", `--web=127.0.0.1:${f.config.managementPort}`]);
+  assert.equal(observed.configHome, f.config.dataDir);
+  assert.equal(observed.address, `127.0.0.1:${f.config.port}`);
+  assert.equal(observed.webKey, f.config.mgmtKey);
+  assert.equal(observed.rogue, undefined);
   assert.equal(observed.electron, "1");
   const log = await waitUntil(async () => {
     const content = await readFile(join(f.config.dataDir, "bridge.log"), "utf8");
@@ -213,6 +238,12 @@ test("中文空格路径的身份协议、日志隔离、cwd、受控面板及 E
   assert.equal(f.stderr(), "");
   await closeLease(f.child);
   assert.equal(f.child.exitCode, 0);
+  const completeLog = await readFile(join(f.config.dataDir, "bridge.log"), "utf8");
+  // 两个流按块合并，标签与脱敏占位不保证相邻。
+  assert.match(completeLog, /stdout-key=/);
+  assert.match(completeLog, /stderr-key=/);
+  assert.equal(completeLog.match(/\[REDACTED\]/g)?.length, 2);
+  assert.ok(!completeLog.includes(f.config.mgmtKey));
   assert.equal(await queryPosixSupervisor(f.record, f.config), null);
 });
 
@@ -257,7 +288,7 @@ test("owner stdin EOF 回收核心和 supervisor，未发布前 EOF 不遗留资
   await closeLease(f.child);
   assert.equal(exited(f.record.pid), true);
   assert.equal(f.child.exitCode, 0);
-  const child = spawnPosixSupervisor({ ...f.config, binPath: process.execPath }, f.panelDirectory);
+  const child = spawnPosixSupervisor({ ...f.config, binPath: process.execPath });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.resume();
@@ -304,11 +335,12 @@ test("核心自然退出可认证离线，supervisor 退出后的 stale 记录�
 test("同步 spawn 接口只传路径，缺失二进制启动失败不发布身份", { timeout: 15000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "posix-start-failure-中文 空格-"));
   t.after(() => rm(directory, { recursive: true, force: true, maxRetries: 5 }));
-  const config = { dataDir: directory, binPath: join(directory, "missing-executable"), configPath: join(directory, "not-read.yaml"), apiKey: "synthetic-do-not-pass" };
-  const child = spawnPosixSupervisor(config, directory);
+  const config = { dataDir: directory, binPath: join(directory, "missing-executable"), configPath: join(directory, "not-read.json"),
+    apiKey: "synthetic-do-not-pass", mgmtKey: "private-web-key", managementPort: 12345, port: 12346 };
+  const child = spawnPosixSupervisor(config);
   t.after(() => closeLease(child));
   assert.equal(child.spawnfile, process.execPath);
-  assert.deepEqual(child.spawnargs.slice(2), [config.binPath, config.configPath, directory, directory]);
+  assert.deepEqual(child.spawnargs.slice(2), [config.binPath, config.configPath, directory, String(config.managementPort)]);
   assert.ok(!child.spawnargs.join(" ").includes(config.apiKey));
   assert.ok(child.stdin.writable);
   let output = "";
@@ -320,7 +352,9 @@ test("同步 spawn 接口只传路径，缺失二进制启动失败不发布身�
   assert.equal(child.exitCode, 1);
   assert.equal(output, "");
   assert.equal(errorOutput.trim(), "POSIX supervisor initialization failed.");
-  assert.throws(() => spawnPosixSupervisor(config, undefined), { code: "BRIDGE_NOT_READY" });
+  for (const managementPort of [undefined, 0, 65536, "12345", 1.5]) {
+    assert.throws(() => spawnPosixSupervisor({ ...config, managementPort }), { code: "BRIDGE_NOT_READY" });
+  }
 });
 
 test("拒绝连接但 PID 存活，或 EPERM 时不能假报离线", { timeout: 15000 }, async (t) => {

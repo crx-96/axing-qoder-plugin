@@ -80,6 +80,10 @@ async function launcherSession(t, runtime, { noNodePath = false, killWrapper = f
   await new Promise((resolve) => listener.close(resolve));
   assert.ok(![8787, 19787].includes(port));
   env.BRIDGE_PORT = startupFailure === "invalid-config" ? "invalid" : String(port);
+  listener.listen(0, "127.0.0.1");
+  await once(listener, "listening");
+  env.BRIDGE_MANAGEMENT_PORT = String(listener.address().port);
+  await new Promise(resolve => listener.close(resolve));
   if (killWrapper) {
     env.BRIDGE_BIN = join(directory, "隔离 订阅代理.exe");
     await copyTestCore(env.BRIDGE_BIN);
@@ -198,7 +202,7 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     return;
   }
   const initialized = await request("中文握手", "initialize", initializeParams);
-  assert.equal(initialized.serverInfo.version, "1.0.11");
+  assert.equal(initialized.serverInfo.version, "1.1.0");
   assert.equal(initialized.protocolVersion, "2025-06-18");
   assert.deepEqual(await request("中文往返-引号\"-反斜杠\\", "ping"), {});
   const tools = await request("工具清单", "tools/list");
@@ -209,7 +213,9 @@ child.on('exit',(code)=>{process.exitCode=code ?? 1;if(hold)process.stdin.resume
     await waitUntil(async () => {
       const status = await request("后台自动启动", "tools/call", { name: "bridge_status", arguments: {} });
       assert.notEqual(status.isError, true, JSON.stringify(status));
-      return JSON.parse(status.content[0].text).ready;
+      const detail = JSON.parse(status.content[0].text);
+      assert.equal(detail.startupError, undefined, detail.startupError);
+      return detail.ready;
     }, 30000);
     bridgeIdentity = JSON.parse(await readFile(config.pidPath, "utf8"));
   } else if (startupFailure === "missing-core") {

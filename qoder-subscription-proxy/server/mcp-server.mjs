@@ -1,4 +1,4 @@
-import { createManagementLogin } from "./management-gateway.mjs";
+import { openManagement } from "./management-gateway.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadConfig } from "./config.mjs";
@@ -13,13 +13,9 @@ const ctx = {
   config: {},
   /** 最近一次后台启动故障，供 bridge_status 返回安全摘要；代理就绪后清除。 */
   startupError: null,
-  /** 管理网关占用等故障，供菜单与浏览器入口诊断。 */
-  gatewayError: null,
 };
 /** 健康检查的停止函数；只注册一次，下载失败时不启用自动恢复。 */
 let stopWatchdog;
-/** 本会话按需创建的管理登录入口，关闭时撤销票据和会话。 */
-let managementLogin;
 /** MCP 会话的取消信号，防止退出收尾期间重新注册健康检查。 */
 let sessionSignal;
 /** 后台核心准备及代理启动任务；退出前等待取消清理完成。 */
@@ -69,17 +65,6 @@ async function prepareBridge(signal) {
   }
 }
 
-async function listenManagement() {
-  managementLogin ??= createManagementLogin(ctx.config);
-  try {
-    await managementLogin.listen();
-    ctx.gatewayError = null;
-  } catch (error) {
-    ctx.gatewayError = typeof error?.safeMessage === "string" ? error.safeMessage
-      : "管理网关固定端口监听失败；菜单与浏览器管理入口不可用。";
-  }
-}
-
 /** 握手只等待本地配置；启动后台任务后立即返回，不等待网络、核心校验或代理就绪。 */
 async function prepare(signal) {
   sessionSignal = signal;
@@ -87,11 +72,9 @@ async function prepare(signal) {
   catch {
     if (signal.aborted) return;
     initializationFailed = true;
-    throw reportStartupFailure(null, "配置不可用；请检查 BRIDGE_*、config.yaml 和 launcher-secrets.json，再在宿主设置中重连 MCP。");
+    throw reportStartupFailure(null, "配置不可用；请检查 BRIDGE_*、Magpie settings.json 和 launcher-secrets.json，再在宿主设置中重连 MCP。");
   }
   signal.throwIfAborted();
-  // 应用与浏览器共用固定端口；占用失败只记录诊断，不阻塞握手。
-  await listenManagement();
   // 保存任务用于退出收尾；异步故障由 prepareBridge 接住，不拒绝本次 initialize。
   backgroundPreparation = prepareBridge(signal);
 }
@@ -99,11 +82,7 @@ async function prepare(signal) {
 /** 工具共用同一配置和生命周期；下载期间状态、暂停及工具发现仍可使用。 */
 const handlers = {
   /** 用户明确调用授权指令时才打开本机浏览器。 */
-  async openManagement(config, { signal }) {
-    managementLogin ??= createManagementLogin(config);
-    await managementLogin.open(signal);
-    ctx.gatewayError = null;
-  },
+  openManagement,
   /** 查询实际代理与核心状态；MCP 已连接不代表 ready 为 true。 */
   async getStatus() {
     const status = await getStatus(ctx.config);
@@ -115,15 +94,12 @@ const handlers = {
     const result = await ensureRunning(ctx.config, options);
     if (result.ready) {
       ctx.startupError = null;
-      await listenManagement();
       ensureWatchdog();
     }
     return result;
   },
   /** 持久暂停并取消本会话的在途下载/启动；只停止可确认归属的代理。 */
   async stopBridge() {
-    managementLogin?.close();
-    managementLogin = undefined;
     return stopBridge(ctx.config);
   },
 };
@@ -135,7 +111,6 @@ process.once("SIGTERM", stopInput);
 try { await runMcp(ctx, { handlers, prepare }); }
 finally {
   // 先拒绝新启动并取消在途任务，再等待后台下载清理及本会话拥有的代理回收。
-  managementLogin?.close();
   const shutdown = shutdownOwnedBridges();
   if (stopWatchdog) await stopWatchdog();
   await backgroundPreparation;

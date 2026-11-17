@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace Qoder.SubscriptionProxy
 {
@@ -23,24 +24,26 @@ namespace Qoder.SubscriptionProxy
         private const int ProcThreadAttributeJobList = 0x0002000d;
         private static readonly IntPtr InvalidHandle = new IntPtr(-1);
 
+        /// <summary>启动固定管理端口的 Magpie；配置路径只用于校验，不传入核心命令行。</summary>
         public static int Run(string ownerPidText, string binPath, string configPath,
-            string workingDirectory, string logPath)
+            string workingDirectory, string logPath, int managementPort)
         {
-            return RunSafely(ownerPidText, binPath, configPath, workingDirectory, logPath, false);
+            return RunSafely(ownerPidText, binPath, configPath, workingDirectory, logPath, false, managementPort);
         }
 
         // A host handle also closes the job when inherited stdio remains open elsewhere.
         public static int RunMcp(string ownerPidText, string runtimePath, string scriptPath)
         {
-            return RunSafely(ownerPidText, runtimePath, scriptPath, null, null, true);
+            return RunSafely(ownerPidText, runtimePath, scriptPath, null, null, true, 0);
         }
 
+        /// <summary>Execute the selected child mode and expose only safe native failure codes.</summary>
         private static int RunSafely(string ownerPidText, string binPath, string configPath,
-            string workingDirectory, string logPath, bool mcp)
+            string workingDirectory, string logPath, bool mcp, int managementPort)
         {
             try
             {
-                return RunCore(ownerPidText, binPath, configPath, workingDirectory, logPath, mcp);
+                return RunCore(ownerPidText, binPath, configPath, workingDirectory, logPath, mcp, managementPort);
             }
             catch (NativeFailure error)
             {
@@ -55,9 +58,13 @@ namespace Qoder.SubscriptionProxy
             }
         }
 
+        /// <summary>Validate inputs, create the private Job and retain owner/child handles until cleanup.</summary>
         private static int RunCore(string ownerPidText, string binPath, string configPath,
-            string workingDirectory, string logPath, bool mcp)
+            string workingDirectory, string logPath, bool mcp, int managementPort)
         {
+            // MCP 包装器不使用管理端口；核心模式拒绝缺失或越界端口。
+            if (!mcp && (managementPort < 1 || managementPort > 65535))
+                throw new InvalidOperationException();
             uint ownerPid = 0;
             bool hasOwner = !mcp || !String.IsNullOrEmpty(ownerPidText);
             if (IntPtr.Size != 8 || (hasOwner && (!UInt32.TryParse(ownerPidText, NumberStyles.None,
@@ -87,6 +94,7 @@ namespace Qoder.SubscriptionProxy
             IntPtr inheritedHandles = IntPtr.Zero;
             IntPtr jobHandles = IntPtr.Zero;
             bool attributesInitialized = false;
+            CoreLog log = null;
             ProcessInformation child = new ProcessInformation();
             try
             {
@@ -122,12 +130,25 @@ namespace Qoder.SubscriptionProxy
                     security.InheritHandle = true;
                     input = CreateFileW("NUL", 0x80000000, 7, ref security, 3, 0x80, IntPtr.Zero);
                     CheckHandle(input);
-                    // FILE_APPEND_DATA prevents truncation and makes every log write append.
-                    // Missing LogPath redirects to NUL, never to the supervisor's stdout.
-                    bool hasLog = !String.IsNullOrEmpty(logPath);
-                    output = CreateFileW(hasLog ? logPath : "NUL", hasLog ? 4u : 0x40000000u,
-                        7, ref security, hasLog ? 4u : 3u, 0x80, IntPtr.Zero);
-                    CheckHandle(output);
+                    // 原始输出只能进入管道，日志文件仅由脱敏 worker 持有。
+                    if (!String.IsNullOrEmpty(logPath))
+                    {
+                        IntPtr readPipe;
+                        Check(CreatePipe(out readPipe, out output, ref security, 0));
+                        try
+                        {
+                            Check(SetHandleInformation(readPipe, 1, 0));
+                            log = new CoreLog(readPipe, logPath);
+                            readPipe = IntPtr.Zero;
+                            log.Start();
+                        }
+                        finally { Close(ref readPipe); }
+                    }
+                    else
+                    {
+                        output = CreateFileW("NUL", 0x40000000, 7, ref security, 3, 0x80, IntPtr.Zero);
+                        CheckHandle(output);
+                    }
                 }
 
                 IntPtr attributeBytes = IntPtr.Zero;
@@ -162,8 +183,10 @@ namespace Qoder.SubscriptionProxy
                 startup.StartupInfo.StdOutput = output;
                 startup.StartupInfo.StdError = mcp ? errorOutput : output;
                 startup.AttributeList = attributes;
+                // Magpie 原生 serve 参数与 MCP script 参数分开组装，不能回退到旧核心 -config。
                 StringBuilder command = new StringBuilder(QuoteArgument(binPath) +
-                    (mcp ? " " : " -config ") + QuoteArgument(configPath));
+                    (mcp ? " " + QuoteArgument(configPath) : " serve " +
+                    QuoteArgument("--web=127.0.0.1:" + managementPort.ToString(CultureInfo.InvariantCulture))));
 
                 if (hasOwner) RequireRunning(owner);
                 // Explicit application name avoids executable-path ambiguity; only
@@ -241,11 +264,122 @@ namespace Qoder.SubscriptionProxy
                 Close(ref input);
                 Close(ref output);
                 Close(ref errorOutput);
+                if (log != null) log.Finish();
                 if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
                 if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
                 if (inheritedHandles != IntPtr.Zero) Marshal.FreeHGlobal(inheritedHandles);
                 if (jobHandles != IntPtr.Zero) Marshal.FreeHGlobal(jobHandles);
                 Close(ref owner);
+            }
+        }
+
+        // 单一读取者通过非阻塞探测收尾，避免后代尚未关闭管道时永久等待。
+        private sealed class CoreLog
+        {
+            private IntPtr pipe;
+            private readonly StreamWriter writer;
+            private readonly string secret;
+            private readonly Thread worker;
+            private volatile bool finishing;
+            private bool started;
+
+            internal CoreLog(IntPtr readPipe, string path)
+            {
+                secret = Environment.GetEnvironmentVariable("MAGPIE_WEB_KEY");
+                worker = new Thread(Drain);
+                worker.IsBackground = true;
+                writer = new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete), new UTF8Encoding(false));
+                pipe = readPipe;
+            }
+
+            internal void Start()
+            {
+                worker.Start();
+                started = true;
+            }
+
+            internal void Finish()
+            {
+                finishing = true;
+                if (started)
+                {
+                    if (!worker.Join(5000)) WriteError("Proxy log cleanup timed out.");
+                }
+                else
+                {
+                    Close(ref pipe);
+                    try { writer.Dispose(); } catch { WriteError("Proxy log close failed."); }
+                }
+            }
+
+            private void Drain()
+            {
+                try
+                {
+                    byte[] bytes = new byte[4096];
+                    char[] chars = new char[Encoding.UTF8.GetMaxCharCount(bytes.Length)];
+                    Decoder decoder = Encoding.UTF8.GetDecoder();
+                    string pending = String.Empty;
+                    System.Diagnostics.Stopwatch ending = null;
+                    while (true)
+                    {
+                        if (finishing && ending == null) ending = System.Diagnostics.Stopwatch.StartNew();
+                        if (ending != null && ending.ElapsedMilliseconds >= 3000) break;
+                        uint available;
+                        if (!PeekNamedPipe(pipe, IntPtr.Zero, 0, IntPtr.Zero, out available, IntPtr.Zero))
+                        {
+                            if (Marshal.GetLastWin32Error() == 109) break;
+                            throw new InvalidOperationException();
+                        }
+                        if (available == 0)
+                        {
+                            Thread.Sleep(10);
+                            continue;
+                        }
+                        uint count;
+                        Check(ReadFile(pipe, bytes, Math.Min((uint)bytes.Length, available), out count, IntPtr.Zero));
+                        if (count == 0) break;
+                        // Decoder 保留跨字节块的 UTF-8 状态，pending 保留跨字符块的密钥状态。
+                        pending += new string(chars, 0, decoder.GetChars(bytes, 0, (int)count, chars, 0, false));
+                        pending = WriteSafe(pending, false);
+                        writer.Flush();
+                    }
+                    pending += new string(chars, 0, decoder.GetChars(bytes, 0, 0, chars, 0, true));
+                    WriteSafe(pending, true);
+                }
+                catch { WriteError("Proxy log capture failed."); }
+                finally
+                {
+                    Close(ref pipe);
+                    try { writer.Dispose(); } catch { WriteError("Proxy log close failed."); }
+                }
+            }
+
+            private string WriteSafe(string pending, bool final)
+            {
+                if (String.IsNullOrEmpty(secret))
+                {
+                    writer.Write(pending);
+                    return String.Empty;
+                }
+                int boundary = final ? pending.Length : Math.Max(0, pending.Length - secret.Length + 1);
+                // Flush 前不能把 UTF-16 代理对拆到下一轮。
+                if (boundary > 0 && boundary < pending.Length &&
+                    Char.IsHighSurrogate(pending[boundary - 1]) && Char.IsLowSurrogate(pending[boundary]))
+                    boundary--;
+                int offset = 0;
+                int match;
+                // 匹配整个 pending；跨安全边界的完整密钥必须整体消费，不能先切块再替换。
+                while ((match = pending.IndexOf(secret, offset, StringComparison.Ordinal)) >= 0 && match < boundary)
+                {
+                    writer.Write(pending.Substring(offset, match - offset));
+                    writer.Write("[REDACTED]");
+                    offset = match + secret.Length;
+                }
+                int consumed = Math.Max(boundary, offset);
+                writer.Write(pending.Substring(offset, consumed - offset));
+                return pending.Substring(consumed);
             }
         }
 
@@ -410,6 +544,25 @@ namespace Qoder.SubscriptionProxy
             internal uint ProcessId;
             internal uint ThreadId;
         }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreatePipe(out IntPtr readPipe, out IntPtr writePipe,
+            ref SecurityAttributes security, uint size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PeekNamedPipe(IntPtr pipe, IntPtr buffer, uint size,
+            IntPtr bytesRead, out uint available, IntPtr bytesLeft);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ReadFile(IntPtr handle, byte[] buffer, uint count,
+            out uint bytesRead, IntPtr overlapped);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetStdHandle(int stream);

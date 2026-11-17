@@ -3,7 +3,7 @@ import http from "node:http";
 /** 回环请求使用独立连接，不读取系统代理，也不复用切换网络前的连接。 */
 export function requestLocal(config, path, {
   method = "GET", body, authenticated = false, signal,
-  timeoutMs = 3000, maxBytes = 1024 * 1024, socket, management = false, statusOnly = false,
+  timeoutMs = 3000, maxBytes = 1024 * 1024, socket,
 } = {}) {
   if (config.host !== "127.0.0.1" || !path.startsWith("/") || path.startsWith("//")) {
     return Promise.reject(new Error("仅允许访问订阅桥的本机回环地址"));
@@ -11,7 +11,7 @@ export function requestLocal(config, path, {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     const headers = { Accept: "application/json", Connection: "close" };
-    if (authenticated || management) headers.Authorization = `Bearer ${management ? config.mgmtKey : config.apiKey}`;
+    if (authenticated) headers.Authorization = `Bearer ${config.apiKey}`;
     if (payload) {
       headers["Content-Type"] = "application/json";
       headers["Content-Length"] = payload.length;
@@ -36,12 +36,6 @@ export function requestLocal(config, path, {
     };
     req.on("error", (error) => finish(error));
     req.on("response", (res) => {
-      // 管理页交接只需确认认证成功，不缓冲可能很大的敏感配置正文。
-      if (statusOnly) {
-        finish(null, { status: res.statusCode });
-        res.destroy();
-        return;
-      }
       const chunks = [];
       let bytes = 0;
       res.on("data", (chunk) => {
@@ -75,7 +69,7 @@ export function requestLocal(config, path, {
 /** HTTP 错误正文可能含账号或上游凭据，只传播状态码与本地诊断。 */
 export function httpFailure(status, operation) {
   const hints = {
-    401: "本地 API Key 不匹配，请核对配置",
+    401: "模型服务授权未通过，请在管理页检查服务商账号或凭据",
     403: "账号或模型没有该能力的权限",
     404: "当前桥未启用此端点或模型不可用",
     429: "订阅额度或速率受限，请等待恢复后再试",

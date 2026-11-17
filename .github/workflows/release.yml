@@ -85,28 +85,16 @@ jobs:
           if (process.env.TAG !== `v${manifest.version}`) throw new Error("标签与插件版本不一致");
           if (process.env.PLATFORM !== `${process.platform}-${process.arch}`) throw new Error("runner 平台不一致");
           NODE
-      - name: Prepare Rust 1.95.0
-        shell: bash
-        run: |
-          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
-          echo "RUSTUP_TOOLCHAIN=1.95.0" >> "$GITHUB_ENV"
-      - name: Check native approval router
-        shell: bash
-        run: |
-          cargo fmt --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml --check
-          cargo test --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml
-          cargo clippy --locked --manifest-path qoder-subscription-proxy/native/approval-router/Cargo.toml -- -D warnings
-      - name: Build current-platform approval router
-        shell: bash
-        run: node qoder-subscription-proxy/scripts/build-approval-router.mjs "$PLATFORM"
-      - name: Fetch and verify current-platform CLIProxyAPI core
+      - name: Fetch and verify current-platform Magpie core
         shell: bash
         run: |
           node qoder-subscription-proxy/scripts/fetch-core.mjs "$PLATFORM"
           node --input-type=module - <<'NODE'
-          import { appendFileSync } from 'node:fs';
+          import { appendFileSync, readFileSync } from 'node:fs';
           import path from 'node:path';
-          const file = process.platform === 'win32' ? 'qoder-plugin-subscription-proxy.exe' : 'qoder-plugin-subscription-proxy';
+          // 与 fetch-core 和打包脚本共享固定平台清单，不依赖核心的历史文件名。
+          const manifest = JSON.parse(readFileSync('qoder-subscription-proxy/server/bin/platforms.json', 'utf8'));
+          const file = path.posix.basename(manifest.platforms[process.env.PLATFORM].path);
           const binary = path.resolve('qoder-subscription-proxy/.core-build', process.env.PLATFORM, file);
           appendFileSync(process.env.GITHUB_ENV, `BRIDGE_TEST_BIN=${binary}\n`);
           NODE

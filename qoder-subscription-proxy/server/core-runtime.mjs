@@ -8,29 +8,20 @@ import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from "n
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
-import { gunzip, inflateRaw } from "node:zlib";
-import { crc32 } from "./crc32.mjs";
 import { readEffectiveProxyUrl } from "./system-proxy.mjs";
 
 /** 只从插件固定清单选择版本、官方 URL 与两级 SHA256，不接收环境变量覆盖来源。 */
 const MANIFEST = JSON.parse(await readFile(new URL("./bin/platforms.json", import.meta.url), "utf-8"));
 /** 禁止把用户缓存写回插件安装目录。 */
 const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-/** 压缩包最大 128 MiB，独立于服务端 Content-Length 强制限制实际接收量。 */
+/** 下载资产最大 128 MiB，独立于服务端 Content-Length 强制限制实际接收量。 */
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
-/** 解压后的整个 tar 最大 256 MiB，限制压缩炸弹及内存使用。 */
-const MAX_EXPANDED_BYTES = 256 * 1024 * 1024;
-/** 核心普通文件最大 160 MiB；固定版本实际约 70 MiB。 */
+/** 核心普通文件最大 160 MiB；Magpie 固定版本约 81–91 MiB。 */
 const MAX_BINARY_BYTES = 160 * 1024 * 1024;
-/** 从等待锁到发布的总预算，包含网络、校验和解压，不自动重试。 */
+/** 从等待锁到发布的总预算，包含网络、校验和发布，不自动重试。 */
 const OPERATION_TIMEOUT_MS = 600_000;
 /** 核心下载锁协议，不复用桥的生命周期锁、端口或 PID 文件。 */
 const LOCK_PROTOCOL = "qoder-core-download-v1";
-/** 异步 zlib 避免阻塞事件循环；输出上限在原生解压层生效。 */
-const unzipGzip = promisify(gunzip);
-/** ZIP 只解压经过目录核对的目标成员，且限制输出大小。 */
-const unzipDeflate = promisify(inflateRaw);
 /** 所有可展示失败均出自固定映射，原始路径、代理凭据、URL、响应正文不进入异常。 */
 const MESSAGES = Object.freeze({
   CORE_CONFIG: "核心下载配置无效；请更新插件并检查缓存目录配置。",
@@ -38,11 +29,11 @@ const MESSAGES = Object.freeze({
   CORE_TIMEOUT: `核心准备超过 ${OPERATION_TIMEOUT_MS / 60_000} 分钟；请检查网络或代理后手动重试。`,
   CORE_CURL: "无法运行系统 curl；请确认系统 curl 可用后重新启动订阅桥。",
   CORE_DOWNLOAD: "核心下载失败；请检查网络、QODER_HTTP_PROXY 或 HTTPS_PROXY/NO_PROXY 后手动重试。",
-  CORE_SIZE: "核心归档或解压内容超过安全大小限制；请更新插件或检查下载来源。",
-  CORE_ARCHIVE_HASH: "核心归档 SHA256 不匹配，未安装；请检查代理或网络后手动重试。",
+  CORE_SIZE: "核心下载内容超过安全大小限制；请更新插件或检查下载来源。",
+  CORE_ARCHIVE_HASH: "核心下载 SHA256 不匹配，未安装；请检查代理或网络后手动重试。",
   CORE_BINARY_HASH: "核心文件 SHA256 不匹配，未安装；请更新插件或检查下载来源。",
   CORE_BUNDLE: "随包核心文件无效或不可读，未安装；请重新安装对应平台的官方插件 ZIP。",
-  CORE_ARCHIVE: "核心归档结构不受支持或不安全，未安装；请更新插件，不要手工绕过校验。",
+  CORE_ARCHIVE: "核心下载文件类型不受支持或不安全，未安装；请更新插件，不要手工绕过校验。",
   CORE_PATH: "核心缓存路径包含链接、特殊文件或插件安装目录；请改用独立的用户缓存目录。",
   CORE_CACHE: "无法读取核心缓存；请检查缓存目录权限后手动重试。",
   CORE_PUBLISH: "无法安全发布核心缓存，原有文件未主动删除；请检查目录权限或程序占用后手动重试。",
@@ -156,7 +147,7 @@ export async function downloadWithCurl({ url, destination, signal, maxBytes }, s
   }
   const noProxy = env.no_proxy ?? env.NO_PROXY;
   if (noProxy !== undefined) childEnv.no_proxy = childEnv.NO_PROXY = noProxy;
-  // 传输限时比总预算少一分钟，给校验和解压留出余量；等待锁也会消耗总预算。
+  // 传输限时比总预算少一分钟，给校验和发布留出余量；等待锁也会消耗总预算。
   const args = ["--disable", "--silent", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
     "--max-redirs", "5", "--connect-timeout", "60", "--max-time", String(OPERATION_TIMEOUT_MS / 1000 - 60), "--max-filesize", String(maxBytes), "--retry", "0", "--output", "-", url];
   let child;
@@ -196,188 +187,11 @@ export async function downloadWithCurl({ url, destination, signal, maxBytes }, s
   }
 }
 
-/** 校验每个归档名称，而不仅目标名称；拒绝 Windows 盘符、路径穿越、替代数据流和非 ASCII 歧义。 */
-function safeArchiveName(name, directory = false) {
-  const clean = directory && name.endsWith("/") ? name.slice(0, -1) : name;
-  if (!clean || !/^[\x20-\x7e]+$/.test(clean) || /[\\:\x00]/.test(clean) || clean.startsWith("/") ||
-      clean.split("/").some((part) => !part || part === "." || part === ".." || /[. ]$/.test(part))) {
-    throw coreError("CORE_ARCHIVE");
-  }
-  return clean;
-}
-
-/** tar 字符串只接受 NUL 终止且尾部为空的字段，避免不同解压器对名称产生分歧。 */
-function tarText(bytes) {
-  const end = bytes.indexOf(0);
-  if (end >= 0 && bytes.subarray(end).some((byte) => byte !== 0)) throw coreError("CORE_ARCHIVE");
-  return bytes.subarray(0, end < 0 ? bytes.length : end).toString("latin1");
-}
-
-/** tar 数字字段仅接受八进制，不支持带符号或 GNU base-256 大尺寸扩展。 */
-function tarNumber(bytes) {
-  const text = bytes.toString("ascii").replace(/\0.*$/, "").trim();
-  if (!/^[0-7]+$/.test(text)) throw coreError("CORE_ARCHIVE");
-  const value = Number.parseInt(text, 8);
-  if (!Number.isSafeInteger(value)) throw coreError("CORE_ARCHIVE");
-  return value;
-}
-
-/** 只容许 PAX 的时间/属主辅助元数据；路径、链接、稀疏文件和尺寸覆盖一律拒绝。 */
-function checkPax(bytes) {
-  let offset = 0;
-  while (offset < bytes.length) {
-    const space = bytes.indexOf(32, offset);
-    if (space < 0 || space - offset > 8) throw coreError("CORE_ARCHIVE");
-    const lengthText = bytes.subarray(offset, space).toString("ascii");
-    const length = Number(lengthText);
-    if (!/^[1-9][0-9]*$/.test(lengthText) || length <= space - offset + 2 || offset + length > bytes.length || bytes[offset + length - 1] !== 10) throw coreError("CORE_ARCHIVE");
-    const field = bytes.subarray(space + 1, offset + length - 1).toString("utf8");
-    if (!/^(mtime|atime|ctime|uid|gid|uname|gname)=/.test(field)) throw coreError("CORE_ARCHIVE");
-    offset += length;
-  }
-}
-
-/** 检查完整 tar 后返回唯一根级普通核心文件；不把归档路径用于文件系统写入。 */
-function extractTar(bytes, expected) {
-  let offset = 0;
-  let count = 0;
-  let selected;
-  const names = new Set();
-  while (offset + 512 <= bytes.length) {
-    const header = bytes.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) {
-      if (bytes.length - offset < 1024 || bytes.subarray(offset).some((byte) => byte !== 0) || !selected) throw coreError("CORE_ARCHIVE");
-      return selected;
-    }
-    if (++count > 1024) throw coreError("CORE_ARCHIVE");
-    const checksum = header.reduce((sum, byte, index) => sum + (index >= 148 && index < 156 ? 32 : byte), 0);
-    if (checksum !== tarNumber(header.subarray(148, 156))) throw coreError("CORE_ARCHIVE");
-    const type = header[156];
-    const directory = type === 53;
-    // 标准普通文件、目录和安全 PAX 元数据之外的类型（含软/硬链接）全部拒绝。
-    if (![0, 48, 53, 120].includes(type) || tarText(header.subarray(157, 257))) throw coreError("CORE_ARCHIVE");
-    const prefix = tarText(header.subarray(345, 500));
-    const name = safeArchiveName((prefix ? `${prefix}/` : "") + tarText(header.subarray(0, 100)), directory);
-    const size = tarNumber(header.subarray(124, 136));
-    const start = offset + 512;
-    const end = start + size;
-    offset = start + Math.ceil(size / 512) * 512;
-    if (end > bytes.length || offset > bytes.length || (directory && size !== 0)) throw coreError("CORE_ARCHIVE");
-    if (type === 120) { checkPax(bytes.subarray(start, end)); continue; }
-    if (names.has(name)) throw coreError("CORE_ARCHIVE");
-    names.add(name);
-    if (name === expected) {
-      if (directory || size === 0 || size > MAX_BINARY_BYTES || selected) throw coreError("CORE_ARCHIVE");
-      selected = bytes.subarray(start, end);
-    }
-  }
-  throw coreError("CORE_ARCHIVE");
-}
-
-/** ZIP 扩展只允许不会改变路径、链接或尺寸语义的时间戳/UID 元数据。 */
-function checkZipExtra(bytes) {
-  let offset = 0;
-  while (offset < bytes.length) {
-    if (offset + 4 > bytes.length) throw coreError("CORE_ARCHIVE");
-    const id = bytes.readUInt16LE(offset);
-    const size = bytes.readUInt16LE(offset + 2);
-    offset += 4 + size;
-    if (![0x5455, 0x7875, 0x000a].includes(id) || offset > bytes.length) throw coreError("CORE_ARCHIVE");
-  }
-}
-
-/** expected=null 保留 ACP 官方程序的伴随文件；所有成员仍执行相同的路径、CRC 和容量校验。 */
-export async function extractZip(bytes, expected, signal, { maxExpandedBytes = MAX_EXPANDED_BYTES, maxBinaryBytes = MAX_BINARY_BYTES } = {}) {
-  let end = -1;
-  for (let position = bytes.length - 22; position >= Math.max(0, bytes.length - 65557); position--) {
-    if (bytes.readUInt32LE(position) === 0x06054b50 && position + 22 + bytes.readUInt16LE(position + 20) === bytes.length) { end = position; break; }
-  }
-  if (end < 0) throw coreError("CORE_ARCHIVE");
-  const count = bytes.readUInt16LE(end + 10);
-  const directorySize = bytes.readUInt32LE(end + 12);
-  const directoryOffset = bytes.readUInt32LE(end + 16);
-  if (bytes.readUInt16LE(end + 4) || bytes.readUInt16LE(end + 6) || bytes.readUInt16LE(end + 8) !== count ||
-      !count || count > 1024 || directoryOffset + directorySize !== end) throw coreError("CORE_ARCHIVE");
-  let offset = directoryOffset;
-  let expanded = 0;
-  const selected = new Map();
-  const names = new Set();
-  const ranges = [];
-  for (let index = 0; index < count; index++) {
-    if (offset + 46 > end || bytes.readUInt32LE(offset) !== 0x02014b50) throw coreError("CORE_ARCHIVE");
-    const flags = bytes.readUInt16LE(offset + 8);
-    const method = bytes.readUInt16LE(offset + 10);
-    const crc = bytes.readUInt32LE(offset + 16);
-    const compressed = bytes.readUInt32LE(offset + 20);
-    const size = bytes.readUInt32LE(offset + 24);
-    const nameLength = bytes.readUInt16LE(offset + 28);
-    const extraLength = bytes.readUInt16LE(offset + 30);
-    const commentLength = bytes.readUInt16LE(offset + 32);
-    const mode = bytes.readUInt32LE(offset + 38) >>> 16;
-    const kind = mode & 0xf000;
-    const local = bytes.readUInt32LE(offset + 42);
-    const nameBytes = bytes.subarray(offset + 46, offset + 46 + nameLength);
-    const rawName = nameBytes.toString("latin1");
-    const directory = rawName.endsWith("/");
-    const name = safeArchiveName(rawName, directory);
-    const next = offset + 46 + nameLength + extraLength + commentLength;
-    expanded += size;
-    if (next > end || bytes.readUInt16LE(offset + 34) || flags & ~0x080e || ![0, 8].includes(method) ||
-        ![0, 0x8000, 0x4000].includes(kind) || (kind === 0x4000 && !directory) ||
-        (directory && (size !== 0 || kind === 0x8000)) || names.has(name) || expanded > maxExpandedBytes) throw coreError("CORE_ARCHIVE");
-    names.add(name);
-    checkZipExtra(bytes.subarray(offset + 46 + nameLength, offset + 46 + nameLength + extraLength));
-    // 本地名称、标志、压缩方法须与中心目录逐字相同，不能借第二套名称绕过检查。
-    if (local + 30 > directoryOffset || bytes.readUInt32LE(local) !== 0x04034b50 ||
-        bytes.readUInt16LE(local + 6) !== flags || bytes.readUInt16LE(local + 8) !== method || bytes.readUInt16LE(local + 26) !== nameLength) throw coreError("CORE_ARCHIVE");
-    const localExtra = bytes.readUInt16LE(local + 28);
-    const start = local + 30 + nameLength + localExtra;
-    let finish = start + compressed;
-    if (finish > directoryOffset || !bytes.subarray(local + 30, local + 30 + nameLength).equals(nameBytes)) throw coreError("CORE_ARCHIVE");
-    checkZipExtra(bytes.subarray(local + 30 + nameLength, start));
-    for (const [position, wanted] of [[14, crc], [18, compressed], [22, size]]) {
-      const actual = bytes.readUInt32LE(local + position);
-      if (actual !== wanted && (!(flags & 8) || actual !== 0)) throw coreError("CORE_ARCHIVE");
-    }
-    if (flags & 8) {
-      if (finish + 12 > directoryOffset) throw coreError("CORE_ARCHIVE");
-      if (bytes.readUInt32LE(finish) === 0x08074b50) finish += 4;
-      if (finish + 12 > directoryOffset || bytes.readUInt32LE(finish) !== crc || bytes.readUInt32LE(finish + 4) !== compressed || bytes.readUInt32LE(finish + 8) !== size) throw coreError("CORE_ARCHIVE");
-      finish += 12;
-    }
-    if (ranges.some(([begin, stop]) => local < stop && finish > begin)) throw coreError("CORE_ARCHIVE");
-    ranges.push([local, finish]);
-    if (name === expected || (expected === null && !directory)) {
-      if (directory || !size || size > maxBinaryBytes) throw coreError("CORE_ARCHIVE");
-      selected.set(name, { start, compressed, size, method, crc });
-    }
-    offset = next;
-  }
-  if (offset !== end || !selected.size) throw coreError("CORE_ARCHIVE");
-  const files = new Map();
-  for (const [name, entry] of selected) {
-    const packed = bytes.subarray(entry.start, entry.start + entry.compressed);
-    const binary = entry.method === 0 ? packed : await unzipDeflate(packed, { maxOutputLength: maxBinaryBytes });
-    checkCancelled(signal);
-    if (binary.length !== entry.size || crc32(binary) !== entry.crc) throw coreError("CORE_ARCHIVE");
-    files.set(name, binary);
-  }
-  return expected === null ? files : files.get(expected);
-}
-
-/** 将有界完整归档解为一个内存成员；任何非预期错误也只转换为固定安全文案。 */
-async function extractArchive(bytes, release, signal) {
-  try {
-    const expected = release.platform === "win32" ? "cli-proxy-api.exe" : "cli-proxy-api";
-    const binary = release.archive.endsWith(".zip")
-      ? await extractZip(bytes, expected, signal)
-      : extractTar(await unzipGzip(bytes, { maxOutputLength: MAX_EXPANDED_BYTES }), expected);
-    checkCancelled(signal);
-    return binary;
-  } catch (error) {
-    checkCancelled(signal);
-    throw coreError(error.code === "ERR_BUFFER_TOO_LARGE" ? "CORE_SIZE" : "CORE_ARCHIVE");
-  }
+/** 官方资产为原始二进制，不解压、不解释成员路径；调用方仍核验下载及发布两级摘要。 */
+function readRawBinary(bytes, signal) {
+  checkCancelled(signal);
+  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_BINARY_BYTES) throw coreError("CORE_SIZE");
+  return bytes;
 }
 
 /** Windows 命名管道、Linux 抽象 socket 避免 TCP 端口竞争；macOS 保留回环锁，均由 OS 在退出时释放。 */
@@ -489,7 +303,7 @@ async function acquireDownloadLock(cacheIdentity, signal) {
  * @param {object} [options] 仅程序化依赖注入，不从环境变量加载下载代码或替代清单。
  * @param {object} [options.manifest] 同官方清单结构；所有 URL 仍必须精确对应官方固定 Release。
  * @param {string} [options.bundleDir] 随包核心所在目录，默认插件内 server/bin；仅供测试注入隔离目录。
- * @param {Function} [options.download] 接收 {url,destination,signal,maxBytes}，向独占临时路径写入归档。
+ * @param {Function} [options.download] 接收 {url,destination,signal,maxBytes}，向独占临时路径写入原始二进制。
  * @param {Function} [options.spawnProcess] 系统 curl 的 spawn 实现，用于无网络测试命令/环境传递。
  * @param {NodeJS.ProcessEnv} [options.env] curl 子进程环境；不用于决定核心版本、URL 或平台。
  * @param {Function} [options.readProxy] 异步读取系统代理；返回 HTTP(S) URL、direct、空字符串或 null。
@@ -498,18 +312,19 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
   // 复制并冻结依赖清单，调用者后续修改对象不能绕过下载来源和摘要约束。
   const catalog = structuredClone(manifest);
   const releases = new Map();
-  if (catalog.upstream !== "router-for-me/CLIProxyAPI" || !/^v\d+\.\d+\.\d+$/.test(catalog.version)) throw coreError("CORE_CONFIG");
+  if (catalog.upstream !== "yetone/magpie" || !/^v\d+\.\d+\.\d+$/.test(catalog.version)) throw coreError("CORE_CONFIG");
   for (const [key, entry] of Object.entries(catalog.platforms ?? {})) {
     if (!["win32-x64", "darwin-x64", "darwin-arm64", "linux-x64", "linux-arm64"].includes(key)) throw coreError("CORE_CONFIG");
     const [platform, arch] = key.split("-");
     const os = { win32: "windows", darwin: "darwin", linux: "linux" }[platform];
-    const archive = `CLIProxyAPI_${catalog.version.slice(1)}_${os}_${arch === "x64" ? "amd64" : "aarch64"}.${platform === "win32" ? "zip" : "tar.gz"}`;
-    if (entry.archive !== archive || entry.url !== `https://github.com/router-for-me/CLIProxyAPI/releases/download/${catalog.version}/${archive}` ||
+    const archive = `magpie-cli-${os}-${arch === "x64" ? "amd64" : "arm64"}${platform === "win32" ? ".exe" : ""}`;
+    if (entry.archive !== archive || entry.url !== `https://github.com/yetone/magpie/releases/download/${catalog.version}/${archive}` ||
         !/^[a-f0-9]{64}$/.test(entry.archiveSha256) || !/^[a-f0-9]{64}$/.test(entry.binarySha256) ||
-        typeof entry.path !== "string" || safeArchiveName(entry.path) !== entry.path) throw coreError("CORE_CONFIG");
+        entry.archiveSha256 !== entry.binarySha256 ||
+        entry.path !== (platform === "win32" ? "magpie.exe" : `${key}/magpie`)) throw coreError("CORE_CONFIG");
     releases.set(key, Object.freeze({ ...entry, version: catalog.version, key, platform, arch }));
   }
-  /** 已校验文件的 stat 指纹与结果；watchdog 只 lstat，不重复读取约 70 MiB 核心。 */
+  /** 已校验文件的 stat 指纹与结果；watchdog 只 lstat，不重复读取约 90 MiB 核心。 */
   const verified = new Map();
   /** 当前实例的下载任务；同一缓存目标并发调用共享一次尝试。 */
   const jobs = new Map();
@@ -608,7 +423,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     return bytes;
   }
 
-  /** 完成一次安装事务：锁内重检、随包优先、两级摘要、安全解压、权限、原子 rename，失败保留已有核心。 */
+  /** 完成一次安装事务：锁内重检、随包优先、两级摘要、有界原始字节、权限、原子 rename，失败保留已有核心。 */
   async function install(config, signal, key) {
     let lock;
     let temporary;
@@ -638,7 +453,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
         const archive = await readFile(archivePath);
         if (archive.length > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
         if (sha256(archive) !== config.core.archiveSha256) throw coreError("CORE_ARCHIVE_HASH");
-        binary = await extractArchive(archive, config.core, signal);
+        binary = readRawBinary(archive, signal);
         if (sha256(binary) !== config.core.binarySha256) throw coreError("CORE_BINARY_HASH");
       }
       const staged = join(temporary, "core");

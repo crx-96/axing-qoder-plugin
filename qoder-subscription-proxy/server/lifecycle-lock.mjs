@@ -23,6 +23,9 @@ export async function withLifecycleLock(config, action, timeoutMs = 25000, signa
   if (process.platform === "darwin" && lockPort === config.port) {
     throw lockError("BRIDGE_PORT 与本数据目录的生命周期锁端口冲突；请使用其他代理端口");
   }
+  if (process.platform === "darwin" && lockPort === config.managementPort) {
+    throw lockError("BRIDGE_MANAGEMENT_PORT 与本数据目录的生命周期锁端口冲突；请使用其他管理端口");
+  }
   const deadline = Date.now() + timeoutMs;
   let owner;
   while (!owner) {

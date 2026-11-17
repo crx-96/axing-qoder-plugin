@@ -2,65 +2,56 @@
 
 面向 **Qoder Desktop** 的第三方插件集，当前包含 [qoder订阅代理](qoder-subscription-proxy/README.md)：将本人合法授权的订阅接入本机 OpenAI 兼容 API，提供代理管理 MCP 工具。
 
-仓库地址：[crx-96/axing-qoder-plugin](https://github.com/crx-96/axing-qoder-plugin)。本项目不是 Qoder 或订阅服务商的官方产品。
+仓库地址：[crx-96/axing-qoder-plugin](https://github.com/crx-96/axing-qoder-plugin)。本项目不是 Qoder、Magpie 或订阅服务商的官方产品。
 
 ## 下载与安装
 
-本地构建的安装包位于 `dist/`。也可从 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 下载已发布版本的同名资产。当前源码版本为 **1.0.11**。
+当前源码版本为 **1.1.0**，固定使用 **Magpie CLI v0.1.4330**。本地构建产物位于 `dist/`；已发布资产以 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 实际列表为准。以下说明不代表本版本已发布、已安装验收或已通过五平台实机测试。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.0.11-win32-x64.zip` |
-| macOS x64 | `qoder-subscription-proxy-v1.0.11-darwin-x64.zip` |
-| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.0.11-darwin-arm64.zip` |
-| Linux x64 | `qoder-subscription-proxy-v1.0.11-linux-x64.zip` |
-| Linux ARM64 | `qoder-subscription-proxy-v1.0.11-linux-arm64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.1.0-win32-x64.zip` |
+| macOS x64 | `qoder-subscription-proxy-v1.1.0-darwin-x64.zip` |
+| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.1.0-darwin-arm64.zip` |
+| Linux x64 | `qoder-subscription-proxy-v1.1.0-linux-x64.zip` |
+| Linux ARM64 | `qoder-subscription-proxy-v1.1.0-linux-arm64.zip` |
 
-按当前源码构建的每个安装包内置对应平台的 CLIProxyAPI 核心及原生审批路由扩展；普通安装者无需 Rust，也不会在线下载或编译扩展。请按本机系统与架构选择，不要混用。以下说明描述当前源码设计，不表示这些变更已发布或已完成 Desktop 安装验收。
+每个平台 ZIP 内置本平台的原始 Magpie CLI 核心；安装核心无需联网，不编译 Rust。授权、模型调用及用户主动安装的可选依赖仍可能需要网络。
 
-**不要选择 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`**，它们是整个仓库的源码，不是可直接导入的单插件安装包。用户无需克隆仓库或自行打包。
+**不要选择 GitHub 自动生成的 `Source code (zip)` 或 `Source code (tar.gz)`**：它们不是可直接导入的单插件安装包。按 [Qoder 插件文档](https://docs.qoder.com/qoder/plugins)，在 Desktop 的 **扩展 → 插件 → 添加插件 → 上传插件 ZIP** 选择对应文件，无需先解压。启用并连接 MCP 后，通过 `bridge_status.ready` 确认代理就绪，而不是仅看 MCP 已连接。
 
-按 [Qoder 插件文档](https://docs.qoder.com/qoder/plugins) 和 [扩展发布文档](https://docs.qoder.com/qoder/extension-publishing)，在 Qoder Desktop 中进入 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择下载的文件；无需先解压。
+点击 **更多 → 订阅代理管理** 进入管理页，查看核心状态、显式启动、刷新状态或打开原生管理页。页面初始化仅调用 `bridge_status`，不自动启动核心或打开浏览器。账号登录通过页面的 **打开原生管理页（浏览器）** 按钮或 `bridge_open_management` 完成。
 
-安装后启用插件并连接 MCP。待代理就绪，点击 Qoder 左下角 **更多 → 订阅代理管理**，直接在**系统默认浏览器**打开免密管理页；非 Google 渠道在原面板授权；Google 模型请打开页面中的「Antigravity ACP 管理」，检测运行时并通过官方认证读取模型目录。成功后请求 Qoder 自动回收入口页，正常路径不显示中间页或再次打开按钮，只有失败时保留错误提示和手动重试；旧的 `management-page` 待授权连接器已移除。管理网关与模型 API 仍固定使用端口 `19788` 和 `19787`。[插件使用说明](qoder-subscription-proxy/README.md)
+模型入口仍为 `http://127.0.0.1:19787/v1`，Magpie 原生管理页使用 `19788`。原生 `/?k=长密钥` 登录后换取 HttpOnly cookie 并清理 URL；这不是一次性票据，固定版本的密钥 cookie 有效期为 400 天。不要分享登录链接、cookie 或密钥。
 
-从旧版升级时，先等请求结束并调用 `bridge_stop`。导入新版、重连 MCP 后调用 `bridge_start`，即可使用新版工具；非 ACP 渠道的重试、流式参数沿用上游默认值；ACP 专用上游禁用额外重试，旧 Google 授权及模型路径停用但不删除数据，并按原约定同步 Windows 系统代理，详见[插件核心配置策略](qoder-subscription-proxy/README.md#核心配置策略)。
+升级前等待请求结束并调用 `bridge_stop`，导入新版、重连 MCP 后调用 `bridge_start`。需要在 Magpie 中本人重新登录；插件不读取、迁移或删除旧配置与授权数据，也不复制其他客户端账号或接管其他 Magpie 桌面配置。
 
 ## 从源码打包
 
-开发者需要 Node.js 22+、Rust/Cargo（crate 声明最低 Rust 1.85，实际锁定依赖也须受工具链支持）及当前平台的本地链接工具：Windows MSVC Build Tools/Windows SDK、macOS Xcode Command Line Tools、Linux C 编译/链接工具链。从仓库根目录执行；以下仅以 **Windows x64 宿主**为例：
+开发者需要 Node.js 22+ 和下载工具；无需 Rust/Cargo。从仓库根目录执行，以下以 Windows x64 为例（`dist` 已存在则省略创建）：
 
 ```sh
 mkdir dist
-# 按当前宿主编译 Rust cdylib，使用源码中的 Cargo.lock 锁定依赖
-node qoder-subscription-proxy/scripts/build-approval-router.mjs win32-x64
-# 获取并校验本平台官方核心（归档与二进制两级 SHA256）
 node qoder-subscription-proxy/scripts/fetch-core.mjs win32-x64
-node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.0.11-win32-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.1.0-win32-x64.zip
 ```
 
-在其他宿主上，将三条命令的平台参数及 ZIP 文件名改为本机的 `darwin-x64`、`darwin-arm64`、`linux-x64` 或 `linux-arm64`。构建脚本省略平台参数时使用当前 Node 宿主平台，拒绝伪跨编译；五平台安装包须由对应宿主或 GitHub 原生 runner 矩阵分别构建。`fetch-core.mjs all` 仍可一次下载五平台**官方核心**，但不能代替五平台原生扩展构建。
+其他平台使用 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64`。`fetch-core.mjs all` 可准备五平台固定原始 CLI 资产；来源、路径与 SHA256 以 [`server/bin/platforms.json`](qoder-subscription-proxy/server/bin/platforms.json) 为准。核心缓存位于 `qoder-subscription-proxy/.core-build/<platform>/`，不要提交缓存或安装 ZIP。
 
-扩展产物位于 `qoder-subscription-proxy/.approval-build/<platform>/`，核心缓存位于插件目录 `.core-build/`。ZIP 内扩展为 `server/approval-router/manifest.json` 与对应的 `qoder-approval-router.dll`、`.dylib` 或 `.so`，原生依赖许可证为 `server/approval-router-licenses.txt`。
+打包脚本按白名单分发，校验核心摘要，拒绝覆盖已有 ZIP；目标父目录须已存在。ZIP 根目录直接为插件内容，非 Windows 包将 `mcp.posix.json` 发布为 `mcp.json` 并保留核心执行位。源码直接运行且没有随包核心时可下载固定核心；随包核心损坏不会以下载静默替换。
 
-若 `dist` 已存在，无需再次创建。目标父目录必须先存在；脚本拒绝覆盖已有 ZIP，并核对核心 SHA256 及扩展 manifest 的平台、ABI 和 SHA256。重建前将旧产物移出待发布目录，尤其不要混入同版本的 `-windows.zip` / `-posix.zip` 旧包，它们不包含核心。正式发布由下方 Release workflow 完成；手动构建时文件名中的版本也须与插件清单一致，不要提交二进制安装包、`.core-build` 或 `.approval-build` 缓存。源码直接启动前同样必须先构建本平台扩展。
-
-ZIP 根目录直接是插件内容，不再套一层仓库或插件目录。非 Windows 包会使用对应的 `mcp.posix.json` 内容发布为 `mcp.json`，并为内置核心保留执行位；源码默认 Windows 清单不能直接用于 macOS/Linux。
+`prepare-posix-marketplace.sh` 仅用于支持本地市场的高级兼容客户端：先用 `fetch-core.mjs` 准备当前平台核心，再生成一个新的独立目录。脚本只复制并校验当前平台 `.core-build` 中的核心，不下载、不注册市场、不安装插件、不修改已有缓存。Desktop 用户仍应使用 ZIP。
 
 ## 发布 Release
 
-推送 `v*` 标签，或在 GitHub Actions 手动触发 `Release` workflow。workflow 会校验标签与 `qoder-subscription-proxy/.qoder-plugin/plugin.json` 版本一致，由五个平台的 GitHub 原生 runner 分别构建扩展、获取并校验本平台核心、运行测试并打包各自 ZIP，再汇总上传 Release；Release 不存在时创建，单个资产上传失败会重试。不是在一台机器上跨编译五个平台。此处是发布流程说明，不代表当前改动已发布。
+Release workflow 负责版本核对、准备固定核心、测试、打包及资产上传；不再构建 Rust 扩展。实际发布须独立执行并核验结果，源码说明与本地测试不等于已发布。分发清单、插件清单和 workflow 是构建事实来源。
 
-## 分发与兼容边界
+## 分发与安全边界
 
-- 插件清单为 `qoder-subscription-proxy/.qoder-plugin/plugin.json`；MCP 使用 `${QODER_PLUGIN_ROOT}` 和 `timeout: 660000`，与 Desktop 自带 `recordAndReplay` 资源一致，但不等于安装已验收。仓库 `.qoder-plugin/marketplace.json` 另按 Qoder CLI 市场规范保留，不据此承诺 Desktop 市场导入。
-- 自定义 UI 依据 **Qoder Desktop 0.5.12** 随附 MCP Apps 规范接入（官方 0.5.11 发布说明首次列出该功能），按宿主实际能力声明展示入口；本轮尚未完成安装与界面验收。CN 版程序名为 `Qoder CN.exe`，国际版为 `Qoder.exe`，启动器可复用桌面内置 Node mode 或系统 Node.js 22+。
-- 安装包按平台拆分，内置固定 `v8.0.74` 的当前平台 CLIProxyAPI 核心；首次 MCP 启动校验 SHA256 后安装到本机缓存。未随包的源码运行才回退官方 Release 下载，归档与二进制均校验摘要。
-- Google 模型改用官方 Antigravity ACP `1.5.0`，优先验证宿主已有程序，缺失时在首次连接 ACP 时下载私有运行时。仅安装桌面应用不代表 ACP 可用；不会覆盖宿主安装或导入其他客户端凭据。
-- Gemini 固定审批分流与旧 Antigravity 空补全续写已移除；Qoder 原生审批和独立 Codex 审批路由保持。原生扩展仍须通过平台、ABI、SHA256 与实际注册检查，缺失时不能报告就绪。
-- ACP 生图尚未验证，Gemini 生图入口不公开且不会回退旧通道。Google 个人订阅是否允许第三方主模型用途须另行确认，使用官方程序不是授权保证。
-- 安装后可离线准备随包核心和扩展；远程授权与模型服务仍需要网络。自定义 `BRIDGE_BIN` 仍不下载、不替换，但必须兼容并真实启用扩展。升级不会自动重启仍在处理请求的旧桥，须等请求结束后 `bridge_stop` / `bridge_start`。
-- `prepare-posix-marketplace.sh` 仅保留给支持本地市场的高级兼容客户端；尚未确认 Qoder Desktop 提供自定义市场 UI，不将其作为 Desktop 安装步骤。
-- 默认端口 `19787`，数据位于 `~/.qoder/qoder-subscription-proxy/data`。CN 版也使用这个插件专属稳定目录，**不是 Qoder App 设置目录**。管道、缓存和锁与兄弟 Zcode 插件隔离，不复制真实账号或旧运行数据。
+- 默认数据目录为 `~/.qoder/qoder-subscription-proxy/data`，Magpie 私有配置和授权放在 `dataDir/magpie`，XDG cache/state 独立隔离。这不是 Qoder 应用设置目录。
+- `launcher-secrets.json` 保留 `apiKey` 与 `mgmtKey`。`apiKey` 用作客户端标识；固定 Magpie 回环 API 接受任意 key，**不能把它当作强制 API 认证**。服务仅限 loopback，禁止共享、端口映射或对外反向代理。
+- 订阅账号默认关闭；使用前须用户在 Magpie 隐私设置显式开启，这也会允许发现本机其他客户端账号，并非仅开放手动登录。核心自动更新关闭。所需服务商插件由用户在 Magpie 原生管理页面自行安装和管理；本插件不提供代装工具，第三方插件及其运行依赖不随本插件 ZIP 打包。
+- GPT 生图走 Magpie 原生 `/v1/images/generations`，插件只做本地交付薄适配；旧 Gemini 生图工具已移除。
+- 安装、真实账号、模型调用及五平台运行需要分别验收。自定义 `BRIDGE_BIN` 不自动下载或替换。
 
-模型客户端使用本机数据目录 `launcher-secrets.json` 中的 `apiKey`。管理页另用 `mgmtKey`，平时可通过插件指令免输密码。请将两项凭据仅留在本机。[免责声明](qoder-subscription-proxy/DISCLAIMER.md) · [第三方软件与许可证](qoder-subscription-proxy/THIRD_PARTY_NOTICES.md)
+[重构后快速使用](qoder-subscription-proxy/README.md#重构后快速使用) · [插件完整说明](qoder-subscription-proxy/README.md) · [免责声明](qoder-subscription-proxy/DISCLAIMER.md) · [第三方软件与许可证](qoder-subscription-proxy/THIRD_PARTY_NOTICES.md)

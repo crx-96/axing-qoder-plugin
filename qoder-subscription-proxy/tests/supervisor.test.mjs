@@ -10,14 +10,13 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { PLUGIN_VERSION, loadConfig, renderConfigYaml } from "../server/config.mjs";
-import { ensureApprovalRouting } from "../server/approval-routing.mjs";
+import { loadConfig, magpieArguments, magpieEnvironment } from "../server/config.mjs";
 import { requestLocal } from "../server/local-http.mjs";
 import { connectOwned } from "../server/owned-http.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
   probeBridge, sameProcess, processIdentity, withLifecycleLock, ensureDataDir,
-  ensureRunning, getStatus, stopBridge, startWatchdog,
+  ensureRunning, getStatus, stopBridge, startWatchdog, openCoreConnection, requestOwned,
 } from "../server/supervisor.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -25,20 +24,17 @@ const processModuleUrl = new URL("../server/supervisor.mjs", import.meta.url).hr
 const execFileAsync = promisify(execFile);
 const windowsOnly = process.platform !== "win32" ? "仅在 Windows 验证进程身份与隔离 exe" : nativeCoreSkip;
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-const signature = { message: "CLI Proxy API Server", endpoints: ["GET /v1/models"] };
-/** 宿主可能启用系统代理；注入固定状态让配置断言与真实设置无关。 */
-const noSystemProxy = { readProxy: async () => "" };
+const signature = { name: "magpie", version: "0.1.4330" };
 
 function testConfig(directory, port = 1) {
   assert.ok(![8787, 19787].includes(port), "禁止访问旧桥或插件默认端口");
   return {
-    host: "127.0.0.1", port, apiKey: "isolated-client-test-key", mgmtKey: "a".repeat(64),
-    dataDir: directory, configPath: join(directory, "config.yaml"), authDir: join(directory, "auths"),
+    host: "127.0.0.1", port, managementPort: port, apiKey: "isolated-client-test-key", mgmtKey: "a".repeat(64),
+    dataDir: directory, configPath: join(directory, "magpie", "settings.json"), profileDir: join(directory, "magpie"),
     binPath: join(directory, "no-binary-should-be-started.exe"), pidPath: join(directory, "bridge.pid"),
     lockPath: join(directory, "bridge.lock"), pausedPath: join(directory, "bridge.paused"),
-    proxyStatePath: join(directory, "bridge.proxy"),
     endpoint: `http://127.0.0.1:${port}/v1`,
-    managementUrl: `http://127.0.0.1:${port}/management.html`,
+    managementUrl: `http://127.0.0.1:${port}/`,
   };
 }
 
@@ -89,7 +85,7 @@ async function terminateOwnedBridge(config, pid) {
   const identity = await processIdentity(pid);
   if (!identity) return;
   assert.equal(resolve(identity.executablePath).toLowerCase(), resolve(config.binPath).toLowerCase(), "清理前必须确认隔离 exe 路径");
-  assert.ok(identity.commandLine.includes(config.configPath), "清理前必须确认隔离配置路径");
+  assert.ok(identity.commandLine.includes("serve") && identity.commandLine.includes(`--web=127.0.0.1:${config.managementPort}`), "清理前必须确认隔离管理端口与 serve 参数");
   const encoded = Buffer.from(JSON.stringify(identity)).toString("base64");
   const script = `[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false); $ErrorActionPreference='Stop'; $e=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json; $p=Get-Process -Id $e.pid -ErrorAction Stop; $null=$p.Handle; $c=Get-CimInstance Win32_Process -Filter ('ProcessId = '+$e.pid); if($p.Path -ne $e.executablePath -or $c.CommandLine -ne $e.commandLine -or $c.CreationDate.ToUniversalTime().ToString('o') -ne $e.creationDate){throw 'Refuse to terminate unrelated process'}; $p.Kill(); if(-not $p.WaitForExit(5000)){throw 'Owned test process did not exit'}`;
   await execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -134,7 +130,7 @@ async function realBridgeFixture(t) {
   const binPath = join(directory, "隔离 订阅代理.exe");
   const env = {
     ...process.env, BRIDGE_DATA_DIR: join(directory, "数据 data"), BRIDGE_BIN: binPath,
-    BRIDGE_HOST: "127.0.0.1", BRIDGE_PORT: String(port),
+    BRIDGE_HOST: "127.0.0.1", BRIDGE_PORT: String(port), BRIDGE_MANAGEMENT_PORT: String(await unusedPort()),
     BRIDGE_API_KEY: "isolated-test-client-key", BRIDGE_MGMT_KEY: "123456",
   };
   const config = { ...testConfig(env.BRIDGE_DATA_DIR, port), binPath };
@@ -146,7 +142,7 @@ async function realBridgeFixture(t) {
   await copyTestCore(binPath);
   Object.assign(config, await loadConfig({ pluginRoot, env }));
   assert.ok(config.dataDir.startsWith(directory));
-  assert.ok(config.authDir.startsWith(directory));
+  assert.ok(config.profileDir.startsWith(directory));
   return { config, env, directory, beforeCleanup };
 }
 
@@ -229,7 +225,7 @@ async function mcpClient(t, env, beforeCleanup, { initialize = true } = {}) {
     child, close, endInput, request, responses,
     async call(name) {
       const result = await request("tools/call", { name, arguments: {} });
-      assert.notEqual(result.isError, true, `MCP ${name} 不应报错`);
+      assert.notEqual(result.isError, true, `MCP ${name} 不应报错：${JSON.stringify(result)}`);
       return JSON.parse(result.content.find((item) => item.type === "text").text);
     },
   };
@@ -245,7 +241,7 @@ async function shutdownFixture(t) {
   ).toString("base64")}`);
   const config = testConfig(await directoryFixture(t));
   const identity = { pid: 123, creationDate: "instance", commandLine: "command", executablePath: config.binPath,
-    controlPort: 12345, controlToken: "token", binPath: config.binPath, configPath: config.configPath, panelRevision: "revision" };
+    controlPort: 12345, controlToken: "token", binPath: config.binPath, configPath: config.configPath, runtimeRevision: "revision" };
   await writeFile(config.pidPath, JSON.stringify(identity));
   const child = new EventEmitter();
   Object.assign(child, { pid: 456, exitCode: null, signalCode: null,
@@ -259,7 +255,7 @@ for (const mode of ["same", "different-token", "different-path", "different-revi
     const f = await shutdownFixture(t);
     let expected = f.identity;
     if (mode.startsWith("different")) {
-      const field = { "different-token": "controlToken", "different-path": "binPath", "different-revision": "panelRevision" }[mode];
+      const field = { "different-token": "controlToken", "different-path": "binPath", "different-revision": "runtimeRevision" }[mode];
       expected = { ...expected, [field]: "replacement" };
       await writeFile(f.config.pidPath, JSON.stringify(expected));
     }
@@ -286,6 +282,101 @@ for (const mode of ["same", "different-token", "different-path", "different-revi
   });
 }
 
+test("Windows PID 原子发布有界重试短暂占用，永久错误保留原记录且清理临时文件", async t => {
+  const directory = await directoryFixture(t);
+  const path = join(directory, "bridge.pid");
+  const url = new URL("../server/supervisor.mjs", import.meta.url);
+  const source = (await readFile(url, "utf8"))
+    .replaceAll("import.meta.url", JSON.stringify(url.href))
+    .replace(/from "(\.\/[^"]+)"/g, (_, name) => `from ${JSON.stringify(new URL(name, url).href)}`)
+    .replace("await rename(temporary, path)", "await renameForTest(temporary, path)");
+  for (const [platform, code, failures, expectedAttempts] of [
+    ["win32", "EPERM", 2, 3], ["win32", "EACCES", 2, 3], ["win32", "EBUSY", 2, 3],
+    ["win32", "EPERM", 10, 6], ["win32", "ENOENT", 2, 1], ["linux", "EPERM", 2, 1],
+  ]) {
+    await writeFile(path, "previous-record");
+    const prelude = `
+      const process = { platform: ${JSON.stringify(platform)}, env: {}, pid: 1 };
+      let attempts = 0;
+      async function renameForTest(from, to) {
+        if (++attempts <= ${failures}) throw Object.assign(new Error('sharing failure'), { code: ${JSON.stringify(code)} });
+        return rename(from, to);
+      }
+    `;
+    const module = await import(`data:text/javascript;base64,${Buffer.from(prelude + source + "\nexport { replacePrivateFile, attempts };").toString("base64")}`);
+    if (expectedAttempts > failures) {
+      await module.replacePrivateFile(path, "new-record");
+      assert.equal(await readFile(path, "utf8"), "new-record");
+    } else {
+      await assert.rejects(module.replacePrivateFile(path, "new-record"), { code });
+      assert.equal(await readFile(path, "utf8"), "previous-record");
+    }
+    assert.equal(module.attempts, expectedAttempts);
+    assert.deepEqual(await readdir(directory), ["bridge.pid"]);
+  }
+});
+
+for (const platform of ["linux", "darwin"]) {
+  for (const mode of ["dead", "live", "reused", "EPERM", "unknown", "invalid-pid"]) {
+    test(`POSIX legacy ${platform} ${mode} 仅 ESRCH 允许越过旧记录`, async (t) => {
+      const config = testConfig(await directoryFixture(t), await unusedPort());
+      const record = { pid: mode === "invalid-pid" ? -1 : 12345, creationDate: "old-instance",
+        commandLine: "CLIProxyAPI -config old.yaml", binPath: join(config.dataDir, "CLIProxyAPI"),
+        configPath: join(config.dataDir, "config.yaml"), controlPort: 12346, controlToken: "old-token" };
+      await writeFile(config.pidPath, JSON.stringify(record));
+      const url = new URL("../server/supervisor.mjs", import.meta.url);
+      const source = (await readFile(url, "utf8"))
+        .replaceAll("import.meta.url", JSON.stringify(url.href))
+        .replace(/from "(\.\/[^\"]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, url).href)}`);
+      const prelude = `
+        export const signals = [];
+        const process = { platform: ${JSON.stringify(platform)}, env: {}, pid: 1,
+          kill(pid, signal) {
+            signals.push([pid, signal]);
+            if (signal !== 0) throw new Error('禁止终止记录 PID');
+            const mode = ${JSON.stringify(mode)};
+            if (mode === 'dead') throw Object.assign(new Error(), { code: 'ESRCH' });
+            if (mode === 'EPERM') throw Object.assign(new Error(), { code: 'EPERM' });
+            if (mode === 'unknown') throw new Error('unknown');
+            return true;
+          }
+        };
+      `;
+      const module = await import(`data:text/javascript;base64,${Buffer.from(prelude + source).toString("base64")}`);
+      if (mode === "dead") {
+        await assert.rejects(module.ensureRunning(config, { allowDownload: false }), /BRIDGE_BIN 不存在/,
+          "旧记录必须允许进入正常启动检查，但不能启动真实核心");
+        assert.equal((await module.stopBridge(config)).stopped, true);
+      } else {
+        for (const action of [() => module.ensureRunning(config, { allowDownload: false }), () => module.stopBridge(config)]) {
+          await assert.rejects(action, error => error.code === "BRIDGE_NOT_READY" && /旧版本.*手动停止/.test(error.safeMessage));
+        }
+      }
+      assert.deepEqual(await readPid(config), record, "不得认领或删除旧版本路径的记录");
+      assert.equal(await readFile(config.pausedPath, "utf8"), "Stopped by user\n");
+      assert.equal(module.signals.length, mode === "invalid-pid" ? 0 : mode === "dead" ? 3 : 2);
+      assert.ok(module.signals.every(([pid, signal]) => pid === record.pid && signal === 0));
+    });
+  }
+}
+
+test("Darwin 生命周期锁分别拒绝模型和管理端口冲突，未冲突时正常释放", async (t) => {
+  const config = testConfig(await realpath(await directoryFixture(t)));
+  const hash = createHash("sha256").update(config.dataDir).digest("hex");
+  const lockPort = 20000 + Number.parseInt(hash.slice(0, 8), 16) % 20000;
+  const url = new URL("../server/lifecycle-lock.mjs", import.meta.url);
+  const source = await readFile(url, "utf8");
+  const module = await import(`data:text/javascript;base64,${Buffer.from(
+    `const process = { platform: "darwin" };\n${source}`
+  ).toString("base64")}`);
+  for (const [field, variable] of [["port", "BRIDGE_PORT"], ["managementPort", "BRIDGE_MANAGEMENT_PORT"]]) {
+    await assert.rejects(module.withLifecycleLock({ ...config, [field]: lockPort }, () => assert.fail("冲突时不能执行"), 150),
+      error => error.code === "BRIDGE_NOT_READY" && error.safeMessage.startsWith(`${variable} `));
+  }
+  assert.equal(await module.withLifecycleLock(config, () => "acquired", 150), "acquired");
+  assert.equal(await module.withLifecycleLock(config, () => "released", 150), "released");
+});
+
 test("probeBridge 只有完整根签名才识别为桥，不泄漏认证头", async (t) => {
   const cases = [
     [200, "ok", "foreign"], [200, "null", "foreign"],
@@ -306,8 +397,8 @@ test("probeBridge 只有完整根签名才识别为桥，不泄漏认证头", as
 
 test("sameProcess 核对 pid、创建时间、命令行与 exe/config 绝对路径", () => {
   const config = testConfig(join(tmpdir(), "identity-test"));
-  const identity = { pid: 1234, creationDate: "2026-10-22T01:02:03.1234567Z", commandLine: `\"${config.binPath}\" -config \"${config.configPath}\"`, executablePath: config.binPath };
-  const record = { ...identity, binPath: config.binPath, configPath: config.configPath };
+  const identity = { pid: 1234, creationDate: "2026-10-22T01:02:03.1234567Z", commandLine: JSON.stringify([config.binPath, ...magpieArguments(config)]), executablePath: config.binPath };
+  const record = { ...identity, binPath: config.binPath, configPath: config.configPath, managementPort: config.managementPort };
   assert.equal(sameProcess(record, identity, config), true);
   assert.equal(sameProcess({ ...record, binPath: config.binPath.toUpperCase() }, identity, config), process.platform === "win32");
   for (const changed of [
@@ -419,44 +510,60 @@ test("ensureRunning 不接管只有根签名但无本版本 PID 归属的服务"
   });
   const config = testConfig(await directoryFixture(t), server.address().port);
   await assert.rejects(ensureRunning(config), /旧版|外部|接管/);
-  assert.deepEqual(requests, ["/"]);
+  assert.deepEqual(requests, ["/api/hello"]);
   assert.equal((await getStatus(config)).ready, false);
-  assert.deepEqual(requests, ["/", "/"], "status 不得向未归属服务请求模型清单");
+  assert.deepEqual(requests, ["/api/hello", "/api/hello"], "status 不得向未归属服务请求模型清单");
   const stopped = await stopBridge(config);
   assert.equal(stopped.stopped, false);
   assert.equal((await probeBridge(config)).state, "bridge");
 });
 
-test("ensureDataDir 并发发布完整配置并保留既有内容", async (t) => {
+test("ensureDataDir 并发发布完整 JSON 并保留既有内容与旧用户数据", async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
-  config.apiKey = "synthetic-test-value-".repeat(32768);
-  const results = await Promise.allSettled(Array.from({ length: 12 }, () => ensureDataDir(config, noSystemProxy)));
-  const errors = results.filter((entry) => entry.status === "rejected").map((entry) => entry.reason.message);
-  assert.equal(errors.length, 0, `并发读取不得观察到空/半份配置：${errors.join("; ")}`);
-  assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(renderConfigYaml(config)));
-  const marker = "# user-owned marker\n";
-  await writeFile(config.configPath, marker + renderConfigYaml(config));
-  await ensureDataDir(config, noSystemProxy);
-  assert.equal((await readFile(config.configPath, "utf8")).startsWith(marker), true);
-  assert.ok(!(await readdir(config.dataDir)).some((name) => name.endsWith(".tmp")));
+  const legacy = join(config.dataDir, "config.yaml");
+  const authDir = join(config.dataDir, "auths");
+  await writeFile(legacy, "invalid old yaml: must not be read");
+  await mkdir(authDir);
+  await writeFile(join(authDir, "account.json"), "untouched account");
+  await Promise.all(Array.from({ length: 12 }, () => ensureDataDir(config)));
+  const settings = JSON.parse(await readFile(config.configPath, "utf8"));
+  assert.equal(settings.port, config.port);
+  settings.userMarker = "preserve";
+  const original = JSON.stringify(settings);
+  await writeFile(config.configPath, original);
+  await ensureDataDir(config);
+  assert.equal(await readFile(config.configPath, "utf8"), original);
+  assert.equal(await readFile(legacy, "utf8"), "invalid old yaml: must not be read");
+  assert.equal(await readFile(join(authDir, "account.json"), "utf8"), "untouched account");
+  assert.ok(!(await readdir(config.profileDir)).some((name) => name.endsWith(".tmp")));
 });
 
 test("Windows 真实核心的进程身份和零字节连接归属保持一致", { skip: windowsOnly, timeout: 30000 }, async (t) => {
   const { config, beforeCleanup } = await realBridgeFixture(t);
-  await ensureDataDir(config, noSystemProxy);
-  const child = spawn(config.binPath, ["-config", config.configPath], {
-    cwd: config.dataDir, windowsHide: true, stdio: "ignore",
-    env: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "MANAGEMENT_PASSWORD")),
+  await ensureDataDir(config);
+  const child = spawn(config.binPath, magpieArguments(config), {
+    cwd: config.dataDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    env: magpieEnvironment(config),
   });
+  let startupOutput = "";
+  child.stdout.on("data", chunk => { startupOutput += chunk; });
+  child.stderr.on("data", chunk => { startupOutput += chunk; });
   const exited = once(child, "exit");
   beforeCleanup.push(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill();
     await exited;
   });
-  await waitUntil(async () => (await probeBridge(config)).state === "bridge");
+  await waitUntil(async () => {
+    assert.equal(child.exitCode, null, startupOutput.replaceAll(config.mgmtKey, "[redacted]").replaceAll(config.apiKey, "[redacted]"));
+    return (await probeBridge(config)).state === "bridge";
+  }).catch(async error => {
+    t.diagnostic(startupOutput.replaceAll(config.mgmtKey, "[redacted]").replaceAll(config.apiKey, "[redacted]"));
+    t.diagnostic(JSON.stringify(await requestLocal({ ...config, port: config.managementPort }, "/api/hello").catch(() => ({ state: "offline" }))));
+    throw error;
+  });
   const first = await processIdentity(child.pid);
   const second = await processIdentity(child.pid);
-  const record = { ...first, binPath: config.binPath, configPath: config.configPath };
+  const record = { ...first, binPath: config.binPath, configPath: config.configPath, managementPort: config.managementPort };
   assert.equal(first?.pid, child.pid);
   assert.equal(sameProcess(record, second, config), true);
   const socket = await connectOwned(config, async () => second);
@@ -496,7 +603,11 @@ test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建�
     pid: process.pid, creationDate: "1970-01-01T00:00:00.0000000Z",
     commandLine: "stale test pid record", binPath: config.binPath, configPath: config.configPath,
   }));
-  const started = await ensureRunning(config);
+  const started = await ensureRunning(config).catch(async error => {
+    t.diagnostic((await readFile(join(config.dataDir, "bridge.log"), "utf8").catch(() => "No core log"))
+      .replaceAll(config.mgmtKey, "[redacted]").replaceAll(config.apiKey, "[redacted]"));
+    throw error;
+  });
   assert.equal(process.kill(process.pid, 0), true, "陈旧 PID 记录不能误杀当前测试进程");
   assert.equal(started.started, true);
   assert.equal(started.ready, true);
@@ -511,7 +622,7 @@ test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建�
   const status = await getStatus(config);
   assert.equal(status.alive, true);
   assert.equal(status.ready, true);
-  assert.equal(status.authCount, 0);
+  assert.equal(Object.hasOwn(status, "authCount"), false);
   assert.ok(!JSON.stringify(status).includes(config.apiKey));
   assert.equal(Object.hasOwn(status, "mgmtKey"), false);
   assert.ok(!JSON.stringify(status).includes(config.mgmtKey));
@@ -574,8 +685,10 @@ test("单个 MCP 握手后后台自动就绪，无需工具或账号，正常 EO
   await waitUntil(async () => (await getStatus(config)).ready, 30000);
   const status = await getStatus(config);
   assert.equal(status.ready, true, "后台必须自动启动，不能靠 bridge_start 补启动");
-  assert.equal(status.authCount, 0, "没有授权账号也允许握手成功");
-  assert.equal((await requestLocal(config, "/management.html", { maxBytes: 5 * 1024 * 1024 })).status, 200);
+  const models = await requestOwned(config, "/v1/models", { authenticated: true });
+  assert.equal(models.status, 200);
+  assert.ok(Array.isArray(JSON.parse(models.text).data), "归属认证后的请求仍使用模型端口并读取完整响应");
+  assert.equal((await requestLocal({ ...config, port: config.managementPort }, "/", { maxBytes: 5 * 1024 * 1024 })).status, 401, "原生管理端禁止未登录访问");
   const before = await readPid(config);
   assert.equal((await isolatedSupervisorPids(config)).length, 1);
   await client.endInput();
@@ -646,66 +759,36 @@ test("owner MCP 退出后另一个活跃 MCP 的 watchdog 自动恢复代理", {
   await assertOwnedProcessesExited(config, recovered.pid);
 });
 
-test("隔离核心迁移旧公共密码后只接受当前安装管理密钥", { skip: windowsOnly, timeout: 60000 }, async (t) => {
-  const { config } = await realBridgeFixture(t);
-  await writeFile(config.configPath, renderConfigYaml({ ...config, mgmtKey: "123456" }));
-  const previous = process.env.MANAGEMENT_PASSWORD;
-  const inherited = "test-only-inherited-management-password";
-  try {
-    process.env.MANAGEMENT_PASSWORD = inherited;
-    await ensureRunning(config);
-  } finally {
-    if (previous === undefined) delete process.env.MANAGEMENT_PASSWORD;
-    else process.env.MANAGEMENT_PASSWORD = previous;
-  }
-  async function managementRequest(key) {
-    return new Promise((resolve, reject) => {
-      const request = http.get({
-        host: config.host, port: config.port, path: "/v0/management/auth-files",
-        headers: key === undefined ? {} : { Authorization: `Bearer ${key}` },
-      }, (response) => {
-        let body = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => { body += chunk; });
-        response.on("end", () => resolve({ status: response.statusCode, body }));
-        response.on("error", reject);
-      });
-      request.on("error", reject);
-      request.setTimeout(5000, () => request.destroy(new Error("管理接口响应超时")));
-    });
-  }
-  const accepted = await managementRequest(config.mgmtKey);
-  assert.equal(accepted.status, 200);
-  assert.deepEqual(JSON.parse(accepted.body).files, []);
-  for (const key of [undefined, "123456", inherited, config.apiKey]) {
-    const rejected = await managementRequest(key);
-    assert.ok([401, 403].includes(rejected.status), `无效管理认证应拒绝，实际 HTTP ${rejected.status}`);
-  }
-  assert.equal((await managementRequest(config.mgmtKey)).status, 200, "拒绝错误密码后正确密码仍可用");
-  await stopBridge(config);
-});
-
-test("隔离真实核心提供 ACP 管理入口，旧页面修订不被接管", {
+test("隔离真实核心使用原生管理端口，旧托管修订不被接管", {
   skip: windowsOnly, timeout: 60000,
 }, async (t) => {
   const { config } = await realBridgeFixture(t);
   await ensureRunning(config);
-  const page = await requestLocal(config, "/management.html", { maxBytes: 5 * 1024 * 1024 });
+  const page = await requestLocal(config, "/api/hello");
   assert.equal(page.status, 200);
-  assert.ok(page.text.includes("Google 模型已迁移至 ACP"));
-  assert.ok(page.text.includes('href="/acp"'));
-  assert.ok(!page.text.includes("async function startAntigravityAuth"));
+  assert.equal(JSON.parse(page.text).name, "magpie");
+  const managementSocket = await openCoreConnection(config, undefined, config.managementPort);
+  try {
+    const response = await requestLocal({ ...config, port: config.managementPort }, "/", { socket: managementSocket });
+    assert.equal(response.status, 401, "同一核心的管理端仍要求原生登录");
+  } finally { managementSocket.destroy(); }
+  await assert.rejects(async () => openCoreConnection(config, undefined, 1), /目标端口/);
   const record = await readPid(config);
   const legacyRecord = { ...record };
-  delete legacyRecord.panelRevision;
+  delete legacyRecord.runtimeRevision;
   await writeFile(config.pidPath, JSON.stringify(legacyRecord));
-  await assert.rejects(ensureRunning(config), /尚未加载网页授权修复/);
+  await assert.rejects(ensureRunning(config), /托管协议/);
   const legacyStatus = await getStatus(config);
   assert.equal(legacyStatus.alive, true);
   assert.equal(legacyStatus.ready, false);
   assert.match(legacyStatus.models.note, /bridge_stop/);
   assert.ok(await processIdentity(record.pid));
   await stopBridge(config);
+  const log = await waitUntil(async () => {
+    const value = await readFile(join(config.dataDir, "bridge.log"), "utf8");
+    return value.includes("[REDACTED]") ? value : false;
+  });
+  assert.ok(!log.includes(config.mgmtKey), "原生启动日志不能包含长期管理密钥");
 });
 
 test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再重启", {
@@ -725,6 +808,8 @@ test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再
       if (!pid || pid.pid === before.pid) return false;
       return (await getStatus(config)).ready;
     }, 20000);
+  } catch (error) {
+    throw new Error(`${error.message}; watchdog: ${errors.join("; ")}`, { cause: error });
   } finally { await stopWatchdog(); }
   assert.equal(errors.length, 0, errors.join("; "));
   const recovered = await readPid(config);
@@ -734,158 +819,34 @@ test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再
   assert.equal((await probeBridge(config)).state, "offline");
 });
 
-test("冷启动保留 BOM、CRLF 与用户自管请求参数，只补审批规则", async (t) => {
-  const config = testConfig(await directoryFixture(t), await unusedPort());
-  const legacy = "\uFEFF" + renderConfigYaml(config) + [
-    "routing:", "    retry:", "        request-retry: 0 # 旧核心回写",
-    "requests:", "    proxy-url: direct", "",
-  ].join("\n");
-  await writeFile(config.configPath, legacy.replaceAll("\n", "\r\n"));
-  await ensureDataDir(config, noSystemProxy);
-  const updated = await readFile(config.configPath, "utf8");
-  assert.ok(updated.startsWith("\uFEFF"));
-  assert.doesNotMatch(updated, /(?<!\r)\n/);
-  for (const line of ["        request-retry: 0 # 旧核心回写", "    proxy-url: direct"]) assert.ok(updated.includes(line), line);
-  assert.ok(updated.includes("codex-auto-review"), "审批兼容规则仍随冷启动补齐");
-  const broken = legacy.replace("allow-remote: false", "allow-remote: true");
-  await writeFile(config.configPath, broken.replaceAll("\n", "\r\n"));
-  await assert.rejects(ensureDataDir(config, noSystemProxy), /allow-remote/);
-  assert.equal(await readFile(config.configPath, "utf8"), broken.replaceAll("\n", "\r\n"));
-});
-
-test("Windows 配置暂不允许替换时等待释放，随后保留并发编辑", {
-  skip: process.platform !== "win32", timeout: 15000,
-}, async (t) => {
-  const config = testConfig(await directoryFixture(t), await unusedPort());
-  const original = renderConfigYaml(config);
-  for (const editWhileLocked of [false, true]) {
-    await writeFile(config.configPath, original);
-    const holder = spawn(powerShell, ["-NoProfile", "-NonInteractive", "-Command",
-      "$ErrorActionPreference='Stop'; $f=[IO.File]::Open($env:QODER_TEST_CONFIG,'Open','ReadWrite','ReadWrite'); " +
-      "try {[Console]::WriteLine('locked'); if ([Console]::ReadLine() -eq 'edit') {" +
-      "$f.Position=$f.Length; $f.WriteByte(10); $f.Flush()}} finally {$f.Dispose()}"],
-    { env: { ...process.env, QODER_TEST_CONFIG: config.configPath }, windowsHide: true, stdio: ["pipe", "pipe", "inherit"] });
-    const exited = once(holder, "exit");
-    try {
-      assert.match(String((await once(holder.stdout, "data"))[0]), /locked/);
-      const result = ensureDataDir(config, noSystemProxy).then(() => null, error => error);
-      await waitUntil(async () => (await readdir(config.dataDir)).some(name => name.endsWith(".tmp")), 3000);
-      holder.stdin.end(editWhileLocked ? "edit\n" : "release\n");
-      const error = await result;
-      if (editWhileLocked) {
-        assert.match(error?.message ?? "", /本地配置已变化/);
-        assert.equal(await readFile(config.configPath, "utf8"), original + "\n");
-      } else {
-        assert.equal(error, null);
-        assert.equal(await readFile(config.configPath, "utf8"), ensureApprovalRouting(original));
-      }
-      assert.ok(!(await readdir(config.dataDir)).some(name => name.endsWith(".tmp")));
-    } finally {
-      holder.stdin.end();
-      await exited;
-    }
-  }
-});
-
-test("升级与冷启动不再改写请求参数；无效配置仍保护本地凭据", async (t) => {
-  const config = testConfig(await directoryFixture(t), await unusedPort());
-  const original = ("\uFEFF" + renderConfigYaml(config) + [
-    "routing:", "  retry:", "    request-retry: 7 # 用户自管", "    max-retry-interval: 5",
-    "streaming:", "  keepalive-seconds: 42", "",
-  ].join("\n")).replaceAll("\n", "\r\n");
-  await writeFile(config.configPath, original);
-  await mkdir(config.authDir);
-  const authFile = join(config.authDir, "account.json");
-  const secrets = join(config.dataDir, "launcher-secrets.json");
-  await writeFile(authFile, "untouched account");
-  await writeFile(secrets, "untouched local keys");
-  await ensureDataDir(config, noSystemProxy);
-  const updated = await readFile(config.configPath, "utf8");
-  assert.ok(updated.includes("request-retry: 7 # 用户自管"));
-  assert.ok(updated.includes("keepalive-seconds: 42"));
-  assert.ok(updated.includes("codex-auto-review"));
-  await ensureDataDir(config, noSystemProxy);
-  assert.equal(await readFile(config.configPath, "utf8"), updated, "重复冷启动必须幂等");
-  const invalid = original.replace("allow-remote: false", "allow-remote: true");
-  await writeFile(config.configPath, invalid);
-  await assert.rejects(ensureDataDir(config, noSystemProxy), /allow-remote/);
-  assert.equal(await readFile(config.configPath, "utf8"), invalid);
-  assert.equal(await readFile(authFile, "utf8"), "untouched account");
-  assert.equal(await readFile(secrets, "utf8"), "untouched local keys");
-});
-
-test("真实核心处理 Codex 的首字前过载、早期 EOF 和输出后断流", { skip: nativeCoreSkip, timeout: 60000 }, async (t) => {
-  const hits = new Map();
-  const upstream = await localServer(t, async (req, res) => {
-    const body = [];
-    for await (const chunk of req) body.push(chunk);
-    const { model } = JSON.parse(Buffer.concat(body));
-    hits.set(model, (hits.get(model) ?? 0) + 1);
-    if (model === "gpt-persistent-overload" || (model === "gpt-http-overload" && hits.get(model) <= 3)) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ error: { code: "server_is_overloaded", message: "server is overloaded" } }));
-    }
-    res.writeHead(200, { "Content-Type": "text/event-stream" });
-    const response = { id: "resp_fixture", object: "response", model, status: "in_progress", output: [] };
-    function emit(type, fields) {
-      res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`);
-    }
-    emit("response.created", { response });
-    emit("response.in_progress", { response });
-    if (model === "gpt-stream-overload" && hits.get(model) === 1) {
-      emit("response.metadata", { metadata: {} });
-      emit("error", { code: "server_is_overloaded", message: "server is overloaded" });
-    } else if (model === "gpt-mid-eof") {
-      emit("response.reasoning_summary_text.delta", { delta: "partial", output_index: 0, summary_index: 0, item_id: "i_1" });
-    } else if (model !== "gpt-early-eof") {
-      emit("response.completed", { response: { ...response, status: "completed" } });
-    }
-    res.end();
+test("Windows 托管脚本接受整数管理端口并发布核心身份", { skip: windowsOnly, timeout: 30000 }, async (t) => {
+  const { config, beforeCleanup } = await realBridgeFixture(t);
+  await ensureDataDir(config);
+  const child = spawn(powerShell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+    join(pluginRoot, "scripts", "proxy-supervisor.ps1"), "-OwnerPid", String(process.pid),
+    "-BinPath", config.binPath, "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
+    "-LogPath", join(config.dataDir, "bridge.log"), "-ManagementPort", String(config.managementPort)],
+  { windowsHide: true, env: magpieEnvironment(config), stdio: ["ignore", "pipe", "pipe"] });
+  let output = "", errors = "";
+  child.stdout.on("data", chunk => { output += chunk; });
+  child.stderr.on("data", chunk => { errors += chunk; });
+  beforeCleanup.push(async () => { if (child.exitCode === null) { const done = once(child, "exit"); child.kill(); await done; } });
+  await waitUntil(() => {
+    assert.equal(child.exitCode, null, errors);
+    return output.includes("\n");
   });
-  const root = await directoryFixture(t);
-  const config = testConfig(root, await unusedPort());
-  const binary = await copyTestCore(join(root, process.platform === "win32" ? "core.exe" : "core"));
-  const scenarios = [
-    ["gpt-ok", 200, 1], ["gpt-early-eof", 200, 1], ["gpt-mid-eof", 200, 1],
-    ["gpt-http-overload", 503, 1], ["gpt-stream-overload", 200, 1], ["gpt-persistent-overload", 503, 1],
-  ];
-  await ensureDataDir(config, noSystemProxy);
-  const defaults = await readFile(config.configPath, "utf8");
-  await writeFile(config.configPath, defaults.replace("disable-control-panel: false", "disable-control-panel: true") + [
-    "api-keys:", "  codex:", "    - name: fixture", `      base-url: "http://127.0.0.1:${upstream.address().port}"`,
-    "      proxy-url: direct", "      models:", ...scenarios.flatMap(([model]) => [`        - name: ${model}`, `          alias: ${model}`]),
-    "      keys:", "        - api-key: isolated-upstream", "          disable-codex-cloaking: true", "",
-  ].join("\n"));
-  const child = spawn(binary, ["-config", config.configPath], { cwd: root, windowsHide: true, stdio: "ignore" });
-  const exited = once(child, "exit");
-  try {
-    const headers = { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" };
-    await waitUntil(async () => {
-      if (child.exitCode !== null) throw new Error("隔离核心启动失败");
-      try { return (await fetch(config.endpoint + "/models", { headers, signal: AbortSignal.timeout(500) })).ok; }
-      catch { return false; }
-    });
-    for (const [model, status, calls] of scenarios) {
-      await t.test(model, async () => {
-        const res = await fetch(config.endpoint + "/responses", { method: "POST", headers,
-          body: JSON.stringify({ model, stream: true, input: "local test" }), signal: AbortSignal.timeout(15000) });
-        const body = await res.text();
-        assert.equal(res.status, status, body);
-        assert.equal(hits.get(model), calls);
-        if (model.endsWith("eof")) {
-          assert.match(body, /request_timeout/);
-          if (model === "gpt-mid-eof") assert.match(body, /response.reasoning_summary_text.delta/);
-          else assert.match(body, /response.created/);
-        } else if (status === 503 || model === "gpt-stream-overload") {
-          assert.match(body, /server_is_overloaded/);
-        } else {
-          assert.match(body, /"type":"response.completed"/);
-          assert.doesNotMatch(body, /server_is_overloaded/);
-        }
-      });
-    }
-  } finally {
-    if (child.exitCode === null) child.kill();
-    await exited;
-  }
+  const identity = await processIdentity(JSON.parse(output).pid);
+  assert.ok(identity.commandLine.includes(`--web=127.0.0.1:${config.managementPort}`));
+  assert.ok(!identity.commandLine.includes(config.configPath));
+});
+
+test("无效 Magpie JSON 设置不被改写", async (t) => {
+  const config = testConfig(await directoryFixture(t), await unusedPort());
+  await ensureDataDir(config);
+  const settings = JSON.parse(await readFile(config.configPath, "utf8"));
+  settings.lan = true;
+  const invalid = JSON.stringify(settings);
+  await writeFile(config.configPath, invalid);
+  await assert.rejects(ensureDataDir(config), /本机|局域网/);
+  assert.equal(await readFile(config.configPath, "utf8"), invalid);
 });

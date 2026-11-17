@@ -20,7 +20,7 @@ async function sha256File(path) {
 
 /**
  * 准备单个平台核心：已有且校验通过则跳过；否则在临时数据目录走生产 ensureCore
- * 下载（归档与二进制两级 SHA256），再原子复制到构建缓存并复核哈希。
+ * 下载 Magpie 原始二进制（下载与安装两级 SHA256），再原子复制到构建缓存并复核哈希。
  */
 async function fetchOne(key) {
   const [platform, arch] = key.split("-");
@@ -41,7 +41,7 @@ async function fetchOne(key) {
   const dataDir = await mkdtemp(join(tmpdir(), "qoder-core-build-"));
   try {
     const config = { dataDir, core: release, binPath: resolveCoreBinaryPath({ dataDir, platform, arch }) };
-    // 跨平台获取也走同一下载器：归档成员与权限按目标平台处理，不依赖宿主平台。
+    // 跨平台获取也走同一下载器：原始资产与权限按目标平台处理，不依赖宿主平台。
     const result = await ensureCore(config, { allowDownload: true });
     if (!result.available) throw new Error(result.reason || `${key} 核心准备失败。`);
     await mkdir(dirname(target), { recursive: true });
