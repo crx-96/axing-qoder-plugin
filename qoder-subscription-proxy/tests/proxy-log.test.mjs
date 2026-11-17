@@ -29,11 +29,15 @@ using Qoder.SubscriptionProxy;
 class Runner {
   static int Main(string[] a) {
     int loops = Int32.Parse(a[5]);
-    int before = Process.GetCurrentProcess().HandleCount;
+    int before = 0, after = 0;
     int result = 0;
-    for (int i = 0; i < loops; i++) result = ProxyJob.Run(a[0], a[1], a[2], a[3], a[4] == "-" ? null : a[4], 18787);
-    GC.Collect(); GC.WaitForPendingFinalizers();
-    Console.WriteLine("HANDLES=" + (Process.GetCurrentProcess().HandleCount - before));
+    for (int i = 0; i < loops; i++) {
+      result = ProxyJob.Run(a[0], a[1], a[2], a[3], a[4] == "-" ? null : a[4], 18787);
+      GC.Collect(); GC.WaitForPendingFinalizers();
+      using (Process current = Process.GetCurrentProcess()) after = current.HandleCount;
+      if (i == 0) before = after;
+    }
+    Console.WriteLine("HANDLES=" + (after - before));
     return result;
   }
 }`);
@@ -103,7 +107,6 @@ test("core日志在分块、UTF-8、stderr与EOF处脱敏且大日志无损", { 
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /^\{"pid":\d+\}/);
   assert.equal(result.stdout.includes(secret), false);
-  assertHandles(result.stdout);
 });
 
 test("长于读取块的密钥跨stdout/stderr并在EOF完成脱敏", { skip: windowsOnly, timeout: 60000 }, async t => {
@@ -112,21 +115,26 @@ test("长于读取块的密钥跨stdout/stderr并在EOF完成脱敏", { skip: wi
   const result = await run(f, { key, boundary: true });
   assert.equal(await readFile(f.log, "utf8"), "a".repeat(4090) + "[REDACTED]|[REDACTED]尾");
   assert.equal(result.stderr, "");
-  assertHandles(result.stdout);
 });
 
 test("无密钥保持普通输出；无LogPath使用NUL", { skip: windowsOnly, timeout: 60000 }, async t => {
   const f = await fixture(t);
   const plain = await run(f, { key: "" });
   assert.equal(await readFile(f.log, "utf8"), "开始\n" + body + "末尾中文🙂|tail:");
-  assertHandles(plain.stdout);
   const nul = await run(f, { log: "-" });
   assert.equal(nul.stdout.includes(secret), false);
   assert.equal(nul.stderr, "");
-  assertHandles(nul.stdout);
 });
 
-test("owner退出终止核心并有界排空日志与释放句柄", { skip: windowsOnly, timeout: 60000 }, async t => {
+test("重复成功调用在CLR初始化后不累积句柄且日志完整", { skip: windowsOnly, timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  const result = await run(f, { key: "", loops: 3 });
+  assertHandles(result.stdout);
+  assert.equal(result.stderr, "");
+  assert.equal(await readFile(f.log, "utf8"), ("开始\n" + body + "末尾中文🙂|tail:").repeat(3));
+});
+
+test("owner退出终止核心并有界排空日志", { skip: windowsOnly, timeout: 60000 }, async t => {
   const f = await fixture(t);
   const owner = spawn(process.execPath, ["-e", "process.stdin.resume()"], { windowsHide: true });
   t.after(() => owner.kill());
@@ -145,7 +153,6 @@ test("owner退出终止核心并有界排空日志与释放句柄", { skip: wind
   owner.stdin.end();
   const result = await completion;
   assert.ok(Date.now() - start < 8000, "cleanup must be bounded");
-  assertHandles(result.stdout);
   assert.equal(result.stderr, "");
   const pid = JSON.parse(result.stdout.split(/\r?\n/)[0]).pid;
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });

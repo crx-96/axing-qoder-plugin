@@ -281,8 +281,10 @@ test("POSIX 隔离原生核心并发 start/status/stop，暂停自动恢复且�
 test("POSIX 无账号 MCP 握手后后台自动就绪，两个真实 MCP 复用同一实例且非 owner EOF 不关闭桥", native, async (t) => {
   const f = await fixture(t);
   const owner = await mcpClient(f);
-  await waitUntil(async () => (await getStatus(f.config)).ready, "后台无需工具自动启动", 30000);
-  const status = await getStatus(f.config);
+  const status = await waitUntil(async () => {
+    const status = await getStatus(f.config);
+    return status.ready && status;
+  }, "后台无需工具自动启动", 30000);
   assert.equal(status.ready, true, "后台必须自动启动，不能靠 bridge_start 补启动");
   const before = await assertIdentity(f.config);
   const borrower = await mcpClient(f);

@@ -325,16 +325,19 @@ for (const failure of ['missing', 'platform', 'file', 'cross-platform', 'hash', 
   });
 }
 
-test('prepare：拒绝核心缓存目录链接并清理副本', { skip: shellSkip || (process.platform === 'win32' ? '真实 POSIX 验证链接' : false) }, async t => {
+test('prepare：拒绝核心缓存目录链接并清理副本', { skip: shellSkip }, async t => {
   const fixture = await sourceFixture(t);
-  const build = join(fixture.plugin, '.core-build', `${process.platform}-${process.arch}`);
+  const platform = process.platform === 'win32' ? 'linux-x64' : `${process.platform}-${process.arch}`;
+  const build = join(fixture.plugin, '.core-build', platform);
   const outside = join(fixture.directory, 'external-core');
   await mkdir(outside);
+  await copyFile(join(build, 'magpie'), join(outside, 'magpie'));
+  const before = await snapshot(outside);
   await rm(build, { recursive: true });
-  await symlink(outside, build);
-  await assert.rejects(runShell(fixture.prepare, [fixture.target]), error => /拒绝符号链接/.test(error.stderr));
+  await symlink(outside, build, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(runShell(fixture.prepare, [posixPath(fixture.target)]), error => /拒绝符号链接/.test(error.stderr));
   await assert.rejects(access(fixture.target), { code: 'ENOENT' });
-  assert.deepEqual(await readdir(outside), []);
+  assert.deepEqual(await snapshot(outside), before);
 });
 
 test("prepare：拒绝重复目标（包括空目录）而且保留已有目标内容", { skip: shellSkip }, async (t) => {
