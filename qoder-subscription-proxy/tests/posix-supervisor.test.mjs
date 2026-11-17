@@ -93,6 +93,8 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
   await writeFile(config.configPath, "isolated fake configuration; no credentials\n");
   await writeFile(config.binPath, `
     import { writeFileSync, existsSync } from 'node:fs';
+    ${ignoreTerm ? "process.on('SIGTERM',()=>{});" : "process.on('SIGTERM',()=>{writeFileSync('term-seen','yes');process.exit(0)});"}
+    setInterval(()=>{if(existsSync(${JSON.stringify(trigger)}))process.exit(0)},20);
     writeFileSync(${JSON.stringify(observedPath)}, JSON.stringify({
       pid:process.pid, cwd:process.cwd(), args:process.argv.slice(2),
       configHome:process.env.XDG_CONFIG_HOME, address:process.env.MAGPIE_ADDR,
@@ -101,8 +103,6 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     console.log('fake-core stdout'); console.error('fake-core stderr');
     process.stdout.write('stdout-key=' + process.env.MAGPIE_WEB_KEY + '\\n');
     process.stderr.write('stderr-key=' + process.env.MAGPIE_WEB_KEY + '\\n');
-    ${ignoreTerm ? "process.on('SIGTERM',()=>{});" : "process.on('SIGTERM',()=>{writeFileSync('term-seen','yes');process.exit(0)});"}
-    setInterval(()=>{if(existsSync(${JSON.stringify(trigger)}))process.exit(0)},20);
   `);
   const guardianPath = join(directory, "测试 guardian.mjs");
   const guardianPidPath = join(dataDir, "guardian.pid");
