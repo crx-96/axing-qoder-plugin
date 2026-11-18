@@ -291,7 +291,12 @@ test("POSIX 无账号 MCP 握手后后台自动就绪，两个真实 MCP 复用�
   const reused = await borrower.call("bridge_start");
   assert.equal(reused.started, false);
   assert.equal(reused.ready, true);
-  assert.equal((await borrower.call("bridge_status")).ready, true);
+  for (let sample = 0; sample < 5; sample++) {
+    for (const client of [owner, borrower]) {
+      const status = await client.call("bridge_status");
+      assert.equal(status.ready, true, JSON.stringify(status));
+    }
+  }
   await borrower.endInput();
   assert.equal((await owner.call("bridge_status")).ready, true);
   assert.deepEqual(await readPid(f.config), before);

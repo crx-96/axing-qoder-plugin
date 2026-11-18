@@ -9,8 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 const execute = promisify(execFile);
 
 /** 固定错误不包含命令行、端口表或凭据。 */
-function unverified() {
-  const safeMessage = "本机代理未就绪或无法确认本次回环连接由插件核心接收，未发送凭据。";
+function unverified(stage = "连接校验") {
+  const safeMessage = `本机代理未就绪或无法确认本次回环连接由插件核心接收，未发送凭据。（${stage}）`;
   return Object.assign(new Error(safeMessage), { code: "BRIDGE_NOT_READY", safeMessage });
 }
 
@@ -62,6 +62,7 @@ export async function connectOwned(config, identify, signal) {
   const active = signal ? AbortSignal.any([signal, deadline]) : deadline;
   active.throwIfAborted();
   const socket = createConnection({ host: config.host, port: config.port, family: 4 });
+  let stage = "TCP 连接建立";
   // net 的 signal 会在之后到期并销毁长请求；仅在建连和验证阶段挂自己的取消监听。
   let rejectVerification;
   const cancel = () => { socket.destroy(); rejectVerification?.(unverified()); };
@@ -75,10 +76,12 @@ export async function connectOwned(config, identify, signal) {
     });
     const verify = async () => {
       active.throwIfAborted();
+      stage = "托管进程身份";
       const id = await identify();
       active.throwIfAborted();
       if (!Number.isSafeInteger(id?.pid) || id.pid <= 0 || id.pid > 0x7fffffff) throw unverified();
       const original = { ...id };
+      stage = "内核连接归属";
       let owned;
       do {
         active.throwIfAborted();
@@ -89,7 +92,8 @@ export async function connectOwned(config, identify, signal) {
       active.throwIfAborted();
       if (!owned || socket.destroyed) throw unverified();
       // 等待期间记录可能被另一会话替换；同 PID 不能代替完整实例身份。
-      if (["linux", "darwin"].includes(process.platform) && !isDeepStrictEqual(original, await identify())) throw unverified();
+      stage = "托管身份复核";
+      if (!isDeepStrictEqual(original, await identify())) throw unverified();
       active.throwIfAborted();
       if (socket.destroyed) throw unverified();
     };
@@ -99,7 +103,7 @@ export async function connectOwned(config, identify, signal) {
   } catch {
     socket.destroy();
     signal?.throwIfAborted();
-    throw unverified();
+    throw unverified(deadline.aborted ? `校验超时：${stage}` : stage);
   } finally {
     active.removeEventListener("abort", cancel);
   }

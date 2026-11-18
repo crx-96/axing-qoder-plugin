@@ -21,19 +21,19 @@ async function linuxFixture(t, inspect) {
   return import(`data:text/javascript;base64,${Buffer.from('const process = { platform: "linux" };\n' + source).toString("base64")}`);
 }
 
-async function darwinFixture(t, execute) {
-  const key = `ownedHttpDarwinTest${Math.random()}`;
+async function commandFixture(t, platform, execute) {
+  const key = `ownedHttpCommandTest${Math.random()}`;
   globalThis[key] = execute;
   t.after(() => { delete globalThis[key]; });
   const source = (await readFile(new URL("../server/owned-http.mjs", import.meta.url), "utf8"))
     .replace("const execute = promisify(execFile);", `const execute = globalThis[${JSON.stringify(key)}];`);
-  return import(`data:text/javascript;base64,${Buffer.from('const process = { platform: "darwin" };\n' + source).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(`const process = { platform: ${JSON.stringify(platform)}, env: globalThis.process.env };\n` + source).toString("base64")}`);
 }
 
 async function darwinPendingAccept(t, { readyAfter = 3, listener = true, failure, inspect = () => {} } = {}) {
   const f = await fixture(t);
   let reads = 0;
-  const module = await darwinFixture(t, async (program, args, options) => {
+  const module = await commandFixture(t, "darwin", async (program, args, options) => {
     assert.equal(program, "/usr/sbin/lsof");
     assert.deepEqual(args, ["-nP", "-a", "-p", String(process.pid), "-iTCP", "-F", "n"]);
     assert.equal(options.timeout, 4000);
@@ -50,6 +50,17 @@ async function darwinPendingAccept(t, { readyAfter = 3, listener = true, failure
     return { stdout: rows.join("\n") + "\n" };
   });
   return { ...f, connect: module.connectOwned, reads: () => reads };
+}
+
+async function windowsConnection(t) {
+  const f = await fixture(t);
+  const module = await commandFixture(t, "win32", async (program, args) => {
+    assert.match(program, /netstat\.exe$/);
+    assert.deepEqual(args, ["-ano", "-p", "TCP"]);
+    if (!f.connections.length) await once(f.server, "connection");
+    return { stdout: `  TCP    127.0.0.1:${f.config.port}    127.0.0.1:${f.connections[0].socket.remotePort}    ESTABLISHED    ${process.pid}\r\n` };
+  });
+  return { ...f, connect: module.connectOwned };
 }
 
 function procRows(serverPort, clientPort, inode) {
@@ -114,7 +125,12 @@ test("Darwin accept 延迟时等待同一连接进入 lsof，监听端点不代�
 for (const failure of [undefined, "EACCES", 1]) {
   test(`Darwin 缺少目标监听端点或 lsof 失败不得等待或发送凭据：${failure ?? "unrelated"}`, async (t) => {
     const f = await darwinPendingAccept(t, { listener: false, failure });
-    await assert.rejects(f.connect(f.config, async () => ({ pid: process.pid })), { code: "BRIDGE_NOT_READY" });
+    await assert.rejects(f.connect(f.config, async () => ({ pid: process.pid })), error => {
+      assert.equal(error.code, "BRIDGE_NOT_READY");
+      assert.match(error.safeMessage, /内核连接归属/);
+      assert.doesNotMatch(error.safeMessage, /private lsof diagnostics/);
+      return true;
+    });
     assert.equal(f.reads(), 1);
     await f.connections[0].closed;
     assert.equal(f.connections[0].bytes, 0);
@@ -143,6 +159,16 @@ for (const mode of ["cancel", "deadline", "identity"]) {
     assert.equal(f.requests.length, 0);
   });
 }
+
+test("Windows netstat 校验后必须复核完整身份，不能只信任同一 PID", async (t) => {
+  const f = await windowsConnection(t);
+  let identities = 0;
+  await assert.rejects(f.connect(f.config, async () => ({
+    pid: process.pid, creationDate: ++identities === 1 ? "original" : "replaced",
+  })), { code: "BRIDGE_NOT_READY" });
+  await f.connections[0].closed;
+  assert.equal(f.connections[0].bytes, 0);
+});
 
 test("Darwin 已接收连接也必须复核完整身份，不能只信任同一 PID", async (t) => {
   const f = await darwinPendingAccept(t, { readyAfter: 1 });
@@ -197,7 +223,7 @@ for (const mode of ["cancel", "deadline", "identity"]) {
   });
 }
 
-for (const [platform, prepare] of [["Linux", pendingAccept], ["Darwin", darwinPendingAccept]]) {
+for (const [platform, prepare] of [["Linux", pendingAccept], ["Darwin", darwinPendingAccept], ["Windows", windowsConnection]]) {
   test(`${platform} 等待结束后身份复核挂起仍可取消，且复核晚返回不能授权`, { timeout: 3000 }, async (t) => {
     const f = await prepare(t);
     const controller = new AbortController();
@@ -250,7 +276,7 @@ test("Darwin 原生 lsof 在 accept 前仅有监听端点，恢复接收后验�
     await delay(10);
   }
   let snapshots = 0;
-  const module = await darwinFixture(t, async (...args) => {
+  const module = await commandFixture(t, "darwin", async (...args) => {
     const result = await execute(...args);
     if (++snapshots === 1) {
       const endpoints = result.stdout.split("\n");

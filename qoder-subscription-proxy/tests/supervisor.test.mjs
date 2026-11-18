@@ -670,8 +670,12 @@ test("并发 ensureRunning 只启动一个实例，两个真实 MCP 子进程复
   const reused = await Promise.all([first.call("bridge_start"), second.call("bridge_start")]);
   assert.ok(reused.every((entry) => !entry.started && entry.ready));
   assert.equal((await readPid(config)).pid, before.pid);
-  assert.equal((await first.call("bridge_status")).ready, true);
-  assert.equal((await second.call("bridge_status")).ready, true);
+  for (let sample = 0; sample < 5; sample++) {
+    const firstStatus = await first.call("bridge_status");
+    const secondStatus = await second.call("bridge_status");
+    assert.equal(firstStatus.ready, true, JSON.stringify(firstStatus));
+    assert.equal(secondStatus.ready, true, JSON.stringify(secondStatus));
+  }
   first.child.stdin.end();
   second.child.stdin.end();
   await waitUntil(() => first.child.exitCode !== null && second.child.exitCode !== null, 10000);
