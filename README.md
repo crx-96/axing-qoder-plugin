@@ -6,15 +6,15 @@
 
 ## 下载与安装
 
-当前源码版本为 **1.1.2**，固定使用 **Magpie CLI v0.1.4403**。本地构建产物位于 `dist/`；已发布资产以 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 实际列表为准。以下说明不代表本版本已发布、已安装验收或已通过五平台实机测试。
+当前源码版本为 **1.1.3**，固定使用 **Magpie CLI v0.1.4403**。本地构建产物位于 `dist/`；已发布资产以 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 实际列表为准。以下说明不代表本版本已发布、已安装验收或已通过五平台实机测试。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.1.2-win32-x64.zip` |
-| macOS x64 | `qoder-subscription-proxy-v1.1.2-darwin-x64.zip` |
-| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.1.2-darwin-arm64.zip` |
-| Linux x64 | `qoder-subscription-proxy-v1.1.2-linux-x64.zip` |
-| Linux ARM64 | `qoder-subscription-proxy-v1.1.2-linux-arm64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.1.3-win32-x64.zip` |
+| macOS x64 | `qoder-subscription-proxy-v1.1.3-darwin-x64.zip` |
+| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.1.3-darwin-arm64.zip` |
+| Linux x64 | `qoder-subscription-proxy-v1.1.3-linux-x64.zip` |
+| Linux ARM64 | `qoder-subscription-proxy-v1.1.3-linux-arm64.zip` |
 
 每个平台 ZIP 内置本平台的原始 Magpie CLI 核心；安装核心无需联网，不编译 Rust。授权、模型调用及用户主动安装的可选依赖仍可能需要网络。
 
@@ -33,7 +33,7 @@
 ```sh
 mkdir dist
 node qoder-subscription-proxy/scripts/fetch-core.mjs win32-x64
-node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.1.2-win32-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.1.3-win32-x64.zip
 ```
 
 其他平台使用 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64`。`fetch-core.mjs all` 可准备五平台固定原始 CLI 资产；来源、路径与 SHA256 以 [`server/bin/platforms.json`](qoder-subscription-proxy/server/bin/platforms.json) 为准。核心缓存位于 `qoder-subscription-proxy/.core-build/<platform>/`，不要提交缓存或安装 ZIP。

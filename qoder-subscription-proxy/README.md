@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.1.2
+# qoder订阅代理 · 1.1.3
 
 面向 Qoder Desktop 的第三方本机代理，固定使用 **Magpie CLI v0.1.4403**。模型 API、服务商适配、原生 Web 管理和模型组路由来自 Magpie；插件负责 MCP、生命周期、私有数据隔离与本地生图交付。
 
@@ -10,7 +10,7 @@
 
 | 平台 | 包名 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.1.2-win32-x64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.1.3-win32-x64.zip` |
 | macOS x64 / arm64 | 对应 `darwin-x64` / `darwin-arm64` 后缀 |
 | Linux x64 / arm64 | 对应 `linux-x64` / `linux-arm64` 后缀 |
 
