@@ -349,7 +349,7 @@ test("下载产物为硬链接时拒绝发布，不修改链接源文件", async
 test("固定 Magpie 来源、平台命名、摘要和随包路径不可绕过", () => {
   for (const override of [
     { archive: "magpie-cli-linux-amd64.tar.gz" },
-    { url: "http://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-linux-amd64" },
+    { url: "http://github.com/yetone/magpie/releases/download/v0.1.4403/magpie-cli-linux-amd64" },
     { path: "../magpie" }, { path: "/magpie" }, { path: "linux-x64/other" },
     { archiveSha256: "z".repeat(64) },
   ]) {

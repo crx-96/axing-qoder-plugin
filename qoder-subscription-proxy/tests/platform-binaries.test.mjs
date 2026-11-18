@@ -13,20 +13,20 @@ const binRoot = join(pluginRoot, "server", "bin");
 const metadata = JSON.parse(await readFile(join(binRoot, "platforms.json"), "utf-8"));
 const expected = {
   "win32-x64": { path: "magpie.exe", archive: "magpie-cli-windows-amd64.exe",
-    sha256: "9b7b1dcd64413a13c75c162c53367fde312da9d2c0df3caffa616e7c1a4aa43c", size: 94537728 },
+    sha256: "7396312db1176e65ffcae778f6becb2117ed2c2db933ccf3b203e1486c2a917c", size: 95690752 },
   "darwin-x64": { path: "darwin-x64/magpie", archive: "magpie-cli-darwin-amd64",
-    sha256: "43d83512ac84bfbda41e4e1bf1b2d932d281d43c6a96e1a516b670e12e83080e", size: 93795184 },
+    sha256: "838ac92e6a4dea116a08782c3864d6ccd2fd594f39d4a8c4143522cd7e335196", size: 94947200 },
   "darwin-arm64": { path: "darwin-arm64/magpie", archive: "magpie-cli-darwin-arm64",
-    sha256: "2d77eeb55b9fe207e7a6b27efde2aeba264be9aad1bbcb5f8b997bb45eb9db7b", size: 87084802 },
+    sha256: "1fab1600640f241f0b9bfe5c57aafaa16eba579f892471a21eb8f12b2c8e2f8c", size: 88117986 },
   "linux-x64": { path: "linux-x64/magpie", archive: "magpie-cli-linux-amd64",
-    sha256: "adb1fef9af35ee3b27d06960f41b124c04a2f1f116751e429344c595451a564f", size: 92315810 },
+    sha256: "3c4a44b8ae4b4a20a27018a327804fcc89d5bdb3ed320974d4dbc11d804fc49f", size: 93450402 },
   "linux-arm64": { path: "linux-arm64/magpie", archive: "magpie-cli-linux-arm64",
-    sha256: "07aa97614a1f9aa20d4d2acf1cbe261dae9c3de224f2ecb8d5fd5250dd719815", size: 85000354 },
+    sha256: "c7974838af7650ab3afc1e02ea67fdef5099fc2e58f26841b58392d39ba260b9", size: 86048930 },
 };
 
-test("分发清单固定 Magpie v0.1.4330 五平台，源码不携带二进制或旧 YAML", async () => {
+test("分发清单固定 Magpie v0.1.4403 五平台，源码不携带二进制或旧 YAML", async () => {
   assert.equal(metadata.upstream, "yetone/magpie");
-  assert.equal(metadata.version, "v0.1.4330");
+  assert.equal(metadata.version, "v0.1.4403");
   assert.deepEqual(Object.keys(metadata.platforms).sort(), Object.keys(expected).sort());
   const entries = await readdir(binRoot, { withFileTypes: true });
   assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
@@ -69,13 +69,13 @@ for (const [key, pinned] of Object.entries(expected)) {
       assert.equal(entry[field], pinned.sha256, `${key}.${field}`);
       assert.equal(release[field], pinned.sha256);
     }
-    assert.equal(entry.url, `https://github.com/yetone/magpie/releases/download/v0.1.4330/${pinned.archive}`);
+    assert.equal(entry.url, `https://github.com/yetone/magpie/releases/download/v0.1.4403/${pinned.archive}`);
     assert.equal(release.url, entry.url);
     assert.doesNotMatch(entry.archive, /\.(zip|gz)$/);
     assert.equal(new Set(Object.values(metadata.platforms).map((item) => item.path)).size, 5);
     const dataDir = join(tmpdir(), "isolated-platform-path-check");
     assert.equal(resolveCoreBinaryPath({ dataDir, platform, arch }),
-      join(dataDir, "runtimes", "v0.1.4330", key, basename(pinned.path)));
+      join(dataDir, "runtimes", "v0.1.4403", key, basename(pinned.path)));
     if (platform !== "win32") assert.equal(entry.mode, "0755");
   });
 }

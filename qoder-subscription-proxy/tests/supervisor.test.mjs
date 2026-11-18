@@ -24,7 +24,7 @@ const processModuleUrl = new URL("../server/supervisor.mjs", import.meta.url).hr
 const execFileAsync = promisify(execFile);
 const windowsOnly = process.platform !== "win32" ? "仅在 Windows 验证进程身份与隔离 exe" : nativeCoreSkip;
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-const signature = { name: "magpie", version: "0.1.4330" };
+const signature = { name: "magpie", version: "0.1.4403" };
 
 function testConfig(directory, port = 1) {
   assert.ok(![8787, 19787].includes(port), "禁止访问旧桥或插件默认端口");

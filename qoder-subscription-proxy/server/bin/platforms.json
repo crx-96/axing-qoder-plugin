@@ -1,45 +1,45 @@
 {
   "upstream": "yetone/magpie",
-  "version": "v0.1.4330",
+  "version": "v0.1.4403",
   "platforms": {
     "win32-x64": {
       "path": "magpie.exe",
-      "binarySha256": "9b7b1dcd64413a13c75c162c53367fde312da9d2c0df3caffa616e7c1a4aa43c",
+      "binarySha256": "7396312db1176e65ffcae778f6becb2117ed2c2db933ccf3b203e1486c2a917c",
       "archive": "magpie-cli-windows-amd64.exe",
-      "archiveSha256": "9b7b1dcd64413a13c75c162c53367fde312da9d2c0df3caffa616e7c1a4aa43c",
-      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-windows-amd64.exe"
+      "archiveSha256": "7396312db1176e65ffcae778f6becb2117ed2c2db933ccf3b203e1486c2a917c",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4403/magpie-cli-windows-amd64.exe"
     },
     "darwin-x64": {
       "path": "darwin-x64/magpie",
       "mode": "0755",
-      "binarySha256": "43d83512ac84bfbda41e4e1bf1b2d932d281d43c6a96e1a516b670e12e83080e",
+      "binarySha256": "838ac92e6a4dea116a08782c3864d6ccd2fd594f39d4a8c4143522cd7e335196",
       "archive": "magpie-cli-darwin-amd64",
-      "archiveSha256": "43d83512ac84bfbda41e4e1bf1b2d932d281d43c6a96e1a516b670e12e83080e",
-      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-darwin-amd64"
+      "archiveSha256": "838ac92e6a4dea116a08782c3864d6ccd2fd594f39d4a8c4143522cd7e335196",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4403/magpie-cli-darwin-amd64"
     },
     "darwin-arm64": {
       "path": "darwin-arm64/magpie",
       "mode": "0755",
-      "binarySha256": "2d77eeb55b9fe207e7a6b27efde2aeba264be9aad1bbcb5f8b997bb45eb9db7b",
+      "binarySha256": "1fab1600640f241f0b9bfe5c57aafaa16eba579f892471a21eb8f12b2c8e2f8c",
       "archive": "magpie-cli-darwin-arm64",
-      "archiveSha256": "2d77eeb55b9fe207e7a6b27efde2aeba264be9aad1bbcb5f8b997bb45eb9db7b",
-      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-darwin-arm64"
+      "archiveSha256": "1fab1600640f241f0b9bfe5c57aafaa16eba579f892471a21eb8f12b2c8e2f8c",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4403/magpie-cli-darwin-arm64"
     },
     "linux-x64": {
       "path": "linux-x64/magpie",
       "mode": "0755",
-      "binarySha256": "adb1fef9af35ee3b27d06960f41b124c04a2f1f116751e429344c595451a564f",
+      "binarySha256": "3c4a44b8ae4b4a20a27018a327804fcc89d5bdb3ed320974d4dbc11d804fc49f",
       "archive": "magpie-cli-linux-amd64",
-      "archiveSha256": "adb1fef9af35ee3b27d06960f41b124c04a2f1f116751e429344c595451a564f",
-      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-linux-amd64"
+      "archiveSha256": "3c4a44b8ae4b4a20a27018a327804fcc89d5bdb3ed320974d4dbc11d804fc49f",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4403/magpie-cli-linux-amd64"
     },
     "linux-arm64": {
       "path": "linux-arm64/magpie",
       "mode": "0755",
-      "binarySha256": "07aa97614a1f9aa20d4d2acf1cbe261dae9c3de224f2ecb8d5fd5250dd719815",
+      "binarySha256": "c7974838af7650ab3afc1e02ea67fdef5099fc2e58f26841b58392d39ba260b9",
       "archive": "magpie-cli-linux-arm64",
-      "archiveSha256": "07aa97614a1f9aa20d4d2acf1cbe261dae9c3de224f2ecb8d5fd5250dd719815",
-      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4330/magpie-cli-linux-arm64"
+      "archiveSha256": "c7974838af7650ab3afc1e02ea67fdef5099fc2e58f26841b58392d39ba260b9",
+      "url": "https://github.com/yetone/magpie/releases/download/v0.1.4403/magpie-cli-linux-arm64"
     }
   }
 }
