@@ -6,15 +6,15 @@
 
 ## 下载与安装
 
-当前源码版本为 **1.1.3**，固定使用 **Magpie CLI v0.1.4403**。本地构建产物位于 `dist/`；已发布资产以 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 实际列表为准。以下说明不代表本版本已发布、已安装验收或已通过五平台实机测试。
+当前源码版本为 **1.1.4**，固定使用 **Magpie CLI v0.1.4403**。本地构建产物位于 `dist/`；已发布资产以 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases) 实际列表为准。以下说明不代表本版本已发布、已安装验收或已通过五平台实机测试。
 
 | 系统 | 安装包 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.1.3-win32-x64.zip` |
-| macOS x64 | `qoder-subscription-proxy-v1.1.3-darwin-x64.zip` |
-| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.1.3-darwin-arm64.zip` |
-| Linux x64 | `qoder-subscription-proxy-v1.1.3-linux-x64.zip` |
-| Linux ARM64 | `qoder-subscription-proxy-v1.1.3-linux-arm64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.1.4-win32-x64.zip` |
+| macOS x64 | `qoder-subscription-proxy-v1.1.4-darwin-x64.zip` |
+| macOS ARM64（Apple Silicon） | `qoder-subscription-proxy-v1.1.4-darwin-arm64.zip` |
+| Linux x64 | `qoder-subscription-proxy-v1.1.4-linux-x64.zip` |
+| Linux ARM64 | `qoder-subscription-proxy-v1.1.4-linux-arm64.zip` |
 
 每个平台 ZIP 内置本平台的原始 Magpie CLI 核心；安装核心无需联网，不编译 Rust。授权、模型调用及用户主动安装的可选依赖仍可能需要网络。
 
@@ -22,9 +22,9 @@
 
 点击 **更多 → 订阅代理管理** 进入管理页，查看核心状态、显式启动、刷新状态或打开原生管理页。页面初始化仅调用 `bridge_status`，不自动启动核心或打开浏览器。账号登录通过页面的 **打开原生管理页（浏览器）** 按钮或 `bridge_open_management` 完成。
 
-模型入口仍为 `http://127.0.0.1:19787/v1`，Magpie 原生管理页使用 `19788`。原生 `/?k=长密钥` 登录后换取 HttpOnly cookie 并清理 URL；这不是一次性票据，固定版本的密钥 cookie 有效期为 400 天。不要分享登录链接、cookie 或密钥。
+模型入口仍为 `http://127.0.0.1:19787/v1`，Magpie 原生管理页使用 `19788`。打开原生管理页时，浏览器用本次核心启动的密钥换取 HttpOnly cookie。核心重启后旧链接与 cookie 都会失效，重新点击管理按钮即可登录。请保护登录链接、cookie 和本机凭据。
 
-升级前等待请求结束并调用 `bridge_stop`，导入新版、重连 MCP 后调用 `bridge_start`。需要在 Magpie 中本人重新登录；插件不读取、迁移或删除旧配置与授权数据，也不复制其他客户端账号或接管其他 Magpie 桌面配置。
+升级前等待请求结束并调用 `bridge_stop`。macOS 和 Linux 用户还需关闭共享该数据目录的旧版 MCP 会话，随后导入新版、重连并调用 `bridge_start`。需要在 Magpie 中本人重新登录；插件不读取、迁移或删除旧配置与授权数据，也不复制其他客户端账号或接管其他 Magpie 桌面配置。
 
 ## 从源码打包
 
@@ -33,7 +33,7 @@
 ```sh
 mkdir dist
 node qoder-subscription-proxy/scripts/fetch-core.mjs win32-x64
-node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.1.3-win32-x64.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-subscription-proxy-v1.1.4-win32-x64.zip
 ```
 
 其他平台使用 `darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64`。`fetch-core.mjs all` 可准备五平台固定原始 CLI 资产；来源、路径与 SHA256 以 [`server/bin/platforms.json`](qoder-subscription-proxy/server/bin/platforms.json) 为准。核心缓存位于 `qoder-subscription-proxy/.core-build/<platform>/`，不要提交缓存或安装 ZIP。
@@ -44,7 +44,7 @@ node qoder-subscription-proxy/scripts/package-plugin.mjs win32-x64 dist/qoder-su
 
 ## 发布 Release
 
-Release workflow 负责版本核对、准备固定核心、测试、打包及资产上传；不再构建 Rust 扩展。实际发布须独立执行并核验结果，源码说明与本地测试不等于已发布。分发清单、插件清单和 workflow 是构建事实来源。
+Release workflow 核对版本、准备固定核心、运行测试并打包，将五个平台的 ZIP 上传到草稿，核对远端资产后公开 Release。重跑已公开的版本只校验资产。实际发布须独立执行并核验结果，源码说明与本地测试不等于已发布。分发清单、插件清单和 workflow 是构建事实来源。
 
 ## 分发与安全边界
 

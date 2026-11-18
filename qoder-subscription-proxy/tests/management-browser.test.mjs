@@ -44,16 +44,21 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
     if (req.url === "/shell") { res.end(resource.text); return; }
     res.end(`<!doctype html><html><body style="margin:0"><iframe id="app" src="/shell" style="border:0;width:100vw;height:100vh;display:block"></iframe><script>
       const app=document.querySelector('#app');window.calls=[];window.failNext=false;window.data={ready:true};
+      window.handshakes=[];window.rpcErrors=[];
       window.notify=(method,params)=>app.contentWindow.postMessage({jsonrpc:'2.0',method,params},location.origin);
       window.addEventListener('message',event=>{
         if(event.source!==app.contentWindow||event.origin!==location.origin)return;
         const m=event.data,reply=result=>app.contentWindow.postMessage({jsonrpc:'2.0',id:m.id,result},location.origin);
-        if(m.method==='ui/initialize')reply({protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}},hostContext:{theme:'dark',displayMode:'fullscreen'}});
+        if(m.error)window.rpcErrors.push(m);
+        if(m.method==='ui/initialize')window.handshakes.push(()=>reply({protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}},hostContext:{theme:'dark',displayMode:'fullscreen'}}));
         else if(m.method==='ui/notifications/initialized')notify('ui/notifications/tool-result',{content:[]});
         else if(m.method==='tools/call'){
           const {name}=m.params;window.calls.push(m.params);
           if(window.failNext){window.failNext=false;reply({isError:true,content:[{type:'text',text:'打开失败 <img src=x onerror=alert(1)>'}]});return;}
-          if(name==='bridge_start')window.data.ready=true;
+          if(name==='bridge_start'){
+            window.finishStart=()=>{window.data={ready:true};reply({content:[]});};
+            return;
+          }
           reply({content:[{type:'text',text:JSON.stringify(name==='bridge_status'?window.data:{})}]});
         }
       });</script></body></html>`);
@@ -68,17 +73,45 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
   const exceptions = [];
   socket.addEventListener("message", event => { const m = JSON.parse(event.data); if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) exceptions.push(m.params); });
   await send("Runtime.enable");
-  const evaluate = async expression => (await send("Runtime.evaluate", { expression, returnByValue: true })).result.value;
+  const evaluate = async expression => {
+    const { result, exceptionDetails } = await send("Runtime.evaluate", { expression, returnByValue: true });
+    if (exceptionDetails) throw Error(exceptionDetails.exception?.description || exceptionDetails.text);
+    return result.value;
+  };
   const waitFor = async expression => {
     const deadline = Date.now() + 5000;
     while (!await evaluate(expression)) { if (Date.now() >= deadline) throw Error("页面状态未就绪"); await delay(50); }
   };
+  // 仅接管面板请求的定时器，保留 Chrome 原生的跨窗口消息和键盘事件调度。
+  await send('Page.enable');
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `if (location.pathname === '/shell') {
+    const timers = new Map(); let now = 0, next = 0;
+    window.setTimeout = (fn, ms) => { timers.set(++next, { fn, at: now + ms }); return next; };
+    window.clearTimeout = id => timers.delete(id);
+    window.advanceClock = ms => {
+      now += ms;
+      for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.fn(); }
+    };
+  }` });
   await send("Page.navigate", { url: `http://127.0.0.1:${host.address().port}/` });
   const doc = "document.querySelector('#app').contentDocument";
   const el = selector => `${doc}.querySelector(${JSON.stringify(selector)})`;
   const click = async selector => { await evaluate(`${el(selector)}.click()`); };
   const idle = () => waitFor(`!${el('#refresh')}.disabled`);
-  await waitFor(`${doc}?.querySelector('#refresh')?.disabled===false`);
+  const advance = ms => evaluate(`document.querySelector('#app').contentWindow.advanceClock(${ms})`);
+  await waitFor('window.handshakes?.length===1');
+  await advance(30_000);
+  assert.equal(await evaluate(`${el('#reconnect')}.hidden || ${el('#reconnect')}.disabled`), false);
+  assert.equal(await evaluate(`${el('#refresh')}.disabled`), true);
+  assert.match(await evaluate(`${el('#status')}.textContent`), /重新连接/);
+  assert.deepEqual(await evaluate('window.calls'), []);
+  await click('#reconnect');
+  await click('#reconnect');
+  await waitFor('window.handshakes.length===2');
+  await evaluate('window.handshakes[0]();window.handshakes[1]()');
+  await idle();
+  assert.equal(await evaluate(`${el('#reconnect')}.hidden`), true);
+  assert.deepEqual(await evaluate('window.rpcErrors'), []);
   assert.deepEqual(await evaluate('window.calls.map(c=>c.name)'), ['bridge_status']);
   assert.equal(await evaluate(`${el('#start')}.hidden`), true);
   assert.equal(await evaluate(`${doc}.querySelectorAll('form,select,input,textarea').length`), 0);
@@ -123,8 +156,19 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
   assert.equal(await evaluate(`${el('#start')}.hidden`), false);
   assert.match(await evaluate(`${el('#status')}.textContent`), /核心暂停/);
   assert.equal(await evaluate("window.calls.filter(c=>c.name==='bridge_start').length"), 0);
+  const beforeStart = await evaluate('window.calls.length');
   await click('#start');
+  await waitFor("typeof window.finishStart==='function'");
+  await advance(600_000);
+  assert.match(await evaluate(`${el('#status')}.textContent`), /正在启动/);
+  for (const selector of ['#open', '#refresh', '#start']) {
+    assert.equal(await evaluate(`${el(selector)}.disabled`), true);
+    await click(selector);
+  }
+  await evaluate('window.finishStart()');
   await idle();
+  assert.deepEqual(await evaluate(`window.calls.slice(${beforeStart}).map(c=>c.name)`), ['bridge_start', 'bridge_status']);
+  assert.match(await evaluate(`${el('#status')}.textContent`), /核心已就绪/);
   assert.equal(await evaluate(`${el('#start')}.hidden`), true);
   assert.equal(await evaluate("window.calls.filter(c=>c.name==='bridge_start').length"), 1);
   await send('Page.bringToFront');

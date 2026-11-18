@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  CONTROL_MESSAGE_LIMIT, createPosixControlMessage, queryPosixSupervisor, spawnPosixSupervisor,
+  CONTROL_MESSAGE_LIMIT, createPosixControlMessage, queryPosixSupervisor, spawnPosixSupervisor, validatePosixControlMessage,
 } from "../server/posix-supervisor.mjs";
 
 import { magpieArguments } from "../server/config.mjs";
@@ -112,6 +112,8 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     import {runCoreGuardian} from ${JSON.stringify(supervisorUrl)};
     writeFileSync(${JSON.stringify(guardianPidPath)},String(process.pid));
     ${announcement === "held" ? "process.stdout.write=()=>true;" : ""}
+    ${announcement === "legacy" ? `const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = line => { const value = JSON.parse(line); delete value.stopClosesLease; return write(JSON.stringify(value) + '\\n'); };` : ""}
     const config=${JSON.stringify(config)};
     process.exitCode=await runCoreGuardian(config,{
       spawnChild:(bin,args,options)=>spawn(process.execPath,[bin,...args],options)
@@ -165,6 +167,11 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     if (guardianPid) await waitUntil(() => exited(guardianPid));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
+  if (announcement === "legacy") {
+    await waitUntil(() => child.exitCode !== null);
+    guardianPid = Number(await readFile(guardianPidPath, "utf8"));
+    return { child, guardianPid, stdout: () => stdout };
+  }
   if (announcement !== "held") identity = await firstLine(child);
   const observed = await waitUntil(async () => {
     try { return JSON.parse(await readFile(observedPath, "utf8")); }
@@ -271,16 +278,47 @@ test("错误 token、instance、pid、路径或命令不得停止持有核心", 
   assert.equal((await queryPosixSupervisor(f.record, f.config)).pid, f.record.pid);
 });
 
-test("停止只在实际 exit 后响应，status 为 null，重复停止幂等", { timeout: 15000 }, async (t) => {
+test("旧 guardian 缺少 stop 回收能力时拒绝转发身份并关闭私有租约", { timeout: 15000 }, async t => {
+  const f = await fixture(t, { announcement: "legacy" });
+  assert.equal(f.child.exitCode, 1);
+  assert.equal(f.stdout(), "");
+  assert.equal(exited(f.guardianPid), true);
+});
+
+test("owner 租约仍打开时远程 stop 收到完整认证响应并回收两层托管器", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
+  assert.equal(f.record.stopClosesLease, true);
   const stopped = await queryPosixSupervisor(f.record, f.config, { stop: true });
   assert.equal(stopped.stopped, true);
   assert.equal(exited(f.record.pid), true);
-  assert.equal(await queryPosixSupervisor(f.record, f.config), null);
-  assert.deepEqual(await queryPosixSupervisor(f.record, f.config, { stop: true }), stopped);
-  await closeLease(f.child);
+  await waitUntil(() => f.child.exitCode !== null);
+  assert.equal(f.child.exitCode, 0);
+  assert.equal(exited(f.guardianPid), true);
   assert.equal(await queryPosixSupervisor(f.record, f.config), null);
   assert.equal(await queryPosixSupervisor(f.record, f.config, { stop: true }), null);
+});
+
+test("并发 stop 和 owner EOF 仍让已接入的请求各自收到完整签名响应", { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const request = createPosixControlMessage(f.record, f.config, {
+    direction: "request", nonce: randomBytes(32).toString("hex"), operation: "stop",
+  });
+  const socket = createConnection({ host: "127.0.0.1", port: f.record.controlPort });
+  t.after(() => socket.destroy());
+  await once(socket, "connect");
+  const chunks = [];
+  socket.on("data", chunk => chunks.push(chunk));
+  const ended = once(socket, "end");
+  socket.write(JSON.stringify(request));
+  assert.equal((await queryPosixSupervisor(f.record, f.config, { stop: true })).stopped, true);
+  f.child.stdin.end();
+  socket.write("\n");
+  await ended;
+  const response = JSON.parse(Buffer.concat(chunks));
+  validatePosixControlMessage(response, f.config, f.record, { direction: "response", nonce: request.nonce, operation: "stop" });
+  assert.equal(response.state, "stopped");
+  await waitUntil(() => f.child.exitCode !== null);
+  assert.equal(f.child.exitCode, 0);
 });
 
 test("owner stdin EOF 回收核心和 supervisor，未发布前 EOF 不遗留资源", { timeout: 15000 }, async (t) => {
@@ -328,7 +366,11 @@ test("核心自然退出可认证离线，supervisor 退出后的 stale 记录�
   await writeFile(f.trigger, "exit the isolated child");
   await waitUntil(() => exited(f.record.pid));
   await waitUntil(async () => await queryPosixSupervisor(f.record, f.config) === null);
-  await closeLease(f.child);
+  assert.equal(exited(f.guardianPid), false, "status 仍可认证自然退出的实例");
+  assert.equal((await queryPosixSupervisor(f.record, f.config, { stop: true })).stopped, true);
+  await waitUntil(() => f.child.exitCode !== null);
+  assert.equal(f.child.exitCode, 0);
+  assert.equal(exited(f.guardianPid), true);
   assert.equal(await queryPosixSupervisor(f.record, f.config), null);
 });
 

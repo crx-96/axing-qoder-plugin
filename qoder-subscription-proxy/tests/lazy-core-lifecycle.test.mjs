@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+
+import { ensureRunning, withLifecycleLock } from "../server/supervisor.mjs";
 
 const entry = fileURLToPath(new URL("../server/mcp-server.mjs", import.meta.url));
 
@@ -88,7 +90,12 @@ async function fixture(t, { failDownload = false, shortDownload = false } = {}) 
   function call(name, args = {}) { return request("tools/call", { name, arguments: args }); }
   const initialize = request("initialize", { protocolVersion: "2025-06-18" });
   return { child, exited, call, request, initialize, downloading, messages, env, attempts: () => attempts, errors: () => errors,
-    rejectDownloads: () => { failDownload = true; } };
+    cancel: (id) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }) + "\n"),
+    holdNextDownload: () => { failDownload = false; return once(proxy, "connect"); },
+    rejectDownloads: () => {
+      failDownload = true;
+      for (const socket of sockets) if (!socket.destroyed && !socket.writableEnded) socket.end("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+    } };
 }
 
 async function waitStatus(f, predicate) {
@@ -120,7 +127,7 @@ test("核心下载被阻塞时握手、工具发现、状态和ping均可用；�
   const start = f.call("bridge_start");
   assert.deepEqual((await f.request("ping").response).result, {});
   assert.equal(f.messages.has(start.id), false);
-  f.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: start.id } }) + "\n");
+  f.cancel(start.id);
   assert.equal((await start.response).result.isError, true);
   await waitStatus(f, (value) => value.core.state === "downloading");
   assert.equal(f.attempts(), 1, "取消显式等待不影响后台准备，也不能重复下载");
@@ -146,6 +153,60 @@ test("下载中主动停止会取消后台准备并保持MCP连接，显式启�
   assert.equal(f.attempts(), 2);
   await waitStatus(f, (value) => !value.autoRecoveryPaused && value.core.state === "error");
 });
+
+for (const joinBeforeCancel of [true, false]) {
+  test(`首次后台准备${joinBeforeCancel ? "持有共享任务" : "接续已取消任务"}时保留暂停`, { timeout: 5000 }, async t => {
+    const dataDir = await mkdtemp(join(tmpdir(), "cancelled-paused-"));
+    t.after(() => rm(dataDir, { recursive: true, force: true }));
+    const config = { dataDir, pausedPath: join(dataDir, "bridge.paused") };
+    await writeFile(config.pausedPath, "paused");
+    let background;
+    await withLifecycleLock(config, async () => {
+      const controller = new AbortController();
+      const first = ensureRunning(config, { signal: controller.signal });
+      const prepare = () => ensureRunning(config, { automatic: true, allowDownload: true });
+      if (joinBeforeCancel) background = prepare();
+      controller.abort();
+      if (!joinBeforeCancel) background = prepare();
+      await assert.rejects(first, { name: "AbortError" });
+    });
+    assert.match((await background).reason, /暂停/);
+    assert.equal(await readFile(config.pausedPath, "utf8"), "paused");
+  });
+}
+
+for (const last of ["download-error", "cancel", "stop", "EOF"]) {
+  test(`并发显式启动独立取消，首个退出后共享下载由剩余请求持有：${last}`, { timeout: 15000 }, async t => {
+    const f = await fixture(t, { failDownload: true });
+    await f.initialize.response;
+    await waitStatus(f, status => Boolean(status.startupError));
+    const downloading = f.holdNextDownload();
+    const first = f.call("bridge_start");
+    await downloading;
+    const second = f.call("bridge_start");
+    await f.request("ping").response;
+    f.cancel(first.id);
+    assert.match((await first.response).result.content[0].text, /取消/);
+    await waitStatus(f, status => status.core.state === "downloading");
+    assert.equal(f.messages.has(second.id), false);
+    if (last === "download-error") {
+      f.rejectDownloads();
+      assert.match((await second.response).result.content[0].text, /下载失败/);
+    } else if (last === "cancel") {
+      f.cancel(second.id);
+      assert.match((await second.response).result.content[0].text, /取消/);
+    } else if (last === "stop") {
+      assert.equal(JSON.parse((await f.call("bridge_stop").response).result.content[0].text).stopped, true);
+      assert.equal((await second.response).result.isError, true);
+      await waitStatus(f, status => status.autoRecoveryPaused);
+    } else {
+      f.child.stdin.end();
+      assert.equal((await f.exited)[0], 0, f.errors());
+    }
+    assert.equal(f.attempts(), 2, "一次后台失败和一次显式下载；并发调用不能重试");
+    await assertNoTemporaryCore(f.env.BRIDGE_DATA_DIR);
+  });
+}
 
 test("后台下载使用独立10分钟预算，超时保留MCP并清理临时文件（测试缩短计时）", { timeout: 10000 }, async (t) => {
   const f = await fixture(t, { shortDownload: true });

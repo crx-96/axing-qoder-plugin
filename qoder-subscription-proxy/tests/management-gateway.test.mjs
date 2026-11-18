@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../server/config.mjs";
-import { ensureRunning, shutdownOwnedBridges } from "../server/supervisor.mjs";
+import { ensureRunning, shutdownOwnedBridges, stopBridge } from "../server/supervisor.mjs";
 import { openManagement } from "../server/management-gateway.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 
@@ -24,17 +24,17 @@ test("管理按钮只向已核验原生端口交付登录链接，不返回密�
   const config = { managementPort: 21002, managementUrl: "http://127.0.0.1:21002/", mgmtKey: "a".repeat(64) };
   const calls = [];
   const result = await openManagement(config, {
-    connect: async (value, signal, port) => { assert.equal(value, config); assert.equal(port, 21002); calls.push("verify"); return { destroy() { calls.push("close"); } }; },
-    launchBrowser: async url => { calls.push("browser"); const target = new URL(url); assert.equal(target.origin, "http://127.0.0.1:21002"); assert.equal(target.searchParams.get("k"), config.mgmtKey); },
+    loginKey: async value => { assert.equal(value, config); calls.push("verify"); return "instance-only-key"; },
+    launchBrowser: async url => { calls.push("browser"); const target = new URL(url); assert.equal(target.origin, "http://127.0.0.1:21002"); assert.equal(target.searchParams.get("k"), "instance-only-key"); },
   });
   assert.equal(result, undefined);
-  assert.deepEqual(calls, ["verify", "close", "browser"]);
+  assert.deepEqual(calls, ["verify", "browser"]);
 });
 
 test("身份不可确认或请求取消时不开浏览器", async () => {
   let opened = false;
   const config = { managementPort: 1, managementUrl: "http://127.0.0.1:1/", mgmtKey: "a".repeat(64) };
-  await assert.rejects(openManagement(config, { connect: async () => { throw Error("not-owned"); }, launchBrowser: async () => { opened = true; } }));
+  await assert.rejects(openManagement(config, { loginKey: async () => { throw Error("not-owned"); }, launchBrowser: async () => { opened = true; } }));
   await assert.rejects(openManagement(config, { signal: AbortSignal.abort(), launchBrowser: async () => { opened = true; } }));
   assert.equal(opened, false);
 });
@@ -69,4 +69,14 @@ test("真实Magpie原生管理页认证、清除URL、错误密钥及跨来源�
     Cookie: cookie.split(";", 1)[0], Origin: "https://example.invalid", "Content-Type": "application/json",
   }, body: "{}" });
   assert.equal(cross.status, 403);
+  const firstKey = new URL(url).searchParams.get("k");
+  assert.ok(firstKey && firstKey !== config.mgmtKey);
+  assert.ok(!(await readFile(join(config.dataDir, "bridge.log"), "utf8")).includes(firstKey));
+  assert.equal((await stopBridge(config)).stopped, true);
+  assert.equal((await ensureRunning(config)).ready, true);
+  assert.equal((await request(url)).status, 401);
+  assert.equal((await request(config.managementUrl, { headers: { Cookie: cookie.split(";", 1)[0] } })).status, 401);
+  await openManagement(config, { launchBrowser: async value => { url = value; } });
+  assert.ok(firstKey !== new URL(url).searchParams.get("k"));
+  assert.ok([302, 303].includes((await request(url)).status));
 });

@@ -6,20 +6,21 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withLifecycleLock } from "./lifecycle-lock.mjs";
 export { withLifecycleLock };
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { promisify, isDeepStrictEqual } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { ensureMagpieConfig, magpieEnvironment } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
 import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
-/** 原生 Magpie 托管协议版本；旧 PID 记录不能用于发送认证请求。 */
-const RUNTIME_REVISION = "magpie-v1";
+/** POSIX v2 的已认证 stop 同时释放托管链。v1 guardian 只停止核心，须由其 owner 关闭租约。 */
+const RUNTIME_REVISION = process.platform === "win32" ? "magpie-win32-v2" : "magpie-posix-v2";
 
 const execFileAsync = promisify(execFile);
+/** 每个数据目录只登记一个启动任务，由本会话内的显式调用和首次后台准备共同持有。 */
 const inFlight = new Map();
-/** 仅取消本会话发起的启动任务；跨会话停止意图由 pausedPath 保留。 */
-const startControllers = new Map();
+/** 区分最后一个等待者离开与主动 stop：只有前者允许新到的调用在回滚完成后接续。 */
+const abandonedStart = new DOMException("所有启动请求均已取消", "AbortError");
 // 只保存当前 MCP 创建的 supervisor 句柄；退出时不能结束别的会话所拥有的代理。
 const supervisors = new Map();
 const supervisorScript = fileURLToPath(new URL("../scripts/proxy-supervisor.ps1", import.meta.url));
@@ -153,7 +154,7 @@ async function trackedProcess(config) {
         if (error.code === "ESRCH") return { record, identity: null, owned: false };
       }
     }
-    throw bridgeError("旧版本进程仍存在或无法确认已退出；请手动停止旧版本后重试，新版不会接管或按 PID 停止");
+    throw bridgeError("旧版本进程仍存在或无法确认已退出；请手动停止旧版本并关闭其 MCP 会话后重试，新版不会接管或按 PID 停止");
   }
   const identity = process.platform === "win32"
     ? await processIdentity(record.pid)
@@ -162,13 +163,33 @@ async function trackedProcess(config) {
   return { record, identity, owned: sameProcess(record, identity, config) };
 }
 
-/** 认证同一核心 PID；管理和模型端口不同，但不得放宽连接接收者归属验证。 */
-export function openCoreConnection(config, signal, targetPort = config.port) {
+function instanceWebKey(config, nonce) {
+  return createHmac("sha256", config.mgmtKey).update(`magpie-web:${nonce}`).digest("hex");
+}
+
+async function verifiedCoreSocket(config, signal, targetPort) {
   if (targetPort !== config.port && targetPort !== config.managementPort) throw bridgeError("目标端口不属于订阅桥");
-  return connectOwned({ ...config, port: targetPort }, async () => {
+  let managementNonce;
+  const socket = await connectOwned({ ...config, port: targetPort }, async () => {
     const tracked = await trackedProcess(config);
-    return tracked?.owned && tracked.record.runtimeRevision === RUNTIME_REVISION ? tracked.identity : null;
+    if (!tracked?.owned || tracked.record.runtimeRevision !== RUNTIME_REVISION) return null;
+    managementNonce = tracked.record.managementNonce;
+    return { ...tracked.identity, managementNonce };
   }, signal);
+  return { socket, managementNonce };
+}
+
+export async function openCoreConnection(config, signal, targetPort = config.port) {
+  return (await verifiedCoreSocket(config, signal, targetPort)).socket;
+}
+
+export async function getManagementLoginKey(config, signal) {
+  const { socket, managementNonce } = await verifiedCoreSocket(config, signal, config.managementPort);
+  socket.destroy();
+  if (typeof managementNonce !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(managementNonce)) {
+    throw bridgeError("当前核心缺少本次启动的管理凭据，请先停止并重新启动核心，再打开管理页。");
+  }
+  return instanceWebKey(config, managementNonce);
 }
 
 /** 只在认证过的同一条 socket 上发送模型请求，HTTP 层不得重连。 */
@@ -225,7 +246,10 @@ async function launch(config, signal) {
   await ensureDataDir(config);
   signal?.throwIfAborted();
   if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
-  const child = process.platform !== "win32" ? spawnPosixSupervisor(config) : spawn(powerShell, [
+  // 随实例轮换 Web 凭据；私有 PID 记录只需保存随机 nonce，供其他 MCP 会话打开同一实例。
+  const managementNonce = randomUUID();
+  const coreConfig = { ...config, mgmtKey: instanceWebKey(config, managementNonce) };
+  const child = process.platform !== "win32" ? spawnPosixSupervisor(coreConfig) : spawn(powerShell, [
     "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
     "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
     "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
@@ -233,7 +257,7 @@ async function launch(config, signal) {
   ], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
     // 核心通过环境读取模型监听地址、管理密钥及隔离目录，不继承宿主 Magpie 配置。
-    env: magpieEnvironment(config),
+    env: magpieEnvironment(coreConfig),
   });
   const owned = { child, config, identity: null };
   supervisors.set(config.dataDir, owned);
@@ -250,7 +274,7 @@ async function launch(config, signal) {
       const timer = setTimeout(() => finish(bridgeError("代理托管器启动超时")), 15000);
       const onExit = () => finish(bridgeError("代理托管器启动失败，请检查运行依赖与日志"));
       const onError = () => finish(bridgeError("无法启动代理托管器，请检查平台运行时与执行权限"));
-      const onAbort = () => finish(bridgeError("启动已取消，正在回收本次代理"));
+      const onAbort = () => finish(signal.reason);
       const onData = (chunk) => {
         buffer += chunk;
         if (Buffer.byteLength(buffer) > 8192) return finish(bridgeError("代理托管器响应无效"));
@@ -276,12 +300,15 @@ async function launch(config, signal) {
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
     });
+    if (process.platform !== "win32" && launched.stopClosesLease !== true) {
+      throw bridgeError("托管脚本版本不匹配，已取消启动；请从同一版本重新启动插件");
+    }
     const identity = process.platform === "win32"
       ? await processIdentity(launched.pid)
       : await queryPosixSupervisor({ ...launched, binPath: config.binPath, configPath: config.configPath }, config);
     if (!identity) throw bridgeError("代理在启动时退出，请检查 data/bridge.log");
     owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath,
-      managementPort: config.managementPort, runtimeRevision: RUNTIME_REVISION };
+      managementPort: config.managementPort, runtimeRevision: RUNTIME_REVISION, managementNonce };
     await savePid(config, owned.identity);
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
@@ -306,8 +333,8 @@ async function launch(config, signal) {
 /** 关闭本会话的启动任务和租约；只有已确认回收且记录未被替换时才清理 POSIX PID 文件。 */
 export async function shutdownOwnedBridges() {
   closing = true;
-  for (const controller of startControllers.values()) controller.abort();
-  await Promise.allSettled([...inFlight.values()]);
+  for (const task of inFlight.values()) task.controller.abort();
+  await Promise.allSettled(Array.from(inFlight.values(), (task) => task.work));
   // 只关闭本 MCP 持有的 Job 或租约；不按 PID 文件或进程名称清理其他会话。
   await Promise.all([...supervisors.values()].map(async ({ child, config, identity }) => {
     await closeSupervisor(child);
@@ -343,82 +370,138 @@ async function inspectRunning(config) {
   return null;
 }
 
-/** 等待已有启动时只取消本调用的等待，不取消另一调用拥有的下载。 */
-async function waitForStart(work, signal) {
-  signal?.throwIfAborted();
-  if (!signal) return work;
+/** 同步撤销本调用的持有权。最后一个等待者须等下载、启动回滚和锁释放后才返回。 */
+async function waitForStart(task, waiter, signal) {
+  task.waiters.add(waiter);
   let onAbort;
   try {
-    return await Promise.race([work, new Promise((_, reject) => {
-      onAbort = () => reject(signal.reason);
+    if (!signal) return await task.work;
+    const cancelled = new Promise((_, reject) => {
+      onAbort = () => {
+        task.waiters.delete(waiter);
+        if (task.waiters.size) reject(signal.reason);
+        else task.controller.abort(abandonedStart);
+      };
       signal.addEventListener("abort", onAbort, { once: true });
-    })]);
-  } finally { signal.removeEventListener("abort", onAbort); }
+    });
+    const result = await Promise.race([task.work, cancelled]);
+    signal.throwIfAborted();
+    return result;
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+    task.waiters.delete(waiter);
+  }
 }
 
-/**
- * 启动或复用代理，网络准备不占生命周期锁；暂停和进程归属在下载前后都要核对。
- * automatic=true 保留用户暂停；allowDownload 默认只对显式启动开放，入口的首次后台准备可显式开启。
- * watchdog 沿用 automatic=true 的默认值，不下载或自动重试下载；signal 取消本次拥有的任务。
- */
-export async function ensureRunning(config, { automatic = false, allowDownload = !automatic, signal } = {}) {
-  // 会话结束后禁止新启动；并发显式调用等待已有任务，自动巡检直接返回处理中。
-  signal?.throwIfAborted();
-  if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
-  const key = config.dataDir;
-  while (inFlight.has(key)) {
-    if (automatic) return { started: false, ready: false, reason: "另一启动任务正在准备核心或启动代理" };
-    await waitForStart(inFlight.get(key), signal);
-  }
-  // 内部取消器供 bridge_stop 和会话回收使用，与请求取消共同终止下载/启动。
-  const controller = new AbortController();
-  const activeSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-  startControllers.set(key, controller);
-  const work = (async () => {
-    // 先在锁内检查持久暂停和既有代理；只有显式启动才清除暂停标记。
-    const existing = await withLifecycleLock(config, async () => {
-      if (automatic && await readOptional(config.pausedPath) !== null) {
+/** 在两个锁区间之间准备核心；按实际仍在等待的请求决定能否恢复暂停、能否下载。 */
+async function startOnce(config, task) {
+  const { signal } = task.controller;
+  const existing = await withLifecycleLock(config, async () => {
+    if (await readOptional(config.pausedPath) !== null) {
+      // 取消的显式调用不能授权后台准备解除暂停。
+      if (![...task.waiters].some((waiter) => !waiter.automatic)) {
+        task.skipped = "paused";
         return { started: false, ready: false, reason: "用户已停止桥，自动恢复已暂停" };
       }
-      if (!automatic) await unlink(config.pausedPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
-      return inspectRunning(config);
-    }, 25000, activeSignal);
-    if (existing) return existing;
+      await unlink(config.pausedPath);
+    }
+    return inspectRunning(config);
+  }, 25000, signal);
+  if (existing) return existing;
 
-    // 首次后台准备和显式启动可以安装核心；只读自动恢复不能发起网络下载。
-    const core = await ensureCore(config, { allowDownload, signal: activeSignal });
-    if (!core.available) return { started: false, ready: false, reason: core.reason };
-    activeSignal.throwIfAborted();
-    return withLifecycleLock(config, async () => {
-      // 下载期间另一会话可以停止或启动桥；发布核心后必须重新核对状态。
-      if (await readOptional(config.pausedPath) !== null) {
-        return { started: false, ready: false, reason: "准备核心期间用户已停止桥，未启动代理" };
-      }
-      const running = await inspectRunning(config);
-      if (running) return running;
-      const checked = await ensureCore(config, { allowDownload: false, signal: activeSignal });
-      if (!checked.available) return { started: false, ready: false, reason: checked.reason };
-      return launch(config, activeSignal);
-    }, 25000, activeSignal);
-  })();
-  inFlight.set(key, work);
-  try { return await work; }
-  finally {
-    // 成功、失败和取消均释放本任务的登记，不覆盖后续任务的控制器。
-    if (inFlight.get(key) === work) inFlight.delete(key);
-    if (startControllers.get(key) === controller) startControllers.delete(key);
+  // watchdog 只检查缓存；显式启动或首次后台准备可在同一次工作中授权下载。
+  const allowDownload = [...task.waiters].some((waiter) => waiter.allowDownload);
+  const core = await ensureCore(config, { allowDownload, signal });
+  if (!core.available) {
+    if (!allowDownload) task.skipped = "download";
+    return { started: false, ready: false, reason: core.reason };
+  }
+  return withLifecycleLock(config, async () => {
+    // 下载中新出现的暂停对所有已在等待的调用生效，不得把它当作启动前的暂停再重试。
+    if (await readOptional(config.pausedPath) !== null) {
+      return { started: false, ready: false, reason: "准备核心期间用户已停止桥，未启动代理" };
+    }
+    const running = await inspectRunning(config);
+    if (running) return running;
+    const checked = await ensureCore(config, { allowDownload: false, signal });
+    if (!checked.available) return { started: false, ready: false, reason: checked.reason };
+    return launch(config, signal);
+  }, 25000, signal);
+}
+
+/** 按数据目录串行启动。请求取消只撤销自己的等待；stop 和会话关闭可以取消整个任务。 */
+export async function ensureRunning(config, { automatic = false, allowDownload = !automatic, signal } = {}) {
+  const key = config.dataDir;
+  for (;;) {
+    signal?.throwIfAborted();
+    if (closing) throw bridgeError("MCP 会话正在关闭，不再启动代理");
+    let task = inFlight.get(key);
+    if (task && automatic && !allowDownload) return { started: false, ready: false, reason: "另一启动任务正在准备核心或启动代理" };
+    // 所有旧请求已撤销时，新调用可以排在清理之后。stop/关闭触发的取消仍传给所有在途调用。
+    const draining = task?.controller.signal.reason === abandonedStart ? task.work : null;
+    if (!task || draining) {
+      task = {
+        /** 执行使用单独的信号，不绑定首先到达的请求。 */
+        controller: new AbortController(),
+        /** 每个活跃调用各持一份启动/下载意图。 */
+        waiters: new Set(),
+        /** 同目录的不同配置须重新核对，不能直接复用认证结果。 */
+        config,
+        /** 仅在较弱的启动策略已经跳过操作时允许补做，错误不自动重试。 */
+        skipped: null,
+        /** 首个仍在等待的调用报告本次实际启动，其他调用报告复用。 */
+        reportedStart: false,
+        /** 保留到工作和清理均结束，供停止和会话收尾使用。 */
+        work: null,
+      };
+      inFlight.set(key, task);
+      task.work = (async () => {
+        if (draining) {
+          try { await draining; }
+          catch (error) {
+            // 只接续上一批请求的正常取消，清理失败等真实错误仍交给新调用。
+            if (error !== abandonedStart && error.cause !== abandonedStart && error.code !== "CORE_CANCELLED") throw error;
+          }
+        }
+        return startOnce(config, task);
+      })().finally(() => { if (inFlight.get(key) === task) inFlight.delete(key); });
+    }
+    const compatible = task.config === config || isDeepStrictEqual(task.config, config);
+    // 不同配置仅排队，不向现有配置授予解除暂停或下载权限。
+    const waiter = compatible ? { automatic, allowDownload } : { automatic: true, allowDownload: false };
+    const result = await waitForStart(task, waiter, signal);
+    task.controller.signal.throwIfAborted();
+    if (!compatible || (task.skipped === "paused" && !automatic) || (task.skipped === "download" && allowDownload)) continue;
+    if (result.started && task.reportedStart) return { started: false, ready: true, reason: "复用本版本已验证的桥进程" };
+    task.reportedStart ||= result.started;
+    return result;
   }
 }
 
 /** 取消本会话等待锁、下载或启动的任务，暂停自动恢复并在生命周期锁内确认已停止。 */
 export async function stopBridge(config) {
   // 启动可能正持有同一把锁等待就绪；先通知它回收资源并释放锁，避免停止在锁外等到超时。
-  startControllers.get(config.dataDir)?.abort();
+  inFlight.get(config.dataDir)?.controller.abort();
   return withLifecycleLock(config, async () => {
     // 在锁内发布暂停，再取消等待期间新登记的启动；其他会话只能在解锁后检查最新标记。
     await writeFile(config.pausedPath, "Stopped by user\n", { mode: 0o600 });
-    startControllers.get(config.dataDir)?.abort();
+    inFlight.get(config.dataDir)?.controller.abort();
     const tracked = await trackedProcess(config);
+    // 即使核心已自然退出，guardian 仍在提供认证 status。匹配当前协议和配置才发送 stop 释放它的租约。
+    if (process.platform !== "win32" && tracked?.record.runtimeRevision === RUNTIME_REVISION &&
+        sameProcess(tracked.record, tracked.identity ?? tracked.record, config)) {
+      try {
+        const result = await queryPosixSupervisor(tracked.record, config, { stop: true });
+        // owner EOF 可能抢先关闭端点；此时还须确认模型端口离线才报告幂等成功。
+        if ((!result || !tracked.identity) && (await probeBridge(config)).state !== "offline") {
+          return { stopped: false, reason: "端口上服务的归属无法确认；已暂停自动恢复，未停止其他进程" };
+        }
+        const owned = supervisors.get(config.dataDir);
+        if (owned?.identity?.creationDate === tracked.record.creationDate) await closeSupervisor(owned.child);
+      } catch { return { stopped: false, reason: "停止失败或托管器无法验证；没有按 PID 终止其他进程" }; }
+      await unlink(config.pidPath);
+      return { stopped: true, reason: "已停止本版本订阅桥，自动恢复暂停；bridge_start 可恢复" };
+    }
     if (!tracked?.identity) {
       // 仅在端口确认离线时报告幂等成功；外部服务或无法确定的端点都不接管或终止。
       const probe = await probeBridge(config);
@@ -431,17 +514,6 @@ export async function stopBridge(config) {
       return { stopped: true, reason: "本版本订阅桥已经停止，自动恢复已暂停" };
     }
     if (!tracked.owned) return { stopped: false, reason: "进程归属校验失败；未停止其他版本或外部进程" };
-    if (process.platform !== "win32") {
-      try {
-        // 只由持有 ChildProcess 的托管器终止它的孩子，不向可被回收的记录 PID 发送信号。
-        const result = await queryPosixSupervisor(tracked.record, config, { stop: true });
-        if (!result?.stopped) return { stopped: false, reason: "代理已退出或归属发生变化；自动恢复已暂停" };
-        const owned = supervisors.get(config.dataDir);
-        if (owned) await closeSupervisor(owned.child);
-      } catch { return { stopped: false, reason: "停止失败或托管器无法验证；没有按 PID 终止其他进程" }; }
-      await unlink(config.pidPath);
-      return { stopped: true, reason: "已停止本版本订阅桥，自动恢复暂停；bridge_start 可恢复" };
-    }
     // 持有进程句柄再核对身份；CIM 时间只有微秒精度，不能与 FILETIME 的 100ns 位直接比较。
     const expected = Buffer.from(JSON.stringify(tracked.identity)).toString("base64");
     const script = `$ErrorActionPreference='Stop'; $e=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${expected}')) | ConvertFrom-Json); $p=Get-Process -Id $e.pid -ErrorAction Stop; $null=$p.Handle; if($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.ffffffZ') -ne ([DateTime]::Parse($e.creationDate).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.ffffffZ')) -or $p.Path -ne $e.executablePath){throw 'Process identity changed'}; $p.Kill(); if(-not $p.WaitForExit(5000)){throw 'Process did not exit'}`;
@@ -480,7 +552,7 @@ export async function getStatus(config) {
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
     models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
     core: await getCoreStatus(config),
-    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号，这也允许 Magpie 发现本机其他客户端账号。管理端口 ${config.managementPort} 与模型端口由同一核心提供；手动登录使用 launcher-secrets.json 的 mgmtKey，模型请求使用独立 apiKey。`,
+    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号，这也允许 Magpie 发现本机其他客户端账号。管理端口 ${config.managementPort} 与模型端口由同一核心提供；管理登录凭据每次启动核心时轮换，重启后请重新打开管理页。模型请求使用独立 apiKey。`,
   };
 }
 

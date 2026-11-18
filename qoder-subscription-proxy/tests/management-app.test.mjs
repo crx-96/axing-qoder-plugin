@@ -9,7 +9,8 @@ const script = await readFile(new URL("../server/panel/management-app.js", impor
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const status = { ready: true };
 function page(t) {
-  const listeners = new Map(), sent = [], timers = new Map(), elements = new Map();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const listeners = new Map(), sent = [], timers = new Set(), elements = new Map();
   function element() {
     return { disabled: false, hidden: false, value: "", textContent: "", style: {}, children: [], dataset: {},
       append(...children) { this.children.push(...children); }, replaceChildren() { this.children = []; },
@@ -19,9 +20,12 @@ function page(t) {
   const window = { parent, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
   const document = { querySelector(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, documentElement: { style: {} } };
   runInNewContext(script, { document, window, console, pluginVersion: PLUGIN_VERSION,
-    setTimeout(fn, ms) { const timer = setTimeout(fn, ms); timers.set(timer, { fn, ms }); return timer; },
+    setTimeout(fn, ms) {
+      const timer = setTimeout(() => { timers.delete(timer); fn(); }, ms);
+      timers.add(timer);
+      return timer;
+    },
     clearTimeout(timer) { clearTimeout(timer); timers.delete(timer); } });
-  t.after(() => { for (const timer of timers.keys()) clearTimeout(timer); });
   const receive = (data, source = parent) => listeners.get("message")?.({ data, source });
   return { sent, document, receive, timers, get: id => document.querySelector(id),
     reply(id, result) { receive({ jsonrpc: "2.0", id, result }); },
@@ -57,12 +61,104 @@ test("初始化仅查状态，早到与重复通知均不打开浏览器或写�
   assert.equal(p.document.documentElement.style.colorScheme, "dark");
   assert.equal(p.timers.size, 0);
 });
+test("初始化 30 秒超时后仅可手动重连，迟到响应不干扰新握手", async t => {
+  const p = page(t);
+  const first = p.sent[0];
+  t.mock.timers.tick(30_000);
+  await tick();
+  assert.match(p.get("#status").textContent, /重新连接/);
+  assert.equal(p.get("#reconnect").hidden, false);
+  assert.equal(p.get("#reconnect").disabled, false);
+  for (const id of ["#open", "#refresh", "#start"]) assert.equal(p.get(id).disabled, true);
+  assert.equal(p.sent.length, 1);
+
+  const retry = p.get("#reconnect").onclick();
+  await p.get("#reconnect").onclick();
+  const second = p.sent[1];
+  assert.equal(second.method, "ui/initialize");
+  assert.notEqual(second.id, first.id);
+  assert.equal(p.get("#reconnect").disabled, true);
+  p.reply(first.id, { protocolVersion: "old" });
+  p.receive({ jsonrpc: "2.0", id: first.id, error: { code: -1 } });
+  await tick();
+  assert.equal(p.sent.length, 2);
+  assert.match(p.get("#status").textContent, /正在连接/);
+
+  p.reply(second.id, { protocolVersion: "2026-01-26", hostCapabilities: { serverTools: {} } });
+  await tick();
+  assert.deepEqual(p.sent.map(m => m.method), ["ui/initialize", "ui/initialize", "ui/notifications/initialized", "tools/call"]);
+  assert.equal(p.calls()[0].params.name, "bridge_status");
+  p.reply(p.calls()[0].id, { content: [{ text: JSON.stringify(status) }] });
+  await retry;
+  assert.match(p.get("#status").textContent, /核心已就绪/);
+  assert.equal(p.get("#refresh").disabled, false);
+  assert.equal(p.get("#reconnect").hidden, true);
+  assert.equal(p.timers.size, 0);
+});
+test("协议版本不支持时保留升级提示", async t => {
+  const p = page(t);
+  p.reply(p.sent[0].id, { protocolVersion: "old" });
+  await tick();
+  assert.match(p.get("#status").textContent, /升级客户端/);
+  assert.equal(p.get("#reconnect").hidden, true);
+  await p.get("#reconnect").onclick();
+  assert.equal(p.sent.length, 1);
+});
 test("缺少 serverTools 时不调用工具", async t => {
   const p = page(t);
   await initialize(p, {});
   await p.get("#open").onclick();
   assert.equal(p.calls().length, 0);
   assert.equal(p.get("#open").disabled, true);
+  assert.equal(p.get("#reconnect").hidden, true);
+  assert.match(p.get("#status").textContent, /不支持管理工具/);
+});
+test("显式启动跨过 10 分钟准备预算后仍可接收结果，只刷新一次最新状态", async t => {
+  const p = page(t);
+  await loaded(p, { ready: false });
+  const task = p.get("#start").onclick();
+  const start = p.calls()[1];
+  t.mock.timers.tick(600_000);
+  await tick();
+  assert.match(p.get("#status").textContent, /正在启动/);
+  for (const id of ["#open", "#refresh", "#start"]) {
+    assert.equal(p.get(id).disabled, true);
+    await p.get(id).onclick();
+  }
+  assert.deepEqual(p.calls().map(call => call.params.name), ["bridge_status", "bridge_start"]);
+  p.reply(start.id, { content: [] });
+  await tick();
+  assert.equal(p.calls()[2].params.name, "bridge_status");
+  assert.equal(p.get("#start").disabled, true);
+  const count = p.sent.length;
+  p.reply(start.id, { isError: true });
+  assert.equal(p.sent.length, count);
+  p.reply(p.calls()[2].id, { content: [{ text: JSON.stringify({ ready: false, reason: "最新状态仍未就绪" }) }] });
+  await task;
+  assert.equal(p.get("#status").textContent, "最新状态仍未就绪");
+  assert.equal(p.get("#start").disabled, false);
+  assert.equal(p.timers.size, 0);
+});
+test("启动等待到期后可手动查询，迟到结果不覆盖状态或回送错误", async t => {
+  const p = page(t);
+  await loaded(p, { ready: false });
+  const task = p.get("#start").onclick();
+  const start = p.calls()[1];
+  t.mock.timers.tick(11 * 60_000);
+  await task;
+  assert.match(p.get("#status").textContent, /结果未知.*刷新状态/);
+  assert.equal(p.get("#refresh").disabled, false);
+  assert.equal(p.calls().length, 2);
+  const refresh = p.get("#refresh").onclick();
+  p.reply(p.calls()[2].id, { content: [{ text: JSON.stringify(status) }] });
+  await refresh;
+  const count = p.sent.length;
+  p.reply(start.id, { content: [] });
+  p.receive({ jsonrpc: "2.0", id: start.id, error: { code: -1 } });
+  await tick();
+  assert.equal(p.sent.length, count);
+  assert.match(p.get("#status").textContent, /核心已就绪/);
+  assert.equal(p.timers.size, 0);
 });
 test("未就绪仅提示，由用户显式启动", async t => {
   const p = page(t);
@@ -123,10 +219,26 @@ test("协议错误、超时不自动重试，外来消息无效", async t => {
   assert.match(p.get("#status").textContent, /结果未知/);
   assert.doesNotMatch(p.get("#status").textContent, /secret/);
   task = p.get("#open").onclick();
-  [...p.timers.values()][0].fn();
+  t.mock.timers.tick(30_000);
   await task;
   assert.match(p.get("#status").textContent, /结果未知/);
   assert.equal(p.calls().length, 3);
+});
+test("重连中关闭后不接受迟到握手，也不再次显示重连", async t => {
+  const p = page(t);
+  t.mock.timers.tick(30_000);
+  await tick();
+  const retry = p.get("#reconnect").onclick();
+  const id = p.sent.at(-1).id;
+  p.receive({ jsonrpc: "2.0", id: "close", method: "ui/resource-teardown" });
+  await retry;
+  const count = p.sent.length;
+  p.reply(id, { protocolVersion: "2026-01-26", hostCapabilities: { serverTools: {} } });
+  await p.get("#reconnect").onclick();
+  assert.equal(p.sent.length, count);
+  assert.equal(p.get("#reconnect").hidden, true);
+  assert.equal(p.get("#refresh").disabled, true);
+  assert.equal(p.timers.size, 0);
 });
 test("回收清理请求、禁止迟到状态与启动停止副作用", async t => {
   const p = page(t);

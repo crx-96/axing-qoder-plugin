@@ -5,7 +5,7 @@ import { once, EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,7 +146,7 @@ async function realBridgeFixture(t) {
   return { config, env, directory, beforeCleanup };
 }
 
-async function stopOwnNodeChild(child) {
+async function stopOwnNodeChild(child, signal = "SIGTERM") {
   if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
     const identity = await processIdentity(child.pid);
@@ -154,7 +154,7 @@ async function stopOwnNodeChild(child) {
     assert.equal(resolve(identity.executablePath).toLowerCase(), resolve(process.execPath).toLowerCase());
   }
   const exited = once(child, "exit");
-  child.kill();
+  child.kill(signal);
   await exited;
 }
 
@@ -360,21 +360,34 @@ for (const platform of ["linux", "darwin"]) {
   }
 }
 
-test("Darwin 生命周期锁分别拒绝模型和管理端口冲突，未冲突时正常释放", async (t) => {
-  const config = testConfig(await realpath(await directoryFixture(t)));
-  const hash = createHash("sha256").update(config.dataDir).digest("hex");
-  const lockPort = 20000 + Number.parseInt(hash.slice(0, 8), 16) % 20000;
-  const url = new URL("../server/lifecycle-lock.mjs", import.meta.url);
-  const source = await readFile(url, "utf8");
-  const module = await import(`data:text/javascript;base64,${Buffer.from(
-    `const process = { platform: "darwin" };\n${source}`
-  ).toString("base64")}`);
-  for (const [field, variable] of [["port", "BRIDGE_PORT"], ["managementPort", "BRIDGE_MANAGEMENT_PORT"]]) {
-    await assert.rejects(module.withLifecycleLock({ ...config, [field]: lockPort }, () => assert.fail("冲突时不能执行"), 150),
-      error => error.code === "BRIDGE_NOT_READY" && error.safeMessage.startsWith(`${variable} `));
-  }
-  assert.equal(await module.withLifecycleLock(config, () => "acquired", 150), "acquired");
-  assert.equal(await module.withLifecycleLock(config, () => "released", 150), "released");
+test("Darwin 生命周期锁复用遗留文件，长路径与别名共享锁，其他目录可独立取锁", { skip: process.platform !== "darwin" }, async (t) => {
+  const root = await directoryFixture(t);
+  const directory = join(root, "long-data-dir-".repeat(10));
+  const alias = join(root, "alias");
+  await mkdir(directory);
+  await symlink(directory, alias);
+  const path = join(directory, ".bridge-lifecycle.lock");
+  await writeFile(path, "leftover contents\n", { mode: 0o600 });
+  const previous = await stat(path, { bigint: true });
+  const config = testConfig(directory);
+  await writeFile(config.lockPath, "legacy lock\n");
+
+  await withLifecycleLock(config, async () => {
+    await assert.rejects(withLifecycleLock(testConfig(alias), () => assert.fail("不能经别名抢占"), 0), { code: "BRIDGE_NOT_READY" });
+    assert.equal(await withLifecycleLock(testConfig(join(root, "other")), () => "independent", 0), "independent");
+  });
+  assert.equal(await withLifecycleLock(testConfig(alias), () => "reused", 0), "reused");
+  assert.equal((await stat(path, { bigint: true })).ino, previous.ino);
+  assert.equal(await readFile(path, "utf8"), "leftover contents\n");
+  assert.equal(await readFile(config.lockPath, "utf8"), "legacy lock\n");
+});
+
+test("Darwin 生命周期锁遇到符号链接保留目标并报告文件错误", { skip: process.platform !== "darwin" }, async (t) => {
+  const config = testConfig(await directoryFixture(t));
+  await writeFile(config.lockPath, "preserved");
+  await symlink(config.lockPath, join(config.dataDir, ".bridge-lifecycle.lock"));
+  await assert.rejects(withLifecycleLock(config, () => assert.fail("不能跟随锁路径的符号链接"), 0), { code: "ELOOP" });
+  assert.equal(await readFile(config.lockPath, "utf8"), "preserved");
 });
 
 test("probeBridge 只有完整根签名才识别为桥，不泄漏认证头", async (t) => {
@@ -411,7 +424,7 @@ test("sameProcess 核对 pid、创建时间、命令行与 exe/config 绝对路�
   }
 });
 
-test("Linux 生命周期锁不受同哈希 TCP 端口占用或代理端口重合影响", { skip: process.platform !== "linux" }, async (t) => {
+test("POSIX 生命周期锁不受旧哈希 TCP 端口占用或模型、管理端口重合影响", { skip: process.platform === "win32" }, async (t) => {
   const config = testConfig(await realpath(await directoryFixture(t)));
   const hash = createHash("sha256").update(config.dataDir).digest("hex");
   const port = 20000 + Number.parseInt(hash.slice(0, 8), 16) % 20000;
@@ -424,7 +437,9 @@ test("Linux 生命周期锁不受同哈希 TCP 端口占用或代理端口重合
   }
   t.after(async () => { if (server.listening) await new Promise((resolve) => server.close(resolve)); });
   assert.equal(await withLifecycleLock(config, () => "acquired", 150), "acquired");
-  assert.equal(await withLifecycleLock({ ...config, port }, () => "same-port", 150), "same-port");
+  for (const field of ["port", "managementPort"]) {
+    assert.equal(await withLifecycleLock({ ...config, [field]: port }, () => "same-port", 150), "same-port");
+  }
 });
 
 test("生命周期锁排他、超时且 action 异常后释放", async (t) => {
@@ -459,8 +474,22 @@ test("跨进程生命周期锁在持锁进程异常退出后由系统释放", { 
   const [output] = await once(child.stdout, "data");
   assert.match(output.toString(), /LOCKED/);
   await assert.rejects(withLifecycleLock(config, () => assert.fail("不能抢占另一个进程"), 150), /会话|锁/);
-  await stopOwnNodeChild(child);
-  assert.equal(await withLifecycleLock(config, () => "recovered", 1500), "recovered");
+  await stopOwnNodeChild(child, "SIGKILL");
+
+  // 多个新进程同时接手。临界区内独占创建见证目录，任何重叠都会直接以 EEXIST 失败。
+  const contender = `
+    import { withLifecycleLock } from ${JSON.stringify(processModuleUrl)};
+    import { mkdir, rmdir } from 'node:fs/promises';
+    import { setTimeout as delay } from 'node:timers/promises';
+    const witness = ${JSON.stringify(join(config.dataDir, "in-action"))};
+    await withLifecycleLock(${JSON.stringify(config)}, async () => {
+      await mkdir(witness);
+      try { await delay(100); } finally { await rmdir(witness); }
+    }, 3000);
+  `;
+  const results = await Promise.allSettled(Array.from({ length: 4 }, () =>
+    execFileAsync(process.execPath, ["--input-type=module", "--eval", contender], { windowsHide: true, timeout: 5000 })));
+  for (const result of results) if (result.status === "rejected") throw result.reason;
 });
 
 test("暂停标记使 automatic ensureRunning 和 watchdog 不恢复进程", { timeout: 10000 }, async (t) => {

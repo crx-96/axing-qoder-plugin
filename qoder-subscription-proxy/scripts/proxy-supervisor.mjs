@@ -66,7 +66,6 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
   let exitCode = 0;
   let stopPromise;
   let shutdownPromise;
-  const sockets = new Set();
   let finishRun;
   const finished = new Promise((resolve) => { finishRun = resolve; });
 
@@ -98,8 +97,8 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
         // 等待真实 exit；不可退出 supervisor 后把仍存活核心留给 PID 猜测清理。
         await childExit;
       }
-      for (const socket of sockets) socket.destroy();
       try {
+        // 停止接收新连接，等已接收的认证请求分别写完响应。每条连接已有绝对期限，断管或半帧也能收尾。
         if (server?.listening) await new Promise((resolve) => server.close(resolve));
         if (!await waitForExit(logDrained, KILL_CONFIRM_MS)) {
           exitCode = 1;
@@ -131,12 +130,11 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
 
   /** 先验证完整身份再执行唯一允许的 status/stop；拒绝响应不回传令牌或输入正文。 */
   function acceptConnection(socket) {
-    sockets.add(socket);
     let buffer = Buffer.alloc(0);
     let received = false;
     let deadline = setTimeout(() => socket.destroy(), CONTROL_REQUEST_TIMEOUT_MS);
     socket.on("error", () => socket.destroy());
-    socket.once("close", () => { clearTimeout(deadline); sockets.delete(socket); });
+    socket.once("close", () => clearTimeout(deadline));
     if (socket.remoteAddress !== "127.0.0.1" || closing || !identity) {
       socket.destroy();
       return;
@@ -159,6 +157,8 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
           direction: "response", nonce: request.nonce, operation: request.operation,
           state: childExited ? "stopped" : "running",
         })));
+        // 只有已认证的 stop 且核心已退出才结束租约。server.close 等待并发响应排空后再完成退出。
+        if (request.operation === "stop" && childExited) requestShutdown();
       } catch {
         // 不写日志或回显请求，错误 token/实例/PID/路径不得泄露当前有效身份。
         socket.end('{"error":"CONTROL_REJECTED"}\n');
@@ -219,7 +219,8 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
         const probe = { nonce: "0".repeat(64), operation: "status" };
         encodePosixMessage(createPosixControlMessage(identity, config, { ...probe, direction: "request" }));
         encodePosixMessage(createPosixControlMessage(identity, config, { ...probe, direction: "response", state: "running" }));
-        process.stdout.write(encodePosixMessage(identity));
+        // 通过私有公告管道声明 stop 的回收语义，避免混装脚本被 owner 登记为新协议。
+        process.stdout.write(encodePosixMessage({ ...identity, stopClosesLease: true }));
       } else if (!closing) {
         throw posixSupervisorError();
       }
@@ -265,11 +266,13 @@ export async function runPosixSupervisor(config, { spawnGuardian = spawn } = {})
     if (newline < 0) return;
     try {
       if (newline !== buffer.length - 1) throw posixSupervisorError();
-      const identity = validatePosixIdentity(JSON.parse(buffer.subarray(0, newline).toString("utf8")), config);
+      const announcement = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
+      const identity = validatePosixIdentity(announcement, config);
+      if (announcement.stopClosesLease !== true) throw posixSupervisorError();
       announced = true;
       buffer = Buffer.alloc(0);
       clearTimeout(deadline);
-      process.stdout.write(encodePosixMessage(identity), (error) => { if (error) onOutputError(); });
+      process.stdout.write(encodePosixMessage({ ...identity, stopClosesLease: true }), (error) => { if (error) onOutputError(); });
     } catch { closeLease(true); }
   }
 

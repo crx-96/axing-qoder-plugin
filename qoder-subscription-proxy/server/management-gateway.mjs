@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { openCoreConnection } from "./supervisor.mjs";
+import { getManagementLoginKey } from "./supervisor.mjs";
 
 async function openSystemBrowser(url) {
   const windows = process.platform === "win32";
@@ -15,13 +15,11 @@ async function openSystemBrowser(url) {
   child.unref();
 }
 
-export async function openManagement(config, { signal, launchBrowser = openSystemBrowser, connect = openCoreConnection } = {}) {
+export async function openManagement(config, { signal, launchBrowser = openSystemBrowser, loginKey = getManagementLoginKey } = {}) {
   signal?.throwIfAborted();
-  const socket = await connect(config, signal, config.managementPort);
-  socket.destroy();
+  const key = await loginKey(config, signal);
   signal?.throwIfAborted();
-  // 原生页面会将 k 换成 HttpOnly cookie 并清除 URL；登录链接不返回 MCP 或写入日志。
   const url = new URL(config.managementUrl);
-  url.searchParams.set("k", config.mgmtKey);
+  url.searchParams.set("k", key);
   await launchBrowser(url.href);
 }

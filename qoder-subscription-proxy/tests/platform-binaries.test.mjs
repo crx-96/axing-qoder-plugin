@@ -56,6 +56,18 @@ test("CI 仅准备当前 Magpie 核心，保留五平台测试且不引用旧 Ru
   }
 });
 
+test("Release 在草稿上传并核对远端资产后才公开，重跑已公开版本只校验", async () => {
+  const workflow = await readFile(join(pluginRoot, "..", ".github/workflows/release.yml"), "utf8");
+  const steps = workflow.split(/\r?\n      - name: /);
+  const create = steps.findIndex(step => /gh release create "\$TAG" --draft\b/.test(step));
+  const upload = steps.findIndex(step => step.includes('gh release upload "$TAG"'));
+  const verify = steps.findIndex(step => step.includes('gh release view "$TAG" --json assets'));
+  const publish = steps.findIndex(step => step.includes('gh release edit "$TAG" --draft=false'));
+  assert.ok(create >= 0 && create < upload && upload < verify && verify < publish);
+  for (const step of [steps[upload], steps[publish]]) assert.match(step, /if: steps\.draft\.outputs\.upload == 'true'/);
+  assert.doesNotMatch(steps[verify], /\n        if:/);
+});
+
 for (const [key, pinned] of Object.entries(expected)) {
   test(`${key} 原始资产、随包路径、缓存路径和双 SHA256 固定，离线检查不执行核心`, () => {
     const entry = metadata.platforms[key];

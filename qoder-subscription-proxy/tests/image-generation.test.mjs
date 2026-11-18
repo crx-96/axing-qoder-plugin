@@ -13,8 +13,24 @@ import { generateImage, imageModelsByFamily, listImageModels } from "../server/i
 
 const MODEL = "codex/gpt-image-2";
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=", "base64");
-const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAgP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=", "base64");
-const WEBP = Buffer.from("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA", "base64");
+const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAADAAcBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z", "base64");
+const WEBP = Buffer.from("UklGRi4AAABXRUJQVlA4ICIAAACwAgCdASoRAAMAPm0sk0WkIqGYBABABsS0gABKxAAA5EAA", "base64");
+const WEBP_LOSSLESS = Buffer.from("UklGRiQAAABXRUJQVlA4TBcAAAAvK4EQAAdQwAIWsP8BAEX6/18i+p/CBwA=", "base64");
+
+function webpContainer(...chunks) {
+  const header = Buffer.from("RIFF\0\0\0\0WEBP", "latin1");
+  const parts = [header];
+  for (const [type, payload] of chunks) {
+    const chunk = Buffer.alloc(8 + payload.length + (payload.length % 2));
+    chunk.write(type, 0, 4, "ascii");
+    chunk.writeUInt32LE(payload.length, 4);
+    payload.copy(chunk, 8);
+    parts.push(chunk);
+  }
+  const file = Buffer.concat(parts);
+  file.writeUInt32LE(file.length - 8, 4);
+  return file;
+}
 const OPTIONS = { family: "gpt", model: MODEL, prompt: "一只猫" };
 
 function response(body) { return { status: 200, text: JSON.stringify(body) }; }
@@ -87,6 +103,8 @@ test("原生核心图片目录与生成端点贯通，假上游图片实际落�
   const result = await generateImage(config, { family: "gpt", prompt: "local image fixture", model: "fixture/gpt-image-1" });
   assert.deepEqual(await readFile(result.path), PNG);
   assert.equal(result.mime, "image/png");
+  assert.equal(result.size, "1x1");
+  assert.equal(result.requestedSize, "1024x1024");
   assert.equal(seen.length, 1);
   assert.equal(seen[0].model, "gpt-image-1");
   assert.equal(seen[0].prompt, "local image fixture");
@@ -135,7 +153,9 @@ test("单模型自动生成，严格使用 Magpie 原生协议，结果仅为本
   assert.equal(isAbsolute(output.path), true);
   assert.equal(output.path.startsWith(join(config.dataDir, "generated")), true);
   assert.deepEqual(await readFile(output.path), PNG);
-  assert.deepEqual(Object.keys(output).sort(), ["bytes", "family", "generated", "mime", "model", "path", "size"]);
+  assert.equal(output.size, "1x1");
+  assert.equal(output.requestedSize, "1024x1024");
+  assert.deepEqual(Object.keys(output).sort(), ["bytes", "family", "generated", "mime", "model", "path", "requestedSize", "size"]);
   assert.doesNotMatch(JSON.stringify(output), /private-|b64_json/);
   if (process.platform !== "win32") assert.equal((await stat(output.path)).mode & 0o777, 0o600);
 });
@@ -179,8 +199,16 @@ test("prompt/model/family/size 非法时不访问核心", async () => {
   }
 });
 
-for (const [mime, bytes, extension] of [["image/png", PNG, ".png"], ["image/jpeg", JPEG, ".jpg"], ["image/webp", WEBP, ".webp"]]) {
-  test(`${mime} 按真实格式落盘，指定模型不查询目录`, async (t) => {
+for (const [format, mime, bytes, extension, expectedSize] of [
+  ["PNG", "image/png", PNG, ".png", "1x1"],
+  ["JPEG", "image/jpeg", JPEG, ".jpg", "7x3"],
+  ["VP8", "image/webp", WEBP, ".webp", "17x3"],
+  ["VP8L", "image/webp", WEBP_LOSSLESS, ".webp", "300x67"],
+  // 用与内层帧不同的值，单独验证 VP8X 的两个 24 位画布字段及其加一编码。
+  ["VP8X", "image/webp", webpContainer(["VP8X", Buffer.from("00000000010001000100", "hex")],
+    ["VP8 ", WEBP.subarray(20)]), ".webp", "65538x257"],
+]) {
+  test(`${format} 落盘并返回文件尺寸和请求尺寸，指定模型不查询目录`, async (t) => {
     const config = await fixture(t);
     let calls = 0;
     const output = await generateImage(config, { ...OPTIONS, size: "1536x1024" }, async (_config, path, options) => {
@@ -192,6 +220,8 @@ for (const [mime, bytes, extension] of [["image/png", PNG, ".png"], ["image/jpeg
     assert.equal(calls, 1);
     assert.equal(extname(output.path), extension);
     assert.equal(output.mime, mime);
+    assert.equal(output.size, expectedSize);
+    assert.equal(output.requestedSize, "1536x1024");
     assert.deepEqual(await readFile(output.path), bytes);
     assert.equal((await readdir(join(config.dataDir, "generated"))).length, 1);
   });
@@ -220,6 +250,29 @@ test("MIME 不匹配、假图片、截断容器拒绝", async (t) => {
     [Buffer.from("not-an-image"), "image/png"], [PNG.subarray(0, 33), "image/png"],
     [JPEG.subarray(0, -2), "image/jpeg"], [WEBP.subarray(0, -2), "image/webp"]]) {
     await assert.rejects(generateImage(config, OPTIONS, async () => response({ data: [{ b64_json: bytes.toString("base64"), mime_type: mime }] })),
+      e => safeError(e, "IMAGE_OUTPUT_INVALID"));
+  }
+  assert.deepEqual(await readdir(config.dataDir), []);
+});
+
+test("尺寸字段无效、越过块边界或只有画布头时拒绝且不落盘", async (t) => {
+  const config = await fixture(t);
+  const zeroPng = Buffer.from(PNG);
+  zeroPng.writeUInt32BE(0, 16);
+  const zeroJpeg = Buffer.from(JPEG);
+  zeroJpeg.writeUInt16BE(0, zeroJpeg.indexOf(Buffer.from([0xff, 0xc0])) + 5);
+  const frame = WEBP.subarray(20);
+  const zeroVp8 = Buffer.from(frame);
+  zeroVp8.writeUInt16LE(0xc000, 6); // 两个缩放位不能算入像素宽度。
+  for (const [mime, bytes] of [
+    ["image/png", zeroPng], ["image/jpeg", zeroJpeg],
+    ["image/webp", webpContainer(["VP8 ", zeroVp8])],
+    ["image/webp", webpContainer(["VP8 ", frame.subarray(0, 9)])],
+    ["image/webp", webpContainer(["VP8L", WEBP_LOSSLESS.subarray(20, 24)], ["JUNK", Buffer.alloc(4)])],
+    ["image/webp", webpContainer(["VP8X", Buffer.alloc(9)], ["VP8 ", frame])],
+    ["image/webp", webpContainer(["VP8X", Buffer.alloc(10)])],
+  ]) {
+    await assert.rejects(generateImage(config, OPTIONS, async () => imageResponse(bytes, mime)),
       e => safeError(e, "IMAGE_OUTPUT_INVALID"));
   }
   assert.deepEqual(await readdir(config.dataDir), []);

@@ -1,6 +1,6 @@
 {
   "name": "qoder-subscription-proxy",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "qoder订阅代理：基于 Magpie 的本机模型 API 与进程托管；从更多菜单查看核心状态、显式启动、刷新状态或打开原生管理页。",
   "author": { "name": "crx-96" },
   "license": "MIT",

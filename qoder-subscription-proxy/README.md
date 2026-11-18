@@ -1,4 +1,4 @@
-# qoder订阅代理 · 1.1.3
+# qoder订阅代理 · 1.1.4
 
 面向 Qoder Desktop 的第三方本机代理，固定使用 **Magpie CLI v0.1.4403**。模型 API、服务商适配、原生 Web 管理和模型组路由来自 Magpie；插件负责 MCP、生命周期、私有数据隔离与本地生图交付。
 
@@ -10,13 +10,13 @@
 
 | 平台 | 包名 |
 | --- | --- |
-| Windows x64 | `qoder-subscription-proxy-v1.1.3-win32-x64.zip` |
+| Windows x64 | `qoder-subscription-proxy-v1.1.4-win32-x64.zip` |
 | macOS x64 / arm64 | 对应 `darwin-x64` / `darwin-arm64` 后缀 |
 | Linux x64 / arm64 | 对应 `linux-x64` / `linux-arm64` 后缀 |
 
 每个 ZIP 内置当前平台的原始 Magpie CLI 核心，校验 SHA256 后安装到私有运行时缓存，准备核心无需联网。源码未随包时才可下载固定版本；随包核心无效时明确失败，不以下载掩盖损坏。无需 Rust。这是源码支持范围，不代表已发布、安装验收或五平台实机通过。
 
-升级前等待请求结束，调用 `bridge_stop`，导入新版、重连 MCP，再调用 `bridge_start`。不会热替换正在服务旧请求的程序。暂停状态跨重连保留；管理按钮不自动解除暂停。MCP 连接不等于核心就绪，以 `bridge_status.ready` 为准。
+升级前等待请求结束并调用 `bridge_stop`。macOS 和 Linux 从旧版升级时，先关闭共享该数据目录的旧 MCP 会话，待旧托管器退出后再导入新版。macOS 的新版会话通过文件锁协调启停。重连后调用 `bridge_start`。不会热替换正在服务旧请求的程序。暂停状态跨重连保留；管理按钮不自动解除暂停。MCP 连接不等于核心就绪，以 `bridge_status.ready` 为准。
 
 **需要在 Magpie 中本人重新登录。** 插件不读取、迁移或删除旧配置与授权数据，不复制其他客户端账号。旧数据保留不代表新版可直接使用旧授权；其他 Magpie 桌面配置也不自动接管，用户主动在原生管理页操作另行决定。
 
@@ -43,7 +43,7 @@
 
 默认 `dataDir`：`~/.qoder/qoder-subscription-proxy/data`。CN 版与国际版使用这个插件专属稳定目录，它不是 Qoder 应用设置目录。
 
-- `launcher-secrets.json`：保留客户端 `apiKey` 与管理 `mgmtKey` 两个 key。
+- `launcher-secrets.json`：`apiKey` 用作客户端标识，`mgmtKey` 用于派生每次核心启动的管理登录密钥。
 - `magpie/`：Magpie 私有配置、授权；XDG cache/state 也隔离在插件自己的目录。
 - `runtimes/`：按版本与平台隔离的固定核心缓存。
 - `generated/`：GPT 生图结果。
@@ -55,7 +55,7 @@
 
 **更多 → 订阅代理管理** 通过 `bridge_management_app` 打开插件管理页，只显示核心状态，并提供显式启动、刷新状态与打开原生管理页按钮。初始化仅调用 `bridge_status`，不自动启动核心或打开浏览器；不支持 MCP Apps 的宿主不显示这个入口。
 
-页面里的 **打开原生管理页（浏览器）** 或 `bridge_open_management` 会在默认浏览器打开 Magpie 原生 `http://127.0.0.1:19788/?k=长密钥` 登录入口。Magpie 将密钥换为 HttpOnly cookie 并清理 URL；不自建管理监听端口、一次性票据或会话计时器。固定上游版本的密钥 cookie 有效期为 **400 天**，不能承诺“一分钟票据 / 三十分钟会话”。HttpOnly 不消除本机凭据泄漏风险。
+点击 **打开原生管理页（浏览器）** 或调用 `bridge_open_management`，插件会核验当前核心，再用默认浏览器打开 `19788` 上的原生登录入口。链接只携带本次核心的实例密钥，Magpie 将它换为 HttpOnly cookie 并清理 URL。链接和 cookie 在该实例运行期间可重复使用，请妥善保护。核心每次启动都会轮换密钥，重启后重新点击管理按钮即可登录。
 
 授权、配置和模型目录以原生管理页为准。首次启动默认关闭 **设置 → 隐私 → 订阅账号**；Magpie 的该开关同时控制本机账号发现、手动登录和订阅调用，并非只关闭外部发现。使用订阅前，需用户确认后在此开启，再本人登录；开启也允许 Magpie 读取本机其他客户端的登录信息，私有 XDG 目录不等于账号沙箱。不接受这一行为时保持关闭，只使用 API-key 服务商。插件不会用环境变量强制锁死此开关，核心自动更新仍关闭。不要把管理页可打开、插件安装成功或模型出现在目录中等同于真实模型调用通过。
 
@@ -77,7 +77,7 @@
 
 不支持 App 的宿主仍可调用 `bridge_status` 查看状态、`bridge_start` 显式启动，或通过 `bridge_open_management` 打开原生管理页。
 
-GPT 生图调用 Magpie 原生 `/v1/images/generations`，采用 `codex/gpt-image-2` 或实际目录中的 `provider/gpt-image-*` 模型。插件仅做本地文件交付薄适配，不另建生图协议。候选来自 Magpie 原生图片 MCP 的能力枚举，不用聊天目录推断图片能力；上游省略枚举时提示在管理页确认并指定 model。省略 model 且候选不唯一时，由用户选择后重调，不擅自替选。旧 Gemini 生图工具完全移除，不回退旧接口。
+GPT 生图调用 Magpie 原生 `/v1/images/generations`，采用 `codex/gpt-image-2` 或实际目录中的 `provider/gpt-image-*` 模型。成功时 `size` 来自已保存图片的编码宽高，`requestedSize` 保留发送给模型的尺寸，两个值可能不同。候选来自 Magpie 原生图片 MCP 的能力枚举，不用聊天目录推断图片能力；上游省略枚举时提示在管理页确认并指定 model。省略 model 且候选不唯一时，由用户选择后重调，不擅自替选。旧 Gemini 生图工具完全移除，不回退旧接口。
 
 ## 核心配置策略
 

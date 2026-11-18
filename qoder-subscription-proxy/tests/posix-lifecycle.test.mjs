@@ -239,7 +239,7 @@ test("POSIX 外层托管器强杀后回收原生核心，停止及重新启动�
     lines.close();
   } });
   const [line] = await once(lines, "line", { signal: AbortSignal.timeout(10000) });
-  const record = { ...JSON.parse(line), binPath: f.config.binPath, configPath: f.config.configPath, managementPort: f.config.managementPort, runtimeRevision: "magpie-v1" };
+  const record = { ...JSON.parse(line), binPath: f.config.binPath, configPath: f.config.configPath, managementPort: f.config.managementPort, runtimeRevision: "magpie-posix-v2" };
   await writeFile(f.config.pidPath, JSON.stringify(record), { mode: 0o600 });
   await waitUntil(async () => (await probeBridge(f.config)).state === "bridge", "原生核心就绪");
   assert.equal(child.kill("SIGKILL"), true);
@@ -253,7 +253,12 @@ test("POSIX 外层托管器强杀后回收原生核心，停止及重新启动�
 
 test("POSIX 隔离原生核心并发 start/status/stop，暂停自动恢复且显式 start 创建新实例", native, async (t) => {
   const { config } = await fixture(t);
-  const started = await Promise.all([ensureRunning(config), ensureRunning(config)]);
+  const cancelled = new AbortController();
+  const first = ensureRunning(config, { signal: cancelled.signal });
+  const remaining = Promise.all([ensureRunning(config), ensureRunning(config)]);
+  cancelled.abort();
+  await assert.rejects(first, { name: "AbortError" });
+  const started = await remaining;
   assert.equal(started.filter((result) => result.started).length, 1);
   assert.ok(started.every((result) => result.ready));
   const record = await assertIdentity(config);
@@ -303,6 +308,20 @@ test("POSIX 无账号 MCP 握手后后台自动就绪，两个真实 MCP 复用�
   assert.equal((await queryPosixSupervisor(before, f.config)).creationDate, before.creationDate);
   await owner.endInput();
   await assertReleased(f.config, before);
+});
+
+test("POSIX 非 owner MCP 停止桥后，仍连接的 owner 保持暂停并释放原控制端口", native, async t => {
+  const f = await fixture(t);
+  const owner = await mcpClient(f);
+  assert.equal((await owner.call("bridge_start")).ready, true);
+  const record = await assertIdentity(f.config);
+  const borrower = await mcpClient(f);
+  assert.equal((await borrower.call("bridge_start")).started, false);
+  assert.equal((await borrower.call("bridge_stop")).stopped, true);
+  await assertReleased(f.config, record);
+  assert.equal(await readPid(f.config), null);
+  assert.equal((await owner.call("bridge_status")).autoRecoveryPaused, true);
+  assert.equal((await owner.call("bridge_stop")).stopped, true);
 });
 
 // shutdownOwnedBridges 的 closing 是模块全局状态，只通过 MCP 子进程的 finally 调用。

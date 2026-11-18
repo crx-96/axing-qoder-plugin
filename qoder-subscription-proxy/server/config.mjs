@@ -8,7 +8,7 @@ import { getCoreRelease, resolveCoreBinaryPath } from "./core-runtime.mjs";
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 19787;
 export const MANAGEMENT_PORT = 19788;
-export const PLUGIN_VERSION = "1.1.3";
+export const PLUGIN_VERSION = "1.1.4";
 const LEGACY_MGMT_KEY = "123456";
 
 function requireString(value, name) {

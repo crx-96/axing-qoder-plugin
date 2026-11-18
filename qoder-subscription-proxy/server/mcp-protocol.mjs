@@ -58,7 +58,7 @@ const TOOLS = [
   },
   {
     name: "image_gen_gpt",
-    description: "经 Magpie 原生图片接口生图（如 codex/gpt-image-2 或目录中的 provider/gpt-image-* 模型）。用户说 GPT/OpenAI 生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，结果只含路径与元数据，不含图片本体。",
+    description: "经 Magpie 原生图片接口生图（如 codex/gpt-image-2 或目录中的 provider/gpt-image-* 模型）。用户说 GPT/OpenAI 生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，返回路径、实际文件尺寸 size、请求尺寸 requestedSize 等元数据。",
     inputSchema: IMAGE_SCHEMA,
   },
 ];
