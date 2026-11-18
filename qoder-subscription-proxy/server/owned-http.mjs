@@ -47,7 +47,10 @@ async function ownsSocket(pid, port, clientPort, signal) {
   }
   if (process.platform === "darwin") {
     const { stdout } = await execute("/usr/sbin/lsof", ["-nP", "-a", "-p", String(pid), "-iTCP", "-F", "n"], options);
-    return stdout.split("\n").includes(`n${local}->${peer}`);
+    const endpoints = stdout.split("\n");
+    if (endpoints.includes(`n${local}->${peer}`)) return true;
+    // TCP 握手先于 accept；仅目标 PID 仍持有本地端点时等待，监听端点本身不能授权。
+    return endpoints.includes(`n${local}`) ? null : false;
   }
   return process.platform === "linux" && await linuxOwns(pid, port, clientPort);
 }
@@ -86,7 +89,7 @@ export async function connectOwned(config, identify, signal) {
       active.throwIfAborted();
       if (!owned || socket.destroyed) throw unverified();
       // 等待期间记录可能被另一会话替换；同 PID 不能代替完整实例身份。
-      if (process.platform === "linux" && !isDeepStrictEqual(original, await identify())) throw unverified();
+      if (["linux", "darwin"].includes(process.platform) && !isDeepStrictEqual(original, await identify())) throw unverified();
       active.throwIfAborted();
       if (socket.destroyed) throw unverified();
     };

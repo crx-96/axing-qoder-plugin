@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import http from "node:http";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { requestLocal } from "../server/local-http.mjs";
 import { connectOwned } from "../server/owned-http.mjs";
 
@@ -18,6 +19,37 @@ async function linuxFixture(t, inspect) {
       const readdir = async () => globalThis[${JSON.stringify(key)}].fds();
       const readlink = async () => globalThis[${JSON.stringify(key)}].link();`);
   return import(`data:text/javascript;base64,${Buffer.from('const process = { platform: "linux" };\n' + source).toString("base64")}`);
+}
+
+async function darwinFixture(t, execute) {
+  const key = `ownedHttpDarwinTest${Math.random()}`;
+  globalThis[key] = execute;
+  t.after(() => { delete globalThis[key]; });
+  const source = (await readFile(new URL("../server/owned-http.mjs", import.meta.url), "utf8"))
+    .replace("const execute = promisify(execFile);", `const execute = globalThis[${JSON.stringify(key)}];`);
+  return import(`data:text/javascript;base64,${Buffer.from('const process = { platform: "darwin" };\n' + source).toString("base64")}`);
+}
+
+async function darwinPendingAccept(t, { readyAfter = 3, listener = true, failure, inspect = () => {} } = {}) {
+  const f = await fixture(t);
+  let reads = 0;
+  const module = await darwinFixture(t, async (program, args, options) => {
+    assert.equal(program, "/usr/sbin/lsof");
+    assert.deepEqual(args, ["-nP", "-a", "-p", String(process.pid), "-iTCP", "-F", "n"]);
+    assert.equal(options.timeout, 4000);
+    assert.ok(options.signal instanceof AbortSignal);
+    if (!f.connections.length) await once(f.server, "connection");
+    reads++;
+    inspect(reads, f);
+    if (failure) throw Object.assign(new Error("private lsof diagnostics"), { code: failure });
+    const local = `127.0.0.1:${f.config.port}`;
+    const peer = `127.0.0.1:${f.connections[0].socket.remotePort}`;
+    const rows = [`p${process.pid}`, "f20", `n${local}->127.0.0.1:0`];
+    if (listener) rows.push("f21", `n${local}`);
+    if (reads >= readyAfter) rows.push("f22", `n${local}->${peer}`);
+    return { stdout: rows.join("\n") + "\n" };
+  });
+  return { ...f, connect: module.connectOwned, reads: () => reads };
 }
 
 function procRows(serverPort, clientPort, inode) {
@@ -62,6 +94,66 @@ async function fixture(t) {
   return { config: { host: "127.0.0.1", port: server.address().port, apiKey: "fixture-only-key" }, server, connections, requests };
 }
 
+test("Darwin accept 延迟时等待同一连接进入 lsof，监听端点不代替连接归属", async (t) => {
+  const f = await darwinPendingAccept(t, { inspect: (_reads, f) => {
+    assert.equal(f.connections.length, 1);
+    assert.equal(f.connections[0].bytes, 0);
+    assert.equal(f.requests.length, 0);
+  } });
+  let identities = 0;
+  const socket = await f.connect(f.config, async () => { identities++; return { pid: process.pid, creationDate: "original" }; });
+  t.after(() => socket.destroy());
+  assert.equal(f.reads(), 3);
+  assert.equal(identities, 2);
+  await requestLocal(f.config, "/v1/models", { socket, authenticated: true });
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].socket, f.connections[0].socket);
+  assert.equal(f.requests[0].authorization, "Bearer " + f.config.apiKey);
+});
+
+for (const failure of [undefined, "EACCES", 1]) {
+  test(`Darwin 缺少目标监听端点或 lsof 失败不得等待或发送凭据：${failure ?? "unrelated"}`, async (t) => {
+    const f = await darwinPendingAccept(t, { listener: false, failure });
+    await assert.rejects(f.connect(f.config, async () => ({ pid: process.pid })), { code: "BRIDGE_NOT_READY" });
+    assert.equal(f.reads(), 1);
+    await f.connections[0].closed;
+    assert.equal(f.connections[0].bytes, 0);
+  });
+}
+
+for (const mode of ["cancel", "deadline", "identity"]) {
+  test(`Darwin 等待 accept 时 ${mode} 有界失败且不发送凭据`, { timeout: 12000 }, async (t) => {
+    const controller = new AbortController();
+    const f = await darwinPendingAccept(t, {
+      readyAfter: mode === "identity" ? 3 : Infinity,
+      inspect: reads => { if (mode === "cancel" && reads === 2) controller.abort(); },
+    });
+    let identities = 0;
+    const started = Date.now();
+    await assert.rejects(f.connect(f.config, async () => ({
+      pid: process.pid, creationDate: ++identities === 1 ? "original" : "replaced",
+    }), controller.signal), mode === "cancel" ? { name: "AbortError" } : { code: "BRIDGE_NOT_READY" });
+    assert.ok(f.reads() >= 2);
+    const elapsed = Date.now() - started;
+    if (mode === "deadline") assert.ok(elapsed >= 6500 && elapsed < 10000, `elapsed=${elapsed}`);
+    else assert.ok(elapsed < 2000);
+    await f.connections[0].closed;
+    assert.equal(f.connections.length, 1);
+    assert.equal(f.connections[0].bytes, 0);
+    assert.equal(f.requests.length, 0);
+  });
+}
+
+test("Darwin 已接收连接也必须复核完整身份，不能只信任同一 PID", async (t) => {
+  const f = await darwinPendingAccept(t, { readyAfter: 1 });
+  let identities = 0;
+  await assert.rejects(f.connect(f.config, async () => ({
+    pid: process.pid, creationDate: ++identities === 1 ? "original" : "replaced",
+  })), { code: "BRIDGE_NOT_READY" });
+  await f.connections[0].closed;
+  assert.equal(f.connections[0].bytes, 0);
+});
+
 test("Linux accept 延迟时在同一连接等待 inode，成功前不发送凭据", async (t) => {
   const f = await pendingAccept(t);
   const socket = await f.connect(f.config, async () => { await delay(5); return { pid: process.pid, creationDate: "original" }; });
@@ -105,24 +197,73 @@ for (const mode of ["cancel", "deadline", "identity"]) {
   });
 }
 
-test("Linux 等待结束后身份复核挂起仍可取消，且复核晚返回不能授权", { timeout: 3000 }, async (t) => {
-  const f = await pendingAccept(t);
-  const controller = new AbortController();
-  const checking = Promise.withResolvers();
-  const identity = Promise.withResolvers();
-  let calls = 0;
-  const result = f.connect(f.config, () => {
-    if (++calls === 1) return { pid: process.pid };
-    checking.resolve();
-    return identity.promise;
-  }, controller.signal);
-  await checking.promise;
-  controller.abort();
-  await assert.rejects(result, { name: "AbortError" });
-  identity.resolve({ pid: process.pid });
-  await f.connections[0].closed;
-  assert.equal(f.connections[0].bytes, 0);
-  assert.equal(f.connections.length, 1);
+for (const [platform, prepare] of [["Linux", pendingAccept], ["Darwin", darwinPendingAccept]]) {
+  test(`${platform} 等待结束后身份复核挂起仍可取消，且复核晚返回不能授权`, { timeout: 3000 }, async (t) => {
+    const f = await prepare(t);
+    const controller = new AbortController();
+    const checking = Promise.withResolvers();
+    const identity = Promise.withResolvers();
+    let calls = 0;
+    const result = f.connect(f.config, () => {
+      if (++calls === 1) return { pid: process.pid };
+      checking.resolve();
+      return identity.promise;
+    }, controller.signal);
+    await checking.promise;
+    controller.abort();
+    await assert.rejects(result, { name: "AbortError" });
+    identity.resolve({ pid: process.pid });
+    await f.connections[0].closed;
+    assert.equal(f.connections[0].bytes, 0);
+    assert.equal(f.connections.length, 1);
+  });
+}
+
+test("Darwin 原生 lsof 在 accept 前仅有监听端点，恢复接收后验证同一连接", {
+  skip: process.platform !== "darwin", timeout: 15000,
+}, async (t) => {
+  const execute = promisify(execFile);
+  const child = spawn(process.execPath, ["-e", `
+    const net = require('node:net');
+    const { writeSync } = require('node:fs');
+    const server = net.createServer(socket => socket.on('data', () => process.exit(2)));
+    server.listen(0, '127.0.0.1', () => {
+      writeSync(1, String(server.address().port) + '\\n');
+      process.kill(process.pid, 'SIGSTOP');
+    });
+  `], { stdio: ["ignore", "pipe", "pipe"] });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, "exit");
+      child.kill("SIGCONT");
+      child.kill("SIGTERM");
+      await exited;
+    }
+  });
+  const [data] = await once(child.stdout, "data");
+  const config = { host: "127.0.0.1", port: Number(data.toString().trim()) };
+  const stopDeadline = Date.now() + 3000;
+  while (true) {
+    const { stdout } = await execute("/bin/ps", ["-p", String(child.pid), "-o", "state="], { timeout: 1000 });
+    if (stdout.trim().startsWith("T")) break;
+    assert.ok(Date.now() < stopDeadline, "fixture 必须在 accept 前停止，不能依赖固定延时");
+    await delay(10);
+  }
+  let snapshots = 0;
+  const module = await darwinFixture(t, async (...args) => {
+    const result = await execute(...args);
+    if (++snapshots === 1) {
+      const endpoints = result.stdout.split("\n");
+      assert.ok(endpoints.includes(`n127.0.0.1:${config.port}`));
+      assert.equal(endpoints.some(row => row.startsWith(`n127.0.0.1:${config.port}->`)), false);
+      assert.equal(child.kill("SIGCONT"), true);
+    }
+    return result;
+  });
+  const socket = await module.connectOwned(config, async () => ({ pid: child.pid }));
+  socket.destroy();
+  assert.ok(snapshots >= 2);
+  assert.equal(child.exitCode, null, "校验前后均不得向 fixture 发送 HTTP 字节");
 });
 
 test("Linux 原生握手先于服务端 accept 仍可验证", { skip: process.platform !== "linux", timeout: 12000 }, async (t) => {
