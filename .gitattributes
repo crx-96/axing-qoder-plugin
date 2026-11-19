@@ -4,3 +4,6 @@
 qoder-subscription-proxy/scripts/prepare-test-core.mjs text eol=lf
 # POSIX 分发脚本按行读取相对路径。
 qoder-subscription-proxy/scripts/distribution-files.txt text eol=lf
+# 随包上游原文在 Windows checkout 后也应保留已核对的字节。
+qoder-subscription-proxy/server/bin/LICENSE text eol=lf
+qoder-subscription-proxy/server/magpie-third-party-notices.txt text eol=lf
