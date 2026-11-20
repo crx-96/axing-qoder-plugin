@@ -30,3 +30,5 @@ coverage/
 dist/
 docs/status/
 docs/plans/
+# 发布自测等过程记录默认仅本机保留，不随插件源码提交。
+qoder-subscription-proxy/docs/release/
