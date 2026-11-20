@@ -80,7 +80,9 @@ function assertContained(directory, path) {
 async function copyRuntime(root) {
   const modules = (await readdir(join(pluginRoot, "server")))
     .filter((name) => name.endsWith(".mjs")).map((name) => join("server", name));
-  for (const path of [...modules, "scripts/proxy-supervisor.mjs", "server/bin/platforms.json", "server/bin/legacy-releases.json", "assets/entrypoint.png"]) {
+  for (const path of [...modules, "scripts/proxy-supervisor.mjs", "server/bin/platforms.json", "server/bin/legacy-releases.json",
+    "assets/entrypoint.png", "assets/entrypoint-light.png", "assets/entrypoint-dark.png",
+    "assets/logo.png", "assets/logo-light.png", "assets/logo-dark.png"]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
     await copyFile(join(pluginRoot, path), join(root, path));
   }
