@@ -395,9 +395,11 @@ test("常见客户端目录按宿主位置暴露，密钥和非白名单变量�
   const config = await load();
   const host = join(root, "host-clients");
   const appData = join(host, "AppData", "Roaming");
+  // Zed 在 Windows 使用 Roaming AppData，在 macOS/Linux 使用 XDG 配置根。
+  const zedDir = process.platform === "win32" ? join(appData, "Zed") : join(host, ".config", "zed");
   await mkdir(join(host, ".claude"), { recursive: true });
   await mkdir(join(host, ".pi", "agent"), { recursive: true });
-  await mkdir(join(appData, "Zed"), { recursive: true });
+  await mkdir(zedDir, { recursive: true });
   const base = {
     HOME: host, USERPROFILE: host, APPDATA: appData, LOCALAPPDATA: join(host, "AppData", "Local"),
     QWEN_HOME: join(host, "custom-qwen"), GEMINI_CLI_HOME: join(host, "custom-gemini"),
@@ -408,7 +410,7 @@ test("常见客户端目录按宿主位置暴露，密钥和非白名单变量�
   const home = join(config.dataDir, "home");
   assert.equal(env.CLAUDE_CONFIG_DIR, join(host, ".claude"));
   assert.equal(env.PI_CODING_AGENT_DIR, join(host, ".pi", "agent"));
-  assert.equal(env.MAGPIE_ZED_CONFIG_DIR, join(appData, "Zed"));
+  assert.equal(env.MAGPIE_ZED_CONFIG_DIR, zedDir);
   assert.equal(env.QWEN_HOME, join(host, "custom-qwen"));
   assert.equal(env.GEMINI_CLI_HOME, "");
   assert.equal(env.HOME, home);
