@@ -233,7 +233,9 @@ test("后台下载使用独立10分钟预算，超时保留MCP并清理临时文
 test("后台下载失败保留MCP供状态查询，不自动重试，显式start可在同一连接重试", { timeout: 15000 }, async (t) => {
   const f = await fixture(t, { failDownload: true });
   assert.ok((await f.initialize.response).result.serverInfo);
-  const status = await waitStatus(f, (value) => Boolean(value.startupError));
+  // 错误状态先于下载任务清理完成也可能被观察到；等待核心状态与 preparing 一并稳定。
+  const status = await waitStatus(f, (value) =>
+    Boolean(value.startupError) && value.core?.state === "error" && value.preparing === false);
   assert.equal(status.ready, false);
   assert.equal(status.core.state, "error");
   assert.equal(status.preparing, false);

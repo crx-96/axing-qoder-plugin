@@ -272,30 +272,49 @@ async function launch(config, signal) {
   // 随实例轮换 Web 凭据；私有 PID 记录只需保存随机 nonce，供其他 MCP 会话打开同一实例。
   const managementNonce = randomUUID();
   const coreConfig = { ...config, mgmtKey: instanceWebKey(config, managementNonce) };
-  const child = process.platform !== "win32" ? spawnPosixSupervisor(coreConfig) : spawn(powerShell, [
-    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
-    "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
-    "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
-    "-ManagementPort", String(config.managementPort), "-LogPath", join(config.dataDir, "bridge.log"),
-  ], {
-    windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    // 核心通过环境读取模型监听地址、管理密钥及隔离目录，不继承宿主 Magpie 配置。
-    env: magpieEnvironment(coreConfig),
-  });
+  // Windows 托管器先用宿主环境完成 PowerShell/.NET 编译，再读取这份私有环境并在启动核心前替换。
+  // 若直接用隔离的 HOME/TEMP 启动 PowerShell，CI 冷环境中的 Add-Type 会长时间卡住。
+  let coreEnvPath;
+  if (process.platform === "win32") {
+    coreEnvPath = join(config.dataDir, `.core-env-${randomUUID()}.json`);
+    await writeFile(coreEnvPath, JSON.stringify(magpieEnvironment(coreConfig)), { flag: "wx", mode: 0o600 });
+  }
+  let child;
+  try {
+    child = process.platform !== "win32" ? spawnPosixSupervisor(coreConfig) : spawn(powerShell, [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", supervisorScript,
+      "-OwnerPid", String(process.pid), "-BinPath", config.binPath,
+      "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
+      "-ManagementPort", String(config.managementPort), "-LogPath", join(config.dataDir, "bridge.log"),
+      "-CoreEnvPath", coreEnvPath,
+    ], {
+      windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+      // 托管器只负责编译和拉起核心；核心环境由 -CoreEnvPath 单独下发，不继承这里的宿主变量。
+      env: process.env,
+    });
+  } catch (error) {
+    if (coreEnvPath) await unlink(coreEnvPath).catch(() => {});
+    throw error;
+  }
   const owned = { child, config, identity: null };
   supervisors.set(config.dataDir, owned);
   child.once("exit", () => {
     if (supervisors.get(config.dataDir) === owned) supervisors.delete(config.dataDir);
   });
-  child.stderr.resume();
+  let stage = "starting";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", chunk => {
+    const match = /proxy-supervisor stage=([a-z]+)/.exec(chunk);
+    if (match) stage = match[1];
+  });
   child.stdout.setEncoding("utf8");
   child.stdin?.on("error", () => { /* 托管器退出会关闭租约；exit 状态才是清理完成的依据。 */ });
   try {
     // 两种托管器均在具备清理责任后才发布身份；控制令牌仅存私有 PID 记录，不进入 MCP。
     const launched = await new Promise((resolve, reject) => {
       let buffer = "";
-      const timer = setTimeout(() => finish(bridgeError("代理托管器启动超时")), 15000);
-      const onExit = () => finish(bridgeError("代理托管器启动失败，请检查运行依赖与日志"));
+      const timer = setTimeout(() => finish(bridgeError(`代理托管器启动超时（stage=${stage}）`)), 15000);
+      const onExit = () => finish(bridgeError(`代理托管器启动失败，请检查运行依赖与日志（stage=${stage}）`));
       const onError = () => finish(bridgeError("无法启动代理托管器，请检查平台运行时与执行权限"));
       const onAbort = () => finish(signal.reason);
       const onData = (chunk) => {
@@ -341,6 +360,8 @@ async function launch(config, signal) {
       if (probe.state === "bridge") {
         await probeModels(config);
         signal?.throwIfAborted();
+        // 托管器通常已删除环境文件；成功路径仍清理，避免异常版本留下一次性凭据。
+        if (coreEnvPath) await unlink(coreEnvPath).catch(() => {});
         return { started: true, ready: true, reason: "qoder 订阅代理已启动并受进程生命周期托管" };
       }
       if (probe.state === "foreign") throw bridgeError(probe.reason);
@@ -348,6 +369,7 @@ async function launch(config, signal) {
     }
     throw bridgeError("代理未在启动时限内就绪，已回收本次启动的进程");
   } catch (error) {
+    if (coreEnvPath) await unlink(coreEnvPath).catch(() => {});
     await closeSupervisor(child);
     throw error;
   }

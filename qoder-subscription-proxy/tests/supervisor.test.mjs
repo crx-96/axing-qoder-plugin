@@ -955,11 +955,15 @@ test("只结束隔离实例后 watchdog 自动恢复，停止 watchdog 后不再
 test("Windows 托管脚本接受整数管理端口并发布核心身份", { skip: windowsOnly, timeout: 30000 }, async (t) => {
   const { config, beforeCleanup } = await realBridgeFixture(t);
   await ensureDataDir(config);
+  // 生产路径：托管器用宿主环境编译，核心环境通过私有文件传入。
+  const coreEnvPath = join(config.dataDir, "core-env-test.json");
+  await writeFile(coreEnvPath, JSON.stringify(magpieEnvironment(config)), { mode: 0o600 });
   const child = spawn(powerShell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
     join(pluginRoot, "scripts", "proxy-supervisor.ps1"), "-OwnerPid", String(process.pid),
     "-BinPath", config.binPath, "-ConfigPath", config.configPath, "-WorkingDirectory", config.dataDir,
-    "-LogPath", join(config.dataDir, "bridge.log"), "-ManagementPort", String(config.managementPort)],
-  { windowsHide: true, env: magpieEnvironment(config), stdio: ["ignore", "pipe", "pipe"] });
+    "-LogPath", join(config.dataDir, "bridge.log"), "-ManagementPort", String(config.managementPort),
+    "-CoreEnvPath", coreEnvPath],
+  { windowsHide: true, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "", errors = "";
   child.stdout.on("data", chunk => { output += chunk; });
   child.stderr.on("data", chunk => { errors += chunk; });
@@ -967,7 +971,7 @@ test("Windows 托管脚本接受整数管理端口并发布核心身份", { skip
   await waitUntil(() => {
     assert.equal(child.exitCode, null, errors);
     return output.includes("\n");
-  });
+  }).catch(error => { throw new Error(`${error.message}\n${errors}`); });
   const identity = await processIdentity(JSON.parse(output).pid);
   assert.ok(identity.commandLine.includes(`--web=127.0.0.1:${config.managementPort}`));
   assert.ok(!identity.commandLine.includes(config.configPath));
