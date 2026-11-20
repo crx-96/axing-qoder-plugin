@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  CONTROL_MESSAGE_LIMIT, createPosixControlMessage, queryPosixSupervisor, spawnPosixSupervisor, validatePosixControlMessage,
+  CONTROL_MESSAGE_LIMIT, POSIX_RUNTIME_REVISION, createPosixControlMessage, queryPosixSupervisor, spawnPosixSupervisor, validatePosixControlMessage,
 } from "../server/posix-supervisor.mjs";
 
 import { magpieArguments } from "../server/config.mjs";
@@ -17,6 +17,15 @@ import { createRedactedLog } from "../scripts/proxy-supervisor.mjs";
 
 const supervisorUrl = new URL("../scripts/proxy-supervisor.mjs", import.meta.url).href;
 const unixOnly = process.platform === "win32" ? "Unix 信号处理与文件权限须在 macOS/Linux 验证" : false;
+
+test("POSIX 控制模块作为首个入口时可独立加载运行修订", () => {
+  const entry = new URL("../server/posix-supervisor.mjs", import.meta.url).href;
+  const code = `Object.defineProperty(process, "platform", {value: "linux"});
+    const {POSIX_RUNTIME_REVISION} = await import(${JSON.stringify(entry)});
+    process.stdout.write(POSIX_RUNTIME_REVISION);`;
+  assert.equal(execFileSync(process.execPath, ["--input-type=module", "--eval", code],
+    { encoding: "utf8", timeout: 5000, windowsHide: true }), POSIX_RUNTIME_REVISION);
+});
 
 test("日志脱敏覆盖全部分块位置、UTF-8、重复密钥、无换行长行及 EOF 尾段", async () => {
   const secret = "a1b2c3d4".repeat(8);
@@ -97,7 +106,8 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     setInterval(()=>{if(existsSync(${JSON.stringify(trigger)}))process.exit(0)},20);
     writeFileSync(${JSON.stringify(observedPath)}, JSON.stringify({
       pid:process.pid, cwd:process.cwd(), args:process.argv.slice(2),
-      configHome:process.env.XDG_CONFIG_HOME, address:process.env.MAGPIE_ADDR,
+      configHome:process.env.XDG_CONFIG_HOME, home:process.env.HOME, userProfile:process.env.USERPROFILE,
+      codexHome:process.env.CODEX_HOME, address:process.env.MAGPIE_ADDR,
       webKey:process.env.MAGPIE_WEB_KEY, rogue:process.env.MAGPIE_ROGUE, electron:process.env.ELECTRON_RUN_AS_NODE
     }));
     console.log('fake-core stdout'); console.error('fake-core stderr');
@@ -112,8 +122,10 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     import {runCoreGuardian} from ${JSON.stringify(supervisorUrl)};
     writeFileSync(${JSON.stringify(guardianPidPath)},String(process.pid));
     ${announcement === "held" ? "process.stdout.write=()=>true;" : ""}
-    ${announcement === "legacy" ? `const write = process.stdout.write.bind(process.stdout);
-      process.stdout.write = line => { const value = JSON.parse(line); delete value.stopClosesLease; return write(JSON.stringify(value) + '\\n'); };` : ""}
+    ${["legacy", "v2"].includes(announcement) ? `const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = line => { const value = JSON.parse(line);
+        delete value[${JSON.stringify(announcement === "v2" ? "runtimeRevision" : "stopClosesLease")}];
+        return write(JSON.stringify(value) + '\\n'); };` : ""}
     const config=${JSON.stringify(config)};
     process.exitCode=await runCoreGuardian(config,{
       spawnChild:(bin,args,options)=>spawn(process.execPath,[bin,...args],options)
@@ -167,7 +179,7 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     if (guardianPid) await waitUntil(() => exited(guardianPid));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  if (announcement === "legacy") {
+  if (["legacy", "v2"].includes(announcement)) {
     await waitUntil(() => child.exitCode !== null);
     guardianPid = Number(await readFile(guardianPidPath, "utf8"));
     return { child, guardianPid, stdout: () => stdout };
@@ -228,6 +240,10 @@ test("中文空格路径的身份协议、日志隔离、cwd、Magpie 环境及 
   const observed = JSON.parse(await readFile(f.observedPath, "utf8"));
   assert.equal(observed.cwd, f.config.dataDir);
   assert.deepEqual(observed.args, ["serve", `--web=127.0.0.1:${f.config.managementPort}`]);
+  assert.equal(f.record.runtimeRevision, POSIX_RUNTIME_REVISION);
+  assert.equal(observed.home, join(f.config.dataDir, "home"));
+  assert.equal(observed.userProfile, observed.home);
+  assert.equal(observed.codexHome, join(observed.home, ".codex"));
   assert.equal(observed.configHome, f.config.dataDir);
   assert.equal(observed.address, `127.0.0.1:${f.config.port}`);
   assert.equal(observed.webKey, f.config.mgmtKey);
@@ -278,12 +294,74 @@ test("错误 token、instance、pid、路径或命令不得停止持有核心", 
   assert.equal((await queryPosixSupervisor(f.record, f.config)).pid, f.record.pid);
 });
 
-test("旧 guardian 缺少 stop 回收能力时拒绝转发身份并关闭私有租约", { timeout: 15000 }, async t => {
-  const f = await fixture(t, { announcement: "legacy" });
-  assert.equal(f.child.exitCode, 1);
-  assert.equal(f.stdout(), "");
-  assert.equal(exited(f.guardianPid), true);
+test("复制目录的 PID 不查询源 guardian 或旧 PID，同目录读者仍需通过认证", async t => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "posix-record-copy-")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const sourceDir = join(directory, "data-source");
+  const copyDir = join(directory, "data");
+  await Promise.all([mkdir(sourceDir), mkdir(copyDir)]);
+  const operations = [];
+  const f = await fakeControl(t, text => {
+    const request = JSON.parse(text);
+    operations.push(request.operation);
+    try { validatePosixControlMessage(request, config, record, { direction: "request" }); }
+    catch { return '{"error":"CONTROL_REJECTED"}\n'; }
+    return JSON.stringify(createPosixControlMessage(record, config, {
+      direction: "response", nonce: request.nonce, operation: request.operation, state: "running",
+    })) + "\n";
+  });
+  let connections = 0;
+  f.server.on("connection", () => connections++);
+  const url = new URL("../server/supervisor.mjs", import.meta.url);
+  const source = (await readFile(url, "utf8")).replaceAll("import.meta.url", JSON.stringify(url.href))
+    .replace(/from "(\.\/[^\"]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, url).href)}`);
+  const prelude = `export const probes = [];
+    const process = { platform: "linux", env: {}, kill(pid, signal) { probes.push([pid, signal]); return true; } };`;
+  const bridge = await import(`data:text/javascript;base64,${Buffer.from(prelude + source).toString("base64")}`);
+  const config = { ...f.config, dataDir: sourceDir, configPath: join(sourceDir, "magpie", "settings.json"), pidPath: join(sourceDir, "bridge.pid") };
+  const record = { ...f.record, ...config, runtimeRevision: POSIX_RUNTIME_REVISION };
+  const emptyPort = createServer();
+  emptyPort.listen(0, "127.0.0.1");
+  await once(emptyPort, "listening");
+  const port = emptyPort.address().port;
+  await new Promise(resolve => emptyPort.close(resolve));
+  const copy = { ...config, host: "127.0.0.1", port, dataDir: copyDir, configPath: join(copyDir, "magpie", "settings.json"),
+    pidPath: join(copyDir, "bridge.pid"), pausedPath: join(copyDir, "bridge.paused") };
+  for (const revision of [POSIX_RUNTIME_REVISION, "magpie-posix-v2", undefined]) {
+    await writeFile(config.pidPath, JSON.stringify({ ...record, runtimeRevision: revision }));
+    await copyFile(config.pidPath, copy.pidPath);
+    assert.equal(await bridge.selectionLifecycle.hasOwnedProcess(copy), false);
+    assert.equal(await bridge.selectionLifecycle.inspect(copy), null);
+    assert.equal((await bridge.stopBridge(copy)).stopped, true);
+    assert.deepEqual(await readFile(copy.pidPath), await readFile(config.pidPath));
+  }
+  assert.equal(connections, 0);
+  assert.deepEqual(bridge.probes, []);
+  await writeFile(config.pidPath, JSON.stringify({ ...record, runtimeRevision: "magpie-posix-v2" }));
+  await assert.rejects(bridge.selectionLifecycle.hasOwnedProcess(config), /旧版 bridge_stop/);
+  await assert.rejects(bridge.selectionLifecycle.stop(config), /旧版 bridge_stop/);
+  assert.deepEqual(bridge.probes, [[record.pid, 0], [record.pid, 0]]);
+  assert.equal(connections, 0);
+  await writeFile(config.pidPath, JSON.stringify(record));
+  assert.equal(await bridge.selectionLifecycle.hasOwnedProcess(config), true);
+  const differentBinary = { ...config, binPath: join(sourceDir, "other-core") };
+  await assert.rejects(bridge.selectionLifecycle.hasOwnedProcess(differentBinary), /归属/);
+  assert.equal((await bridge.selectionLifecycle.stop(differentBinary)).stopped, false);
+  assert.deepEqual(operations, ["status", "status", "status"]);
+  await writeFile(config.pidPath, JSON.stringify({ ...record, controlToken: "0".repeat(64) }));
+  // 错误令牌须被远端拒绝，不能将认证失败解释为未运行。
+  await assert.rejects(bridge.selectionLifecycle.hasOwnedProcess(config), { code: "BRIDGE_NOT_READY" });
+  assert.deepEqual(operations, ["status", "status", "status", "status"]);
 });
+
+for (const announcement of ["legacy", "v2"]) {
+  test(`旧 guardian ${announcement} 公告不满足托管协议时回收私有租约`, { timeout: 15000 }, async t => {
+    const f = await fixture(t, { announcement });
+    assert.equal(f.child.exitCode, 1);
+    assert.equal(f.stdout(), "");
+    assert.equal(exited(f.guardianPid), true);
+  });
+}
 
 test("owner 租约仍打开时远程 stop 收到完整认证响应并回收两层托管器", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
@@ -423,6 +501,20 @@ test("无效记录、非回环地址与非法端口在连接前拒绝", async (t
     { binPath: undefined }, { configPath: "relative.yaml" }, { executablePath: "relative" },
   ]) await assert.rejects(queryPosixSupervisor({ ...f.record, ...changed }, f.config), { code: "BRIDGE_NOT_READY" });
   await assert.rejects(queryPosixSupervisor(f.record, f.config, { stop: "yes" }), { code: "BRIDGE_NOT_READY" });
+});
+
+test("v2 的 status 响应即使令牌和身份一致也不能认证为 v3", async t => {
+  const f = await fakeControl(t, text => {
+    const request = JSON.parse(text);
+    const reply = { ...request, direction: "response", state: "running" };
+    // 1.1.7 的记录修订是 v2，控制帧签名使用更早的 v1 域。
+    reply.mac = createHmac("sha256", Buffer.from(f.record.controlToken, "hex")).update(JSON.stringify([
+      "qoder-posix-supervisor-v1", reply.direction, reply.nonce, reply.operation, reply.state,
+      reply.pid, reply.creationDate, reply.commandLine, reply.executablePath, reply.controlPort, reply.binPath, reply.configPath,
+    ])).digest("hex");
+    return JSON.stringify(reply) + "\n";
+  });
+  await assert.rejects(queryPosixSupervisor(f.record, f.config), { code: "BRIDGE_NOT_READY" });
 });
 
 test("客户端拒绝伪造响应、过大响应及没有完整响应的 EOF", async (t) => {

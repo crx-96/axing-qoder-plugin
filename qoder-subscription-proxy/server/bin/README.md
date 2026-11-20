@@ -1,10 +1,7 @@
-# Bundled Magpie CLI
+# Magpie CLI release metadata
 
-The plugin pins [yetone/magpie v0.1.4582](https://github.com/yetone/magpie/releases/tag/v0.1.4582).
-The upstream CLI assets are raw executables, not archives. `platforms.json` retains the `archive` and `archiveSha256` field names for compatibility; the download and binary hashes are identical and pinned to the upstream `SHA256SUMS`.
+The universal Qoder plugin ZIP ships the plugin, its icons, these notices, and metadata for recognizing older installations. The executable is downloaded after installation. Existing verified cores can be reused offline. A new installation obtains the latest stable [official Magpie release](https://github.com/yetone/magpie/releases) for the local platform and checks its size and SHA-256 before use.
 
-Each platform plugin ZIP must include its own verified core at the manifest's `path`: `magpie.exe` for Windows x64, or `<platform-key>/magpie` for macOS/Linux x64 and arm64. Source checkouts do not contain these binaries; `scripts/fetch-core.mjs` prepares them under `.core-build` for packaging without executing them.
+Updates use separate version directories. The current service stays available while a candidate downloads. The user chooses when to switch or remove an unused version in the management page.
 
-Runtime installation prefers the bundled executable. A missing bundle in a source checkout can fall back to the pinned HTTPS download. Invalid bundled content is rejected, never silently replaced with a network download. The runtime verifies SHA256, installs atomically into its isolated runtime cache, and does not modify account data.
-
-Magpie is licensed under MIT. See `LICENSE`. These are plugin distribution notes, not the upstream README or a CLIProxyAPI configuration guide.
+`platforms.json` describes legacy assets and the test fixture. It does not select the version for a fresh user installation. See `LICENSE` for the upstream MIT license.

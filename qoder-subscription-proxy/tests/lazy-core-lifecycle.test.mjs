@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +51,11 @@ async function fixture(t, { failDownload = false, shortDownload = false } = {}) 
     QODER_HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: "", no_proxy: "",
   };
   delete env.BRIDGE_BIN;
+  // 此组测试隔离实际资产的下载生命周期；首次选择官方版本由选版套件覆盖。
+  const { getCoreRelease } = await import('../server/core-runtime.mjs');
+  const active = getCoreRelease();
+  await mkdir(env.BRIDGE_DATA_DIR, { recursive: true });
+  await writeFile(join(env.BRIDGE_DATA_DIR, `core-selection-${active.key}.json`), JSON.stringify({ active }));
   const args = [entry];
   if (shortDownload) {
     const preload = join(directory, "short-download.mjs");
@@ -124,6 +129,10 @@ test("核心下载被阻塞时握手、工具发现、状态和ping均可用；�
   const status = await waitStatus(f, (value) => value.core.state === "downloading");
   assert.equal(status.ready, false);
   assert.equal(status.startupError, undefined);
+  assert.equal(status.preparing, true);
+  assert.equal(status.core.progress.phase, "downloading");
+  assert.equal(status.core.progress.receivedBytes, 0);
+  assert.ok(status.core.progress.totalBytes > 0);
   const start = f.call("bridge_start");
   assert.deepEqual((await f.request("ping").response).result, {});
   assert.equal(f.messages.has(start.id), false);
@@ -227,6 +236,7 @@ test("后台下载失败保留MCP供状态查询，不自动重试，显式start
   const status = await waitStatus(f, (value) => Boolean(value.startupError));
   assert.equal(status.ready, false);
   assert.equal(status.core.state, "error");
+  assert.equal(status.preparing, false);
   assert.match(status.startupError, /下载失败/);
   assert.equal(f.child.exitCode, null);
   await delay(2200);

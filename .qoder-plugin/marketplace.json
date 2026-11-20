@@ -6,11 +6,11 @@
     {
       "name": "qoder-subscription-proxy",
       "source": "./qoder-subscription-proxy",
-      "version": "1.1.7",
-      "description": "qoder订阅代理：基于固定 Magpie CLI 的本机模型 API、核心状态与原生管理入口，随 MCP 生命周期托管。",
+      "version": "2.0.0",
+      "description": "Qoder 专用本机订阅代理，随 Qoder 启停。可查看 Magpie 核心的下载进度、运行状态和故障原因。",
       "displayName": "订阅代理管理",
       "displayName_i18n": { "zh-CN": "订阅代理管理" },
-      "description_i18n": { "zh-CN": "基于 Magpie CLI v0.1.4582 的 Windows、macOS、Linux 回环订阅代理；各平台 ZIP 内置对应核心，提供原生管理与 GPT 生图本地交付。" },
+      "description_i18n": { "zh-CN": "基于 Magpie CLI 的本机订阅代理，支持 Windows、macOS 和 Linux。自动识别本机核心，可查看进度与诊断，并在确认后升级。" },
       "category": "developer-tools"
     }
   ]

@@ -1,11 +1,12 @@
 import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 
-/** 与 server/bin/platforms.json 一致的五种平台键；每个 ZIP 只内置对应平台的核心。 */
-const PLATFORMS = ['win32-x64', 'darwin-x64', 'darwin-arm64', 'linux-x64', 'linux-arm64'];
+/** 安装 ZIP 的排他字节上限，包含全部成员、目录和结束记录。 */
+const ZIP_SIZE_LIMIT = 20_000_000;
+/** ZIP32 无注释的结束记录长度，用于精确计算实际产物大小。 */
+const END_RECORD_SIZE = 22;
 
 /** 从文件到根目录逐层拒绝符号链接，防止产物读写越过指定路径。 */
 function assertNoLinks(filename) {
@@ -21,10 +22,10 @@ function isPackagePath(name) {
     && !name.split('/').some(part => !part || part === '.' || part === '..');
 }
 
-/** 按源码白名单生成指定平台的安装 ZIP，并内置该平台已校验的核心二进制。仅向已存在的目录发布全新的文件。 */
-async function packagePlugin(platform, requested) {
-  if (!PLATFORMS.includes(platform) || !requested?.trim() || !requested.toLowerCase().endsWith('.zip')) {
-    throw new Error(`用法：node package-plugin.mjs ${PLATFORMS.join('|')} <新.zip 路径>（父目录须存在）`);
+/** 离线从分发清单生成通用 ZIP，仅向已存在的目录发布全新的文件。 */
+async function packagePlugin(requested) {
+  if (process.argv.length !== 3 || !requested?.trim() || !requested.toLowerCase().endsWith('.zip')) {
+    throw new Error('用法：node package-plugin.mjs <新.zip 路径>（父目录须存在）');
   }
   // 校验入口、源目录与目标父目录，拒绝安装包覆盖插件源码或既有文件。
   assertNoLinks(process.argv[1]);
@@ -44,33 +45,11 @@ async function packagePlugin(platform, requested) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  // 两种入口共享发布清单。Windows 用默认 mcp.json，其余平台使用 mcp.posix.json 的内容。
+  // ZIP 与独立市场使用相同的白名单，源码中的通用 mcp.json 原样进入包根。
   const manifest = path.join(root, 'scripts/distribution-files.txt');
   assertNoLinks(manifest);
   if (!lstatSync(manifest).isFile()) throw new Error('分发清单必须是常规文件');
-  // 只从固定清单读取双摘要元数据；下载归档已由 fetch-core 校验，打包再次校验最终核心快照。
-  const platformsFile = path.join(root, 'server/bin/platforms.json');
-  assertNoLinks(platformsFile);
-  if (!lstatSync(platformsFile).isFile()) throw new Error('平台清单必须是常规文件');
-  const release = JSON.parse(readFileSync(platformsFile, 'utf8'))?.platforms?.[platform];
-  if (!release || !isPackagePath(release.path)
-    || !/^[a-f0-9]{64}$/.test(release.binarySha256) || !/^[a-f0-9]{64}$/.test(release.archiveSha256)) {
-    throw new Error(`平台清单缺少 ${platform} 的有效路径或双摘要`);
-  }
-  const coreEntry = `server/bin/${release.path}`;
-  const coreSource = path.join(root, '.core-build', platform, path.posix.basename(release.path));
-  let coreStat;
-  try { coreStat = lstatSync(coreSource); } catch (error) {
-    if (error.code === 'ENOENT') throw new Error(`缺少 ${platform} 构建核心，请先运行 node scripts/fetch-core.mjs ${platform}`);
-    throw error;
-  }
-  assertNoLinks(coreSource);
-  if (!coreStat.isFile()) throw new Error(`不是常规文件：${coreSource}`);
-  const coreData = readFileSync(coreSource);
-  if (createHash('sha256').update(coreData).digest('hex') !== release.binarySha256) {
-    throw new Error(`${platform} 构建核心 SHA256 与平台清单不一致，拒绝打包`);
-  }
-  const files = ['mcp.json', ...readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/), coreEntry];
+  const files = readFileSync(manifest, 'utf8').trimEnd().split(/\r?\n/);
   if (new Set(files).size !== files.length) throw new Error('分发清单包含重复路径');
   for (const name of files) {
     if (!isPackagePath(name)) {
@@ -88,12 +67,10 @@ async function packagePlugin(platform, requested) {
   let offset = 0;
   let centralSize = 0;
   for (const name of files) {
-    const source = name === coreEntry ? coreSource
-      : path.join(root, name === 'mcp.json' && platform !== 'win32-x64' ? 'mcp.posix.json' : name);
+    const source = path.join(root, name);
     assertNoLinks(source);
     if (!lstatSync(source).isFile()) throw new Error(`不是常规文件：${source}`);
-    // 核心使用已校验快照；源码与核心均只受 ZIP32 边界约束，不能套用轻量包的大小门槛。
-    const data = name === coreEntry ? coreData : readFileSync(source);
+    const data = readFileSync(source);
     const compressed = deflateRawSync(data, { level: 9 });
     const encoded = Buffer.from(name, 'utf8');
     if (data.length >= 0xffffffff || compressed.length >= 0xffffffff || encoded.length > 0xffff) {
@@ -115,18 +92,21 @@ async function packagePlugin(platform, requested) {
     entry.writeUInt32LE(0x02014b50, 0);
     entry.writeUInt16LE(0x0314, 4);
     local.copy(entry, 6, 4, 30);
-    // POSIX 核心与 shell 脚本需要执行位；Windows 核心及普通文件保持 0644。
-    const executable = name.endsWith('.sh') || (name === coreEntry && platform !== 'win32-x64');
+    // 保留 shell 脚本的执行位，其余成员由宿主或解释器读取。
+    const executable = name.endsWith('.sh');
     entry.writeUInt32LE(((executable ? 0o100755 : 0o100644) * 65536) >>> 0, 38);
     entry.writeUInt32LE(offset, 42);
     locals.push(local, encoded, compressed);
     central.push(entry, encoded);
     offset += local.length + encoded.length + compressed.length;
     centralSize += entry.length + encoded.length;
-    if (offset + centralSize >= 0xffffffff) throw new Error('产物超出 ZIP32 限制');
+    // 同时计入尚未写出的中央目录和结束记录，在创建任何输出前拒绝等于或超限的成品。
+    if (offset + centralSize + END_RECORD_SIZE >= ZIP_SIZE_LIMIT) {
+      throw new Error(`插件 ZIP 必须小于 ${ZIP_SIZE_LIMIT} 字节`);
+    }
   }
-  // 所有源文件及 ZIP32 边界均已核对，最后写入结束记录并排他创建目标。
-  const end = Buffer.alloc(22);
+  // 产物大小已经校验，最后写入结束记录并排他创建目标。
+  const end = Buffer.alloc(END_RECORD_SIZE);
   end.writeUInt32LE(0x06054b50, 0);
   end.writeUInt16LE(files.length, 8);
   end.writeUInt16LE(files.length, 10);
@@ -158,8 +138,7 @@ async function packagePlugin(platform, requested) {
 }
 
 try {
-  if (process.argv.length !== 4) throw new Error(`用法：node package-plugin.mjs ${PLATFORMS.join('|')} <新.zip 路径>`);
-  console.log(`已生成插件 ZIP：${await packagePlugin(process.argv[2], process.argv[3])}`);
+  console.log(`已生成通用插件 ZIP：${await packagePlugin(process.argv[2])}`);
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

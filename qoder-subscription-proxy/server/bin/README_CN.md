@@ -1,10 +1,7 @@
-# 随包 Magpie CLI
+# Magpie CLI 核心与旧版本识别
 
-固定上游：[yetone/magpie v0.1.4582](https://github.com/yetone/magpie/releases/tag/v0.1.4582)。
-上游 CLI 资产是原始可执行文件，不需要解压。清单保留 `archive` 与 `archiveSha256` 字段以兼容既有调用；下载摘要与二进制摘要相同，均固定为该 Release 的 `SHA256SUMS`。
+通用插件 ZIP 包含插件、图标、许可和历史版本识别信息。安装并启用后，已有校验通过的核心可直接复用；全新安装会从 [Magpie 官方发布页](https://github.com/yetone/magpie/releases) 获取当前平台的最新稳定版，下载并校验大小及 SHA256。
 
-每个平台插件 ZIP 必须内置该平台已经校验的核心：Windows x64 使用 `magpie.exe`；macOS/Linux x64、arm64 使用 `<平台键>/magpie`。源码目录不保存二进制，`scripts/fetch-core.mjs` 将构建期核心准备到 `.core-build`，仅下载和校验，不执行。
+各版本保存在独立目录中。下载更新时当前服务仍可使用，何时切换、保留或删除哪个闲置版本，由用户在「订阅代理管理」中决定。
 
-运行时优先从随包核心安装；源码运行等缺少随包文件的场景才回退到固定 HTTPS 下载。随包文件损坏会直接报错，不自动改走网络。安装保留 SHA256 校验、独立缓存、原子发布和取消清理，不操作用户账号数据。
-
-Magpie 使用 MIT 许可证，完整原文见 `LICENSE`。本文件是插件分发说明，不是上游 README；旧 CLIProxyAPI 的 YAML 配置示例不适用于 Magpie，已移除。
+`platforms.json` 用于识别旧安装和开发验证。完整使用步骤见插件根目录的使用指南，上游 MIT 许可证见 `LICENSE`。

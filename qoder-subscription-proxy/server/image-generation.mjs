@@ -4,6 +4,7 @@ import { mkdir, open, link, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { httpFailure } from "./local-http.mjs";
 import { requestOwned } from "./supervisor.mjs";
+import { privatePortFile } from "./bridge-ports.mjs";
 
 /** Magpie 目录使用 provider/model；不接受旧裸模型名或其他图片族。 */
 const GPT_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]*\/gpt-image-[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -195,6 +196,7 @@ async function saveImage(config, image, signal) {
   let ownedTemporary = false;
   let published = false;
   try {
+    await privatePortFile(config.dataDir, "generated", `${name}.${image.extension}`);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     checkCancelled(signal);
     // UUID 加 wx 防止覆盖；失败时只删除已确认属于当前调用的文件。

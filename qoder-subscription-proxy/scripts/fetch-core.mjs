@@ -1,4 +1,4 @@
-/** 构建期核心获取：复用生产下载与 SHA256 校验，把指定平台核心写入 .core-build 供 package-plugin.mjs 内置打包。 */
+/** 开发验证时把历史清单中的指定平台核心下载到 .core-build，通用插件打包无需调用。 */
 import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

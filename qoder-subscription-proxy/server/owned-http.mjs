@@ -58,7 +58,8 @@ async function ownsSocket(pid, port, clientPort, signal) {
 /** 在不发送 HTTP 数据的情况下连接本机端口；只有内核连接归属和托管身份都验证成功才交给调用方。 */
 export async function connectOwned(config, identify, signal) {
   if (config.host !== "127.0.0.1") throw unverified();
-  const deadline = AbortSignal.timeout(7000);
+  // Windows 依次运行两次 CIM（各限五秒）及一次 netstat（限四秒）；总预算须容纳三次核验。
+  const deadline = AbortSignal.timeout(process.platform === "win32" ? 15000 : 7000);
   const active = signal ? AbortSignal.any([signal, deadline]) : deadline;
   active.throwIfAborted();
   const socket = createConnection({ host: config.host, port: config.port, family: 4 });

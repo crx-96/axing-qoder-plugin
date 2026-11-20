@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  build:
+  test:
     needs: resolve
     strategy:
       fail-fast: false
@@ -85,31 +85,47 @@ jobs:
           if (process.env.TAG !== `v${manifest.version}`) throw new Error("标签与插件版本不一致");
           if (process.env.PLATFORM !== `${process.platform}-${process.arch}`) throw new Error("runner 平台不一致");
           NODE
-      - name: Fetch and verify current-platform Magpie core
+      - name: Prepare verified core for isolated native tests
         shell: bash
+        run: node qoder-subscription-proxy/scripts/prepare-test-core.mjs
+      - name: Enable real browser tests on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          node qoder-subscription-proxy/scripts/fetch-core.mjs "$PLATFORM"
-          node --input-type=module - <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs';
-          import path from 'node:path';
-          // 与 fetch-core 和打包脚本共享固定平台清单，不依赖核心的历史文件名。
-          const manifest = JSON.parse(readFileSync('qoder-subscription-proxy/server/bin/platforms.json', 'utf8'));
-          const file = path.posix.basename(manifest.platforms[process.env.PLATFORM].path);
-          const binary = path.resolve('qoder-subscription-proxy/.core-build', process.env.PLATFORM, file);
-          appendFileSync(process.env.GITHUB_ENV, `BRIDGE_TEST_BIN=${binary}\n`);
-          NODE
+          $candidates = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          )
+          $browser = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $browser) { throw "runner 缺少可用的 Chrome/Edge" }
+          "BRIDGE_TEST_BROWSER=$browser" >> $env:GITHUB_ENV
       - name: Test current platform
         shell: bash
         run: node --test --test-concurrency=1 qoder-subscription-proxy/tests/*.test.mjs
-      - name: Package current-platform ZIP
+
+  build:
+    needs: [resolve, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Package universal ZIP from tested sources
         shell: bash
         run: |
           mkdir -p dist
-          node qoder-subscription-proxy/scripts/package-plugin.mjs "$PLATFORM" "dist/qoder-subscription-proxy-${TAG}-${PLATFORM}.zip"
+          node qoder-subscription-proxy/scripts/package-plugin.mjs "dist/qoder-subscription-proxy-${TAG}.zip"
       - uses: actions/upload-artifact@v7
         with:
-          name: plugin-${{ matrix.platform }}
-          path: dist/*.zip
+          name: plugin-zip
+          path: dist/qoder-subscription-proxy-${{ needs.resolve.outputs.tag }}.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -142,22 +158,18 @@ jobs:
           NODE
       - uses: actions/download-artifact@v7
         with:
-          pattern: plugin-*
+          name: plugin-zip
           path: dist
-          merge-multiple: true
-      - name: Verify all five platform ZIPs
+      - name: Verify single lightweight ZIP
         shell: bash
         run: |
           node --input-type=module - <<'NODE'
           import { readdirSync, lstatSync } from 'node:fs';
-          const platforms = ['win32-x64', 'darwin-x64', 'darwin-arm64', 'linux-x64', 'linux-arm64'];
-          const expected = platforms.map(platform => `qoder-subscription-proxy-${process.env.TAG}-${platform}.zip`).sort();
-          const actual = readdirSync('dist').sort();
-          if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('五平台 ZIP 不完整或存在额外产物');
-          for (const file of expected) {
-            const stat = lstatSync(`dist/${file}`);
-            if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) throw new Error(`无效产物：${file}`);
-          }
+          const expected = `qoder-subscription-proxy-${process.env.TAG}.zip`;
+          const files = readdirSync('dist');
+          if (files.length !== 1 || files[0] !== expected) throw new Error('缺少通用 ZIP 或存在额外产物');
+          const stat = lstatSync(`dist/${expected}`);
+          if (!stat.isFile() || stat.size === 0 || stat.size >= 20_000_000) throw new Error(`无效产物：${expected}`);
           NODE
       - name: Create or resume a draft release
         id: draft

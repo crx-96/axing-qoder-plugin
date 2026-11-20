@@ -7,24 +7,22 @@
 | 项目 | 值 |
 | --- | --- |
 | 上游仓库 | https://github.com/yetone/magpie |
-| 固定核心版本 | `v0.1.4582` |
-| 参考源码 | https://github.com/yetone/magpie/tree/v0.1.4582 （已核对固定源码标签） |
-| 发布页 | https://github.com/yetone/magpie/releases/tag/v0.1.4582 |
+| 用户核心版本 | 由本机当前选版决定。首次安装下载官方最新稳定版，也可在管理页下载其他稳定版。 |
+| 随包许可对应的参考源码 | https://github.com/yetone/magpie/tree/v0.1.4582 |
+| 官方各版本发布页 | https://github.com/yetone/magpie/releases |
 | 许可证 | MIT，原文保存在 `server/bin/LICENSE` |
 | 版权 | `Copyright (c) 2026 yetone` |
-| 修改情况 | 使用原始 CLI 二进制，不修改其内容；分发路径按插件平台清单组织 |
+| 修改情况 | 插件通过官方 Release 下载原始 CLI，按清单校验后写入用户缓存 |
 
-插件 **1.1.7** 的每个平台 ZIP 只内置对应平台核心。固定资产、下载 URL、分发路径与完整 SHA256 以 [`server/bin/platforms.json`](server/bin/platforms.json) 为单一清单：
+插件 **2.0.0** 使用通用安装包。没有可复用的本地核心时，从 Magpie 官方最新稳定 Release 下载对应原始 CLI。用户也可以指定某个已发布的版本。新下载按对应 Release 的资产大小和 SHA256 校验；旧安装的版本、平台及摘要见[历史发行清单](server/bin/legacy-releases.json)。
 
-| 平台 | 随包路径（相对 server/bin） | 上游资产 |
+| 平台 | 清单中的路径标识 | 上游资产 |
 | --- | --- | --- |
 | Windows x64 | `magpie.exe` | `magpie-cli-windows-amd64.exe` |
 | macOS x64 | `darwin-x64/magpie` | `magpie-cli-darwin-amd64` |
 | macOS arm64 | `darwin-arm64/magpie` | `magpie-cli-darwin-arm64` |
 | Linux x64 | `linux-x64/magpie` | `magpie-cli-linux-amd64` |
 | Linux arm64 | `linux-arm64/magpie` | `magpie-cli-linux-arm64` |
-
-这些资产为原始可执行文件，清单保留下载资产和二进制两个摘要字段。构建通过 `scripts/fetch-core.mjs` 下载、校验，运行时校验随包核心后安装到私有缓存；源码未随包才允许下载回退。摘要不等于数字签名、安全审计或五平台运行验收。
 
 2026-11-20 已核对 Git blob 摘要：本次工作树的 [`server/bin/LICENSE`](server/bin/LICENSE) 与 `v0.1.4582` 标签的 [`LICENSE`](https://github.com/yetone/magpie/blob/v0.1.4582/LICENSE) 一致，[`server/magpie-third-party-notices.txt`](server/magpie-third-party-notices.txt) 与同一标签的 [`THIRD_PARTY_NOTICES`](https://github.com/yetone/magpie/blob/v0.1.4582/THIRD_PARTY_NOTICES) 一致。两份原文均随包保留。本说明不重写其依赖清单。MIT 不意味着远程服务、商标及全部依赖由本仓库重新许可。
 

@@ -1,0 +1,32 @@
+<style>
+  #core-update { display: grid; gap: .65rem; color: var(--ink); }
+  #core-update [hidden] { display: none; }
+  #core-update :is(h2,p) { margin: 0; overflow-wrap: anywhere; }
+  #core-update [data-part=running], #core-update [data-part=meter] { color: var(--muted); }
+  #core-update [data-part=reason] { color: var(--error); }
+  #core-update .update-actions, #core-update .choose-version { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+  #core-update input { min-width: 8em; width: 11em; max-width: 100%; min-height: 44px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; padding: 7px 11px; }
+  #core-update progress { width: 100%; accent-color: var(--accent); }
+  #core-update [data-part=confirmation] { border-inline-start: 3px solid var(--accent); padding-inline-start: .75rem; }
+  #core-update [data-part=confirmation] p { margin-block-end: .5rem; }
+</style>
+<section id="core-update" aria-labelledby="core-update-title" hidden>
+  <h2 id="core-update-title">Magpie 更新</h2>
+  <p data-part="running">当前运行版本未知</p>
+  <p data-part="message" role="status">正在读取更新状态…</p>
+  <div data-part="meter" hidden><span data-part="amount"></span><progress data-part="bar" aria-label="下载进度"></progress></div>
+  <p data-part="reason" role="alert" hidden></p>
+  <div class="update-actions">
+    <button data-part="check" type="button" disabled>检查更新</button>
+    <button data-part="download" type="button" data-primary="true" hidden>下载更新</button>
+    <button data-part="switch" type="button" data-primary="true" aria-expanded="false" aria-controls="core-update-confirm" hidden>切换版本</button>
+  </div>
+  <div class="choose-version"><label for="release-tag">指定版本</label><input id="release-tag" data-part="tag" type="text" placeholder="例如 v0.1.4582" maxlength="32" autocomplete="off" spellcheck="false"><button type="button" data-part="specified" disabled>下载指定版本</button></div>
+  <div id="core-update-confirm" data-part="confirmation" role="group" aria-labelledby="core-update-warning" hidden>
+    <p id="core-update-warning">切换会短暂重启核心。你也可以稍后切换。</p>
+    <div class="update-actions">
+      <button data-part="cancel" type="button">稍后切换</button>
+      <button data-part="confirm" type="button" aria-describedby="core-update-warning">确认切换</button>
+    </div>
+  </div>
+</section>

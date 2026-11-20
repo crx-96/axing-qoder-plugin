@@ -1,9 +1,11 @@
 import { connectOwned } from "./owned-http.mjs";
+import { privatePortFile, resolvePortConfig } from "./bridge-ports.mjs";
 import { spawn, execFile } from "node:child_process";
 import { readFile, writeFile, readlink, unlink, rename, access, chmod } from "node:fs/promises";
 import { constants, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getSwitchingVersion, resolveLifecycleConfig, selectInitialRelease } from "./core-selection.mjs";
 import { withLifecycleLock } from "./lifecycle-lock.mjs";
 export { withLifecycleLock };
 import { createHmac, randomUUID } from "node:crypto";
@@ -11,11 +13,15 @@ import { promisify, isDeepStrictEqual } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { ensureMagpieConfig, magpieEnvironment } from "./config.mjs";
 import { ensureCore, getCoreStatus } from "./core-runtime.mjs";
-import { spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
+import { POSIX_RUNTIME_REVISION, spawnPosixSupervisor, queryPosixSupervisor } from "./posix-supervisor.mjs";
 import { requestLocal, httpFailure } from "./local-http.mjs";
-/** POSIX v2 的已认证 stop 同时释放托管链。v1 guardian 只停止核心，须由其 owner 关闭租约。 */
-const RUNTIME_REVISION = process.platform === "win32" ? "magpie-win32-v2" : "magpie-posix-v2";
+/** v2 可能仍使用宿主 HOME。查询时读取修订，允许 guardian 作为循环导入链的入口。 */
+function runtimeRevision() {
+  return process.platform === "win32" ? "magpie-win32-v3" : POSIX_RUNTIME_REVISION;
+}
 
+/** 协议不兼容时只允许原版本收尾，避免旧会话的 watchdog 再次启动。 */
+const incompatibleRuntime = "旧版本进程的托管协议不兼容或无法确认。请通过旧版 bridge_stop 手动停止，关闭旧版 MCP 会话，然后用新版 bridge_start。";
 const execFileAsync = promisify(execFile);
 /** 每个数据目录只登记一个启动任务，由本会话内的显式调用和首次后台准备共同持有。 */
 const inFlight = new Map();
@@ -67,6 +73,7 @@ async function probeModels(config) {
 }
 
 /** 生命周期锁内原子发布完整私有 PID 状态；失败时清理本次临时文件。 */
+export { replacePrivateFile as publishPrivateState };
 async function replacePrivateFile(path, text) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
@@ -146,13 +153,23 @@ export function sameProcess(record, identity, config) {
     sameExecutablePath(identity.executablePath, config.binPath));
 }
 
-/** 读取私有 PID 记录并验证实际托管身份；升级后的路径差异仅影响归属，不允许误杀旧实例。 */
+/** 启停和状态共用固定暂停文件；只检查私有普通文件的存在性，无需读取其内容。 */
+async function pauseFile(config) {
+  if (config.pausedPath !== join(config.dataDir, "bridge.paused")) throw bridgeError("暂停标记必须位于当前数据目录。");
+  return privatePortFile(config.dataDir, "bridge.paused");
+}
+
+/** 读取私有 PID 记录；先判断数据目录，再验证同目录记录的实际托管身份。 */
 async function trackedProcess(config) {
   const text = await readOptional(config.pidPath);
   if (text === null) return null;
   let record;
   try { record = JSON.parse(text); } catch { throw bridgeError("PID 记录损坏，拒绝自动接管"); }
-  if (process.platform !== "win32" && (record?.runtimeRevision !== RUNTIME_REVISION || record?.managementPort == null)) {
+  // 复制的数据目录仍可能带有源实例的完整记录。两代配置各有固定位置，其他绝对路径没有本目录的管理权。
+  if (typeof record?.configPath === "string" && isAbsolute(record.configPath) &&
+      canonical(record.configPath) !== canonical(config.configPath) &&
+      canonical(record.configPath) !== canonical(join(config.dataDir, "config.yaml"))) return null;
+  if (process.platform !== "win32" && (record?.runtimeRevision !== runtimeRevision() || record?.managementPort == null)) {
     // 旧协议不能认证；signal 0 只有 ESRCH 能证明不存在，存活或 PID 复用均不得接管。
     if (Number.isSafeInteger(record?.pid) && record.pid > 0 && record.pid <= 0x7fffffff) {
       try { process.kill(record.pid, 0); }
@@ -160,12 +177,12 @@ async function trackedProcess(config) {
         if (error.code === "ESRCH") return { record, identity: null, owned: false };
       }
     }
-    throw bridgeError("旧版本进程仍存在或无法确认已退出；请手动停止旧版本并关闭其 MCP 会话后重试，新版不会接管或按 PID 停止");
+    throw bridgeError(incompatibleRuntime);
   }
   const identity = process.platform === "win32"
     ? await processIdentity(record.pid, record.creationDate)
-    // 升级会改变安装目录；先按记录自身路径认证同协议实例，再单独判定是否属于当前配置。
-    : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: record?.configPath, managementPort: record?.managementPort });
+    // 同一配置可更换核心或端口，须能识别仍占用该目录的实例。认证帧的设置路径只取当前配置。
+    : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: config.configPath, managementPort: record?.managementPort });
   return { record, identity, owned: sameProcess(record, identity, config) };
 }
 
@@ -178,7 +195,7 @@ async function verifiedCoreSocket(config, signal, targetPort) {
   let managementNonce;
   const socket = await connectOwned({ ...config, port: targetPort }, async () => {
     const tracked = await trackedProcess(config);
-    if (!tracked?.owned || tracked.record.runtimeRevision !== RUNTIME_REVISION) return null;
+    if (!tracked?.owned || tracked.record.runtimeRevision !== runtimeRevision()) return null;
     managementNonce = tracked.record.managementNonce;
     return { ...tracked.identity, managementNonce };
   }, signal);
@@ -306,7 +323,7 @@ async function launch(config, signal) {
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
     });
-    if (process.platform !== "win32" && launched.stopClosesLease !== true) {
+    if (process.platform !== "win32" && (launched.runtimeRevision !== runtimeRevision() || launched.stopClosesLease !== true)) {
       throw bridgeError("托管脚本版本不匹配，已取消启动；请从同一版本重新启动插件");
     }
     const identity = process.platform === "win32"
@@ -314,7 +331,7 @@ async function launch(config, signal) {
       : await queryPosixSupervisor({ ...launched, binPath: config.binPath, configPath: config.configPath }, config);
     if (!identity) throw bridgeError("代理在启动时退出，请检查 data/bridge.log");
     owned.identity = { ...identity, binPath: config.binPath, configPath: config.configPath,
-      managementPort: config.managementPort, runtimeRevision: RUNTIME_REVISION, managementNonce };
+      managementPort: config.managementPort, runtimeRevision: runtimeRevision(), managementNonce };
     await savePid(config, owned.identity);
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
@@ -359,17 +376,14 @@ export async function shutdownOwnedBridges() {
 /** 必须在生命周期锁内调用；返回 null 才允许后续准备核心或启动，绝不接管外部进程。 */
 async function inspectRunning(config) {
   const probe = await probeBridge(config);
+  if (probe.state !== "bridge" && probe.state !== "offline") throw bridgeError(probe.reason);
+  const tracked = await trackedProcess(config);
+  if (tracked?.identity && tracked.record.runtimeRevision !== runtimeRevision()) throw bridgeError(incompatibleRuntime);
   if (probe.state === "bridge") {
-    const tracked = await trackedProcess(config);
     if (!tracked?.owned) throw bridgeError("端口上是旧版或外部 Magpie；请先手动停止，新版不会接管");
-    if (tracked.record.runtimeRevision !== RUNTIME_REVISION) {
-      throw bridgeError("当前进程不属于本版本托管协议；请先 bridge_stop，再 bridge_start。");
-    }
     await probeModels(config);
     return { started: false, ready: true, reason: "复用本版本已验证的桥进程" };
   }
-  if (probe.state !== "offline") throw bridgeError(probe.reason);
-  const tracked = await trackedProcess(config);
   if (tracked?.owned || (tracked?.identity && tracked.record.creationDate === tracked.identity.creationDate)) {
     throw bridgeError("记录的进程仍存在但服务未就绪，不会重复启动或强制结束");
   }
@@ -402,8 +416,10 @@ async function waitForStart(task, waiter, signal) {
 /** 在两个锁区间之间准备核心；按实际仍在等待的请求决定能否恢复暂停、能否下载。 */
 async function startOnce(config, task) {
   const { signal } = task.controller;
+  const input = config;
   const existing = await withLifecycleLock(config, async () => {
-    if (await readOptional(config.pausedPath) !== null) {
+    config = await resolveLifecycleConfig(input);
+    if (await pauseFile(config)) {
       // 取消的显式调用不能授权后台准备解除暂停。
       if (![...task.waiters].some((waiter) => !waiter.automatic)) {
         task.skipped = "paused";
@@ -411,27 +427,34 @@ async function startOnce(config, task) {
       }
       await unlink(config.pausedPath);
     }
-    return inspectRunning(config);
+    return selectionLifecycle.inspect(config);
   }, 25000, signal);
   if (existing) return existing;
 
   // watchdog 只检查缓存；显式启动或首次后台准备可在同一次工作中授权下载。
   const allowDownload = [...task.waiters].some((waiter) => waiter.allowDownload);
+  if (config.coreSelectionPending && allowDownload) config = await selectInitialRelease(config, signal);
+  if (config.coreSelectionPending) {
+    if (!allowDownload) task.skipped = 'download';
+    return { started: false, ready: false, reason: allowDownload ? '用户已暂停代理。' : '尚未选择首次安装版本。' };
+  }
   const core = await ensureCore(config, { allowDownload, signal });
   if (!core.available) {
     if (!allowDownload) task.skipped = "download";
     return { started: false, ready: false, reason: core.reason };
   }
   return withLifecycleLock(config, async () => {
+    // 锁外准备期间另一会话可能切换核心，启动前按最新选版重新验包。
+    config = await resolveLifecycleConfig(input);
     // 下载中新出现的暂停对所有已在等待的调用生效，不得把它当作启动前的暂停再重试。
-    if (await readOptional(config.pausedPath) !== null) {
+    if (await pauseFile(config)) {
       return { started: false, ready: false, reason: "准备核心期间用户已停止桥，未启动代理" };
     }
-    const running = await inspectRunning(config);
+    const running = await selectionLifecycle.inspect(config);
     if (running) return running;
     const checked = await ensureCore(config, { allowDownload: false, signal });
     if (!checked.available) return { started: false, ready: false, reason: checked.reason };
-    return launch(config, signal);
+    return selectionLifecycle.launch(config, signal);
   }, 25000, signal);
 }
 
@@ -490,11 +513,19 @@ export async function stopBridge(config) {
   inFlight.get(config.dataDir)?.controller.abort();
   return withLifecycleLock(config, async () => {
     // 在锁内发布暂停，再取消等待期间新登记的启动；其他会话只能在解锁后检查最新标记。
-    await writeFile(config.pausedPath, "Stopped by user\n", { mode: 0o600 });
+    await pauseFile(config);
+    // 原子替换目录项，即使检查后出现硬链接或符号链接，也不会打开并截断其目标。
+    await replacePrivateFile(config.pausedPath, "Stopped by user\n");
     inFlight.get(config.dataDir)?.controller.abort();
+    return selectionLifecycle.stop(await resolveLifecycleConfig(config));
+  });
+}
+
+/** 以下操作由持有 dataDir 生命周期锁的调用方使用；停止核心本身不改变持久暂停。 */
+async function stopLocked(config) {
     const tracked = await trackedProcess(config);
     // 即使核心已自然退出，guardian 仍在提供认证 status。匹配当前协议和配置才发送 stop 释放它的租约。
-    if (process.platform !== "win32" && tracked?.record.runtimeRevision === RUNTIME_REVISION &&
+    if (process.platform !== "win32" && tracked?.record.runtimeRevision === runtimeRevision() &&
         sameProcess(tracked.record, tracked.identity ?? tracked.record, config)) {
       try {
         const result = await queryPosixSupervisor(tracked.record, config, { stop: true });
@@ -519,7 +550,9 @@ export async function stopBridge(config) {
       }
       return { stopped: true, reason: "本版本订阅桥已经停止，自动恢复已暂停" };
     }
-    if (!tracked.owned) return { stopped: false, reason: "进程归属校验失败；未停止其他版本或外部进程" };
+    // CIM 能确认活进程的身份，只有当前 Windows 托管协议才授权通过句柄停止该实例。
+    if (tracked.record.runtimeRevision !== runtimeRevision()) return { stopped: false, reason: incompatibleRuntime };
+    if (process.platform !== "win32" || !tracked.owned) return { stopped: false, reason: "进程归属校验失败；未停止其他版本或外部进程" };
     // 持有进程句柄再核对身份；CIM 时间只有微秒精度，不能与 FILETIME 的 100ns 位直接比较。
     const expected = Buffer.from(JSON.stringify(tracked.identity)).toString("base64");
     const script = `$ErrorActionPreference='Stop'; $e=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${expected}')) | ConvertFrom-Json); $p=Get-Process -Id $e.pid -ErrorAction Stop; $null=$p.Handle; if($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.ffffffZ') -ne ([DateTime]::Parse($e.creationDate).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.ffffffZ')) -or $p.Path -ne $e.executablePath){throw 'Process identity changed'}; $p.Kill(); if(-not $p.WaitForExit(5000)){throw 'Process did not exit'}`;
@@ -530,10 +563,27 @@ export async function stopBridge(config) {
     if (sameProcess(tracked.record, after, config)) return { stopped: false, reason: "进程仍在运行" };
     await unlink(config.pidPath);
     return { stopped: true, reason: "已停止本版本订阅桥，自动恢复暂停；bridge_start 可恢复" };
-  });
 }
 
-/** 状态不返回密钥、凭据文件名、命令行或上游错误正文。 */
+/** 在生命周期锁内判断是否需要迁移活实例；端口占用不证明归属，未知的活进程不得被接管。 */
+async function hasOwnedProcess(config) {
+  const tracked = await trackedProcess(config);
+  if (!tracked) return false;
+  if (!Number.isSafeInteger(tracked.record?.pid) || tracked.record.pid < 1 || tracked.record.pid > 0x7fffffff) {
+    throw bridgeError("PID 记录无效，无法确认原服务状态。");
+  }
+  if (!tracked.identity) return false;
+  if (tracked.record.runtimeRevision !== runtimeRevision()) throw bridgeError(incompatibleRuntime);
+  if (!tracked.owned) throw bridgeError("当前进程的归属无法确认，已保留原服务。");
+  return true;
+}
+
+/** 选版与端口事务复用身份核验、托管权限与就绪检查；调用方负责持锁。 */
+export const selectionLifecycle = { inspect: inspectRunning, stop: stopLocked, launch, hasOwnedProcess, verifyManagement: getManagementLoginKey };
+
+export function isPreparing(config) { return inFlight.has(config.dataDir); }
+
+/** 状态不返回密钥、命令行或上游错误正文。 */
 export async function getStatus(config) {
   const probe = await probeBridge(config);
   let modelState = null;
@@ -541,24 +591,23 @@ export async function getStatus(config) {
   if (probe.state === "bridge") {
     try {
       const tracked = await trackedProcess(config);
+      if (tracked?.identity && tracked.record.runtimeRevision !== runtimeRevision()) throw bridgeError(incompatibleRuntime);
       if (!tracked?.owned) throw bridgeError("端口服务不属于本插件，未向其发送 API Key");
-      if (tracked.record.runtimeRevision !== RUNTIME_REVISION) {
-        throw bridgeError("当前进程不属于本版本托管协议；请先 bridge_stop，再 bridge_start。");
-      }
       const ids = await probeModels(config);
       // 核心可能提供大量模型，状态只返回总数与有限样例。
       modelState = { count: ids.length, sample: ids.slice(0, 40) };
       ready = true;
-    } catch (error) { modelState = { count: null, sample: [], note: error.message }; }
+    } catch (error) { modelState = { count: null, sample: [], note: error.safeMessage ?? "模型探测失败，请检查本机端口和进程权限。" }; }
   }
   return {
     alive: probe.state === "bridge", ready, state: probe.state, reason: probe.reason,
+    preparing: inFlight.has(config.dataDir),
     endpoint: config.endpoint, managementUrl: config.managementUrl,
     dataDir: config.dataDir, configPath: config.configPath,
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
-    models: modelState, autoRecoveryPaused: await readOptional(config.pausedPath) !== null,
+    models: modelState, autoRecoveryPaused: Boolean(await pauseFile(config)),
     core: await getCoreStatus(config),
-    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号，这也允许 Magpie 发现本机其他客户端账号。管理端口 ${config.managementPort} 与模型端口由同一核心提供；管理登录凭据每次启动核心时轮换，重启后请重新打开管理页。模型请求使用独立 apiKey。`,
+    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号；客户端文件位于插件数据目录，但该选项仍可能读取操作系统凭据存储。管理端口 ${config.managementPort} 与模型端口由同一核心提供；管理登录凭据每次启动核心时轮换，重启后请重新打开管理页。模型请求使用独立 apiKey。`,
   };
 }
 
@@ -570,8 +619,11 @@ export function startWatchdog(config, onState = () => {}) {
   let active = Promise.resolve();
   const tick = async () => {
     try {
-      const probe = await probeBridge(config);
-      if (probe.state === "offline") await ensureRunning(config, { automatic: true });
+      // 其他会话可以在线改端口；旧端口即使已被外部服务占用，也须按当前设置判断是否需要恢复。
+      const current = config.portOverrides ? await resolvePortConfig(config) : config;
+      const probe = await probeBridge(current);
+      // 事务持有者异常退出时，即使候选进程仍可探测，也要持锁恢复未提交的切换。
+      if (probe.state === "offline" || await getSwitchingVersion(current)) await ensureRunning(current, { automatic: true });
       failures = 0;
       onState(null);
     } catch (error) {

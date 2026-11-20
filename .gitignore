@@ -8,7 +8,7 @@
 **/*.paused
 **/*.log
 **/*.tmp
-# Magpie CLI 核心按平台内置进安装 ZIP；源码仓库只保留平台清单、文档和许可证。
+# 用户安装后按平台下载 Magpie，源码仅保留识别清单、文档和许可证。
 # 构建期下载的核心放在 .core-build，白名单也防止新平台目录、归档和未命名的本地核心被纳入。
 qoder-subscription-proxy/.core-build/
 # 仅隔离旧审批路由产物与 Rust 缓存，防止历史缓存误提交；当前构建不再使用。
@@ -19,6 +19,7 @@ qoder-subscription-proxy/server/bin/*
 !qoder-subscription-proxy/server/bin/README.md
 !qoder-subscription-proxy/server/bin/README_CN.md
 !qoder-subscription-proxy/server/bin/platforms.json
+!qoder-subscription-proxy/server/bin/legacy-releases.json
 **/runtimes/
 node_modules/
 coverage/

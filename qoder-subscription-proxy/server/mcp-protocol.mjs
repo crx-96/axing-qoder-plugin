@@ -1,4 +1,5 @@
 /** 按行传输的 MCP 服务；工具并发执行，协议输出串行写入，不管理桥子进程句柄。 */
+import { readFile } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { ensureRunning, getStatus, stopBridge } from "./supervisor.mjs";
 import { generateImage } from "./image-generation.mjs";
@@ -65,6 +66,7 @@ const TOOLS = [
 const MANAGEMENT_APP_TOOL = {
   name: "bridge_management_app",
   title: "订阅代理管理",
+  icons: [{ src: `data:image/png;base64,${await readFile(new URL("../assets/entrypoint.png", import.meta.url), "base64")}`, mimeType: "image/png", sizes: ["96x96"] }],
   description: "打开订阅代理管理入口，只读取核心状态；启动核心与打开原生管理页由用户在页面明确操作。",
   inputSchema: EMPTY_SCHEMA,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
@@ -74,23 +76,60 @@ const MANAGEMENT_APP_TOOL = {
   },
 };
 
-const APP_TOOLS = [MANAGEMENT_APP_TOOL];
+const updateVersionSchema = { type: "object", properties: { version: { type: "string", description: "页面显示且经用户选择的稳定版本标签" } }, required: ["version"], additionalProperties: false };
+/** 新旧两对端口都按 TCP 端口范围校验，字段间约束交给端口事务。 */
+const portSchema = { type: "integer", minimum: 1, maximum: 65535 };
+const APP_TOOLS = [
+  MANAGEMENT_APP_TOOL,
+  {
+    name: "bridge_check_update", description: "查询当前平台的 Magpie 官方稳定版和暂存状态。",
+    inputSchema: EMPTY_SCHEMA, annotations: { readOnlyHint: true }, _meta: { ui: { visibility: ["app"] } },
+  },
+  {
+    name: "bridge_download_update", description: "按用户选择下载并校验指定更新，当前服务继续运行。",
+    inputSchema: updateVersionSchema, _meta: { ui: { visibility: ["app"] } },
+  },
+  {
+    name: "bridge_download_version", description: "下载用户输入的官方稳定版本，并保留当前运行版本。",
+    inputSchema: updateVersionSchema, _meta: { ui: { visibility: ["app"] } },
+  },
+  {
+    name: "bridge_set_ports", description: "仅当当前端口仍与用户确认时的旧值一致时，应用新的模型和浏览器管理端口。",
+    inputSchema: {
+      type: "object",
+      properties: { modelPort: portSchema, managementPort: portSchema, expectedModelPort: portSchema, expectedManagementPort: portSchema },
+      required: ["modelPort", "managementPort", "expectedModelPort", "expectedManagementPort"], additionalProperties: false,
+    },
+    _meta: { ui: { visibility: ["app"] } },
+  },
+  {
+    name: "bridge_delete_version", description: "用户确认后删除指定闲置平台核心，保留账号与模型配置。",
+    inputSchema: updateVersionSchema, _meta: { ui: { visibility: ["app"] } },
+  },
+  {
+    name: "bridge_apply_update", description: "用户确认后，将已校验的指定版本切换为活动核心。",
+    inputSchema: updateVersionSchema, _meta: { ui: { visibility: ["app"] } },
+  },
+];
 
 function validToolArguments(tool, args) {
   if (!isObject(args)) return false;
   const properties = tool.inputSchema.properties ?? {};
   if (Object.keys(args).some(key => !Object.hasOwn(properties, key))) return false;
   for (const [key, value] of Object.entries(args)) {
-    if (properties[key].type !== "string" || typeof value !== "string") return false;
+    const field = properties[key];
+    if (field.type === "integer") {
+      if (!Number.isSafeInteger(value) || value < field.minimum || value > field.maximum) return false;
+    } else if (field.type !== "string" || typeof value !== "string") return false;
   }
-  return (tool.inputSchema.required ?? []).every(key => Object.hasOwn(args, key) && args[key].trim().length > 0);
+  return (tool.inputSchema.required ?? []).every(key => Object.hasOwn(args, key) && (typeof args[key] !== "string" || args[key].trim().length > 0));
 }
 
 /** 只允许稳定错误标识出现在异常响应中，不转发异常 message、stack 或响应正文。 */
 const SAFE_CODES = new Set([
   "ABORT_ERR", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "EACCES", "EPERM",
   "ENOTFOUND", "EAI_AGAIN", "ERR_INVALID_ARG_VALUE", "ERR_INVALID_ARG_TYPE",
-  "BRIDGE_NOT_READY", "BRIDGE_START_FAILED", "IMAGE_OUTPUT_UNAVAILABLE", "IMAGE_MODELS_UNAVAILABLE",
+  "BRIDGE_NOT_READY", "BRIDGE_CONFIG", "BRIDGE_START_FAILED", "BRIDGE_RECOVERY_FAILED", "IMAGE_OUTPUT_UNAVAILABLE", "IMAGE_MODELS_UNAVAILABLE",
   "CORE_CONFIG", "CORE_CANCELLED", "CORE_TIMEOUT", "CORE_CURL", "CORE_DOWNLOAD", "CORE_SIZE",
   "CORE_ARCHIVE_HASH", "CORE_BINARY_HASH", "CORE_ARCHIVE", "CORE_PATH", "CORE_CACHE",
   "CORE_PUBLISH", "CORE_CLEANUP", "CORE_LOCK",
@@ -159,6 +198,8 @@ function safeReason(value, fallback, config) {
 async function callTool(name, ctx, handlers, signal, args = {}) {
   const { config } = ctx;
   signal?.throwIfAborted();
+  // 配置未通过校验时仅开放状态页和显式重试，避免凭空补全端口或凭据。
+  if (config === null && !["bridge_management_app", "bridge_status", "bridge_start"].includes(name)) throw ctx.startupError;
   switch (name) {
     case "bridge_management_app":
     case "bridge_status": {
@@ -175,6 +216,24 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       const ready = result?.ready === true;
       return textResult({ started, ready, reason: safeReason(result?.reason, ready ? "已就绪" : "启动未就绪", config) }, !ready);
     }
+    case "bridge_set_ports": {
+      // 页面必须给出确认时看到的两个值，将前置条件与要持久化的新值分别传递。
+      const { modelPort, managementPort, expectedModelPort, expectedManagementPort } = args;
+      const expectedPorts = { modelPort: expectedModelPort, managementPort: expectedManagementPort };
+      return textResult(await handlers.setPorts(config, { modelPort, managementPort }, { signal, expectedPorts }));
+    }
+    case "bridge_check_update":
+      return textResult(await handlers.checkUpdate(config, { signal }));
+    case "bridge_download_update":
+    case "bridge_download_version":
+    case "bridge_delete_version":
+    case "bridge_apply_update": {
+      if (!/^v(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(args.version) || args.version.trim() !== args.version) return textResult("请输入有效的稳定版本号，例如 v0.1.4582。", true);
+      const operations = { bridge_download_update: handlers.downloadUpdate, bridge_download_version: handlers.downloadVersion,
+        bridge_delete_version: handlers.deleteVersion, bridge_apply_update: handlers.applyUpdate };
+      const result = await operations[name](config, args.version, { signal });
+      return textResult(result, result?.state === "error");
+    }
     case "bridge_stop": {
       const result = await handlers.stopBridge(config);
       const stopped = result?.stopped === true;
@@ -189,7 +248,8 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       // 族内模型决策与落盘由生图模块完成；多模型待选结果原样返回供宿主弹窗。
       const family = "gpt";
       const result = await handlers.generateImage(config,
-        { family, prompt: args.prompt, model: args.model, size: args.size, signal });      return textResult(result);
+        { family, prompt: args.prompt, model: args.model, size: args.size, signal });
+      return textResult(result);
     }
   }
 }

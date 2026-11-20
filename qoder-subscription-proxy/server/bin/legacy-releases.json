@@ -1,0 +1,32 @@
+{
+  "releases": {
+    "v0.1.4582": {
+      "win32-x64": { "sizeBytes": 97077760, "sha256": "b8f7ed6cfa6a5e161dfaf3776ce4f97d0c10d4cf35cc33d0be1d8cf35bf1163a" },
+      "darwin-x64": { "sizeBytes": 96329648, "sha256": "24b075c72ae11aaeb772c19b30e33aab2bfb98bd29da167d6b24dd643f01a406" },
+      "darwin-arm64": { "sizeBytes": 89408018, "sha256": "3187ee06bb2fdd11d05c6624eda017ef567793bf4916c160086bf26df55dede4" },
+      "linux-x64": { "sizeBytes": 94818466, "sha256": "6b233b7b74364bf0205687ebc186adb223f2403bcc7f1d89f01af54ba24f8408" },
+      "linux-arm64": { "sizeBytes": 87294114, "sha256": "185948a63ebf9fb1efffcc079b3e513baf66ac350d403f45adcef08f03b74729" }
+    },
+    "v0.1.4520": {
+      "win32-x64": { "sizeBytes": 96379904, "sha256": "820d88e2c56aef9024b04353cfee9acb7c50ac7d3dc8aad88733130f71fde21f" },
+      "darwin-x64": { "sizeBytes": 95632736, "sha256": "46618e755b710542193d38f74a3fe9414478b619c16d61b519dd8113032b828c" },
+      "darwin-arm64": { "sizeBytes": 88788226, "sha256": "3613633a82eb4fde65db009018f4e5ecaf390c3048cba68593f054654700e2db" },
+      "linux-x64": { "sizeBytes": 94134434, "sha256": "db4397ac03d6a26e0d3e5446550a222b3720b3f02f55e0b390f344e771d11893" },
+      "linux-arm64": { "sizeBytes": 86638754, "sha256": "d9c06fbf72cfaefdcb82b5d33dbf916aa5dd103e5bd3ebf0b96f1bfcadd45579" }
+    },
+    "v0.1.4403": {
+      "win32-x64": { "sizeBytes": 95690752, "sha256": "7396312db1176e65ffcae778f6becb2117ed2c2db933ccf3b203e1486c2a917c" },
+      "darwin-x64": { "sizeBytes": 94947200, "sha256": "838ac92e6a4dea116a08782c3864d6ccd2fd594f39d4a8c4143522cd7e335196" },
+      "darwin-arm64": { "sizeBytes": 88117986, "sha256": "1fab1600640f241f0b9bfe5c57aafaa16eba579f892471a21eb8f12b2c8e2f8c" },
+      "linux-x64": { "sizeBytes": 93450402, "sha256": "3c4a44b8ae4b4a20a27018a327804fcc89d5bdb3ed320974d4dbc11d804fc49f" },
+      "linux-arm64": { "sizeBytes": 86048930, "sha256": "c7974838af7650ab3afc1e02ea67fdef5099fc2e58f26841b58392d39ba260b9" }
+    },
+    "v0.1.4330": {
+      "win32-x64": { "sizeBytes": 94537728, "sha256": "9b7b1dcd64413a13c75c162c53367fde312da9d2c0df3caffa616e7c1a4aa43c" },
+      "darwin-x64": { "sizeBytes": 93795184, "sha256": "43d83512ac84bfbda41e4e1bf1b2d932d281d43c6a96e1a516b670e12e83080e" },
+      "darwin-arm64": { "sizeBytes": 87084802, "sha256": "2d77eeb55b9fe207e7a6b27efde2aeba264be9aad1bbcb5f8b997bb45eb9db7b" },
+      "linux-x64": { "sizeBytes": 92315810, "sha256": "adb1fef9af35ee3b27d06960f41b124c04a2f1f116751e429344c595451a564f" },
+      "linux-arm64": { "sizeBytes": 85000354, "sha256": "07aa97614a1f9aa20d4d2acf1cbe261dae9c3de224f2ecb8d5fd5250dd719815" }
+    }
+  }
+}

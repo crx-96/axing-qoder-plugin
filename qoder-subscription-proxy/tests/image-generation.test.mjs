@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, stat, symlink } from "node:fs/promises";
 import http from "node:http";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -45,6 +45,14 @@ async function fixture(t) {
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   return { dataDir, apiKey: "private-api-key", mgmtKey: "private-management-key" };
 }
+test("生成目录指向其他实例时不向目标写入图片", async t => {
+  const config = await fixture(t);
+  const other = await fixture(t);
+  await symlink(other.dataDir, join(config.dataDir, "generated"), process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(generateImage(config, OPTIONS, async () => imageResponse()), { code: "IMAGE_SAVE_FAILED" });
+  assert.deepEqual(await readdir(other.dataDir), []);
+});
+
 function safeError(error, code) {
   assert.equal(error.code, code);
   assert.equal(error.safeMessage, error.message);

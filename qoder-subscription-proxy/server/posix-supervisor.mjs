@@ -5,6 +5,9 @@ import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { magpieArguments, magpieEnvironment } from "./config.mjs";
 
+/** v3 核心在隔离的 HOME 和客户端目录中启动；公告和控制签名均绑定这项运行契约。 */
+export const POSIX_RUNTIME_REVISION = "magpie-posix-v3";
+
 /** 请求、响应及首次身份公告的 UTF-8 上限，包含末尾换行。 */
 export const CONTROL_MESSAGE_LIMIT = 8 * 1024;
 /** 尚未收到完整请求的连接最多保留两秒，不能靠零散字节续租。 */
@@ -62,7 +65,7 @@ export function validatePosixEnvelope(value, config) {
 /** 固定字段顺序和方向域隔离，令牌只用于本地 HMAC，绝不发给可能被复用的控制端口。 */
 function controlMac(value, token) {
   return createHmac("sha256", Buffer.from(token, "hex")).update(JSON.stringify([
-    "qoder-posix-supervisor-v1", value.direction, value.nonce, value.operation, value.state ?? null,
+    POSIX_RUNTIME_REVISION, value.direction, value.nonce, value.operation, value.state ?? null,
     value.pid, value.creationDate, value.commandLine, value.executablePath,
     value.controlPort, value.binPath, value.configPath,
   ])).digest("hex");

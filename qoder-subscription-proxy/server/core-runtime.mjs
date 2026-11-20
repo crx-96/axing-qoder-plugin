@@ -1,4 +1,4 @@
-/** 固定版本核心的按需缓存：优先安装随包核心，缺失时回退下载；不执行核心、不接触授权数据，准备与生命周期锁相互独立。 */
+/** 按当前平台下载已选发行版核心，校验后缓存。核心准备与桥生命周期分别加锁。 */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, createWriteStream, realpathSync } from "node:fs";
@@ -22,6 +22,16 @@ const MAX_BINARY_BYTES = 160 * 1024 * 1024;
 const OPERATION_TIMEOUT_MS = 600_000;
 /** 核心下载锁协议，不复用桥的生命周期锁、端口或 PID 文件。 */
 const LOCK_PROTOCOL = "qoder-core-download-v1";
+/** 同一阶段的字节更新最多每 250 ms 广播一次，阶段切换立即发送。 */
+const PROGRESS_INTERVAL_MS = 250;
+/**
+ * @typedef {object} CoreProgress 当前准备任务的进度快照。
+ * @property {'waiting'|'downloading'|'verifying'|'installing'} phase 等待锁、下载原始资产、核验摘要或发布缓存。
+ * @property {number} receivedBytes 本轮已收到的原始字节数，开始接收前为零。
+ * @property {number|null} totalBytes 持锁者准备的固定资产大小，尚未获知时为 null。
+ */
+/** @type {CoreProgress} 首次争锁或接续取消任务时，还没有持锁者报告字节数。 */
+const WAITING_PROGRESS = Object.freeze({ phase: "waiting", receivedBytes: 0, totalBytes: null });
 /** 所有可展示失败均出自固定映射，原始路径、代理凭据、URL、响应正文不进入异常。 */
 const MESSAGES = Object.freeze({
   CORE_CONFIG: "核心下载配置无效；请更新插件并检查缓存目录配置。",
@@ -29,10 +39,9 @@ const MESSAGES = Object.freeze({
   CORE_TIMEOUT: `核心准备超过 ${OPERATION_TIMEOUT_MS / 60_000} 分钟；请检查网络或代理后手动重试。`,
   CORE_CURL: "无法运行系统 curl；请确认系统 curl 可用后重新启动订阅桥。",
   CORE_DOWNLOAD: "核心下载失败；请检查网络、QODER_HTTP_PROXY 或 HTTPS_PROXY/NO_PROXY 后手动重试。",
-  CORE_SIZE: "核心下载内容超过安全大小限制；请更新插件或检查下载来源。",
+  CORE_SIZE: "核心下载大小与固定资产不符或超过安全限制；请更新插件或检查下载来源。",
   CORE_ARCHIVE_HASH: "核心下载 SHA256 不匹配，未安装；请检查代理或网络后手动重试。",
   CORE_BINARY_HASH: "核心文件 SHA256 不匹配，未安装；请更新插件或检查下载来源。",
-  CORE_BUNDLE: "随包核心文件无效或不可读，未安装；请重新安装对应平台的官方插件 ZIP。",
   CORE_ARCHIVE: "核心下载文件类型不受支持或不安全，未安装；请更新插件，不要手工绕过校验。",
   CORE_PATH: "核心缓存路径包含链接、特殊文件或插件安装目录；请改用独立的用户缓存目录。",
   CORE_CACHE: "无法读取核心缓存；请检查缓存目录权限后手动重试。",
@@ -122,10 +131,10 @@ async function checkDirectories(config, create = false) {
 
 /**
  * 使用系统 curl 下载到调用方的独占临时文件。
- * stdout 经字节计数管道写盘，stderr 丢弃；不使用 shell、不读取 curlrc、不自动重试。
+ * stdout 经限长管道写盘，onProgress 接收实际流过的累计字节数。stderr 丢弃，失败不重试。
  * spawnProcess/env 只供独立测试注入，生产调用沿用系统环境。
  */
-export async function downloadWithCurl({ url, destination, signal, maxBytes }, spawnProcess = spawn, env = process.env, readProxy = readEffectiveProxyUrl) {
+export async function downloadWithCurl({ url, destination, signal, maxBytes, onProgress }, spawnProcess = spawn, env = process.env, readProxy = readEffectiveProxyUrl) {
   checkCancelled(signal);
   const windowsRoot = env.SystemRoot ?? env.WINDIR ?? "C:\\Windows";
   if (process.platform === "win32" && !win32.isAbsolute(windowsRoot)) throw coreError("CORE_CURL");
@@ -167,7 +176,10 @@ export async function downloadWithCurl({ url, destination, signal, maxBytes }, s
     /** 在写盘前限制实际下载字节数，缺少 Content-Length 也不能绕过上限。 */
     transform(chunk, _encoding, callback) {
       received += chunk.length;
-      callback(received > maxBytes ? coreError("CORE_SIZE") : null, chunk);
+      if (received > maxBytes) return callback(coreError("CORE_SIZE"));
+      try { onProgress?.(received); }
+      catch { return callback(coreError("CORE_DOWNLOAD")); }
+      callback(null, chunk);
     },
   });
   try {
@@ -175,6 +187,8 @@ export async function downloadWithCurl({ url, destination, signal, maxBytes }, s
     const exitCode = await exited;
     checkCancelled(signal);
     if (spawnFailed) throw coreError("CORE_CURL");
+    // curl 可依据响应长度在 stdout 写出任何字节前拒绝超限资产。
+    if (exitCode === 63) throw coreError("CORE_SIZE");
     if (exitCode !== 0) throw coreError("CORE_DOWNLOAD");
   } catch (error) {
     stop();
@@ -194,8 +208,17 @@ function readRawBinary(bytes, signal) {
   return bytes;
 }
 
+/** 只采纳已知阶段和有界的整数计数，锁对端的其他字段不会流入用户可见状态。 */
+function readLockProgress(value) {
+  const { phase, receivedBytes, totalBytes } = value ?? {};
+  if (!["waiting", "downloading", "verifying", "installing"].includes(phase)) return null;
+  if (!Number.isSafeInteger(receivedBytes) || receivedBytes < 0 || receivedBytes > MAX_ARCHIVE_BYTES) return null;
+  if (totalBytes !== null && (!Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > MAX_ARCHIVE_BYTES || totalBytes < receivedBytes)) return null;
+  return { phase, receivedBytes, totalBytes };
+}
+
 /** Windows 命名管道、Linux 抽象 socket 避免 TCP 端口竞争；macOS 保留回环锁，均由 OS 在退出时释放。 */
-async function acquireDownloadLock(cacheIdentity, signal) {
+async function acquireDownloadLock(cacheIdentity, signal, onProgress) {
   checkCancelled(signal);
   const key = sha256(cacheIdentity);
   const address = process.platform === "win32"
@@ -203,10 +226,24 @@ async function acquireDownloadLock(cacheIdentity, signal) {
     : process.platform === "linux"
       ? `\0qoder-core-download-${key}`
       : { host: "127.0.0.1", port: 20_000 + (Number.parseInt(key.slice(0, 8), 16) % 40_000), exclusive: true };
-  const sockets = new Set();
+  // 连接值标记对方是否已回送正确握手，只向已确认的等待者推送进度。
+  const sockets = new Map();
   let outcome;
+  let progress;
+  let progressTimer;
+  /** 复用 v1 的 downloading 身份帧，旧等待者可以忽略可选的 progress 字段。 */
+  const downloadingFrame = () => JSON.stringify({ protocol: LOCK_PROTOCOL, key, state: "downloading", progress }) + "\n";
+  /** 合并同阶段的更新，发送最新快照。若等待者读得慢，跳过已积压连接。 */
+  function broadcastProgress() {
+    clearTimeout(progressTimer);
+    progressTimer = undefined;
+    const frame = downloadingFrame();
+    for (const [socket, confirmed] of sockets) {
+      if (confirmed && socket.writable && !socket.writableNeedDrain) socket.write(frame);
+    }
+  }
   const server = createServer((socket) => {
-    sockets.add(socket);
+    sockets.set(socket, false);
     socket.setEncoding("utf8");
     socket.setTimeout(2_000, () => socket.destroy());
     socket.on("error", () => socket.destroy());
@@ -221,7 +258,10 @@ async function acquireDownloadLock(cacheIdentity, signal) {
       if (request !== `${LOCK_PROTOCOL}:${key}\n`) { socket.destroy(); return; }
       socket.removeAllListeners("data");
       socket.setTimeout(OPERATION_TIMEOUT_MS + 2_000);
-      if (outcome && !socket.writableEnded) socket.end(JSON.stringify(outcome) + "\n");
+      if (socket.writableEnded) return;
+      sockets.set(socket, true);
+      if (outcome) socket.end(JSON.stringify(outcome) + "\n");
+      else if (progress) socket.write(downloadingFrame());
     });
   });
   let leader = false;
@@ -237,15 +277,26 @@ async function acquireDownloadLock(cacheIdentity, signal) {
   if (leader) {
     server.on("error", () => {});
     return {
-      /** 持锁者负责下载；等待者只接收结果。 */
+      /** 持锁者负责下载和发布缓存，等待者接收进度与最终结果。 */
       leader: true,
+      /** 保存最新快照供新订阅者读取，阶段切换立即广播，零散字节更新定时合并。 */
+      publish(next) {
+        const phaseChanged = progress?.phase !== next.phase;
+        progress = next;
+        if (!sockets.size) return;
+        if (phaseChanged) broadcastProgress();
+        else progressTimer ??= setTimeout(broadcastProgress, PROGRESS_INTERVAL_MS);
+      },
       /** 停止监听后发布固定结果并关闭连接，保证取消接续可以重新获取锁。 */
       async finish(errorCode) {
         outcome = { protocol: LOCK_PROTOCOL, key, state: errorCode ? "error" : "ready", code: errorCode };
         // 先停止接受连接再广播，接续者不能重新连上已取消的领导者。
+        clearTimeout(progressTimer);
         const closing = new Promise((resolveClose) => server.close(resolveClose));
-        for (const socket of sockets) socket.end(JSON.stringify(outcome) + "\n");
-        for (const socket of sockets) socket.destroySoon();
+        for (const socket of sockets.keys()) {
+          socket.end(JSON.stringify(outcome) + "\n");
+          socket.destroySoon();
+        }
         await closing;
       },
     };
@@ -275,15 +326,24 @@ async function acquireDownloadLock(cacheIdentity, signal) {
     socket.on("close", () => finish(cancelledLeader ? undefined : coreError("CORE_LOCK")));
     socket.on("data", (chunk) => {
       buffer += chunk;
-      if (buffer.length > 2048) { finish(coreError("CORE_LOCK")); return; }
-      while (buffer.includes("\n")) {
-        const position = buffer.indexOf("\n");
+      // 帧可能拆包或粘包。每帧沿用 v1 上限，合法的多条进度可以随同一 chunk 抵达。
+      let position;
+      while ((position = buffer.indexOf("\n")) !== -1) {
+        if (position > 2048) { finish(coreError("CORE_LOCK")); return; }
         let message;
         try { message = JSON.parse(buffer.slice(0, position)); } catch { finish(coreError("CORE_LOCK")); return; }
         buffer = buffer.slice(position + 1);
         if (message?.protocol !== LOCK_PROTOCOL || message.key !== key) { finish(coreError("CORE_LOCK")); return; }
-        if (message.state === "downloading") { confirmed = true; socket.setTimeout(OPERATION_TIMEOUT_MS); }
-        else if (confirmed && message.state === "ready") finish();
+        if (message.state === "downloading") {
+          confirmed = true;
+          socket.setTimeout(OPERATION_TIMEOUT_MS);
+          // v1 旧持锁者只发身份和结果；等待期间保留 waiting，不估算接收量。
+          if (message.progress !== undefined) {
+            const snapshot = readLockProgress(message.progress);
+            if (!snapshot) { finish(coreError("CORE_LOCK")); return; }
+            onProgress(snapshot);
+          }
+        } else if (confirmed && message.state === "ready") finish();
         else if (confirmed && message.state === "error" && message.code === "CORE_CANCELLED") {
           cancelledLeader = true;
           // Windows 管道的已连接句柄也持有名字，等双向关闭后再竞争。
@@ -291,7 +351,9 @@ async function acquireDownloadLock(cacheIdentity, signal) {
         }
         else if (confirmed && message.state === "error") finish(coreError(message.code));
         else finish(coreError("CORE_LOCK"));
+        if (settled) return;
       }
+      if (buffer.length > 2048) finish(coreError("CORE_LOCK"));
     });
     if (signal.aborted) cancel();
   });
@@ -302,13 +364,12 @@ async function acquireDownloadLock(cacheIdentity, signal) {
  * 构造隔离运行时；生产使用下方默认实例，测试可注入合成清单、下载函数及 curl 进程替身。
  * @param {object} [options] 仅程序化依赖注入，不从环境变量加载下载代码或替代清单。
  * @param {object} [options.manifest] 同官方清单结构；所有 URL 仍必须精确对应官方固定 Release。
- * @param {string} [options.bundleDir] 随包核心所在目录，默认插件内 server/bin；仅供测试注入隔离目录。
- * @param {Function} [options.download] 接收 {url,destination,signal,maxBytes}，向独占临时路径写入原始二进制。
+ * @param {Function} [options.download] 向独占的 destination 写入 url 对应的原始资产，遵守 signal 和 maxBytes，并通过 onProgress 报告累计字节数。
  * @param {Function} [options.spawnProcess] 系统 curl 的 spawn 实现，用于无网络测试命令/环境传递。
  * @param {NodeJS.ProcessEnv} [options.env] curl 子进程环境；不用于决定核心版本、URL 或平台。
  * @param {Function} [options.readProxy] 异步读取系统代理；返回 HTTP(S) URL、direct、空字符串或 null。
  */
-export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN_ROOT, "server", "bin"), download, spawnProcess = spawn, env = process.env, readProxy = readEffectiveProxyUrl } = {}) {
+export function createCoreRuntime({ manifest = MANIFEST, download, spawnProcess = spawn, env = process.env, readProxy = readEffectiveProxyUrl } = {}) {
   // 复制并冻结依赖清单，调用者后续修改对象不能绕过下载来源和摘要约束。
   const catalog = structuredClone(manifest);
   const releases = new Map();
@@ -320,10 +381,33 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     const archive = `magpie-cli-${os}-${arch === "x64" ? "amd64" : "arm64"}${platform === "win32" ? ".exe" : ""}`;
     if (entry.archive !== archive || entry.url !== `https://github.com/yetone/magpie/releases/download/${catalog.version}/${archive}` ||
         !/^[a-f0-9]{64}$/.test(entry.archiveSha256) || !/^[a-f0-9]{64}$/.test(entry.binarySha256) ||
-        entry.archiveSha256 !== entry.binarySha256 ||
+        entry.archiveSha256 !== entry.binarySha256 || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes <= 0 || entry.sizeBytes > MAX_ARCHIVE_BYTES ||
         entry.path !== (platform === "win32" ? "magpie.exe" : `${key}/magpie`)) throw coreError("CORE_CONFIG");
     releases.set(key, Object.freeze({ ...entry, version: catalog.version, key, platform, arch }));
   }
+  /** 按版本/平台保存额外发行；基线始终从安装清单查找。 */
+  const registered = new Map();
+
+  /** 从持久化记录或官方元数据恢复规范发行，拒绝同一 tag 重定义摘要及路径。 */
+  function registerStoredRelease(entry) {
+    const base = releases.get(entry?.key);
+    if (!base || typeof entry.version !== "string" || entry.version.length > 64 ||
+        !/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(entry.version) ||
+        entry.version.trim() !== entry.version || typeof entry.archiveSha256 !== "string" ||
+        entry.archiveSha256.length !== 64 || !/^[a-f0-9]{64}$/.test(entry.archiveSha256) ||
+        entry.binarySha256 !== entry.archiveSha256 || !Number.isSafeInteger(entry.sizeBytes) ||
+        entry.sizeBytes <= 0 || entry.sizeBytes > MAX_ARCHIVE_BYTES) throw coreError("CORE_CONFIG");
+    const key = `${entry.version}/${base.key}`;
+    const known = entry.version === catalog.version ? base : registered.get(key);
+    // 文件名、路径、权限及平台取自基线，URL 只由已验证的版本与官方资产名构成。
+    const release = known ?? Object.freeze({ ...base, version: entry.version,
+      url: `https://github.com/yetone/magpie/releases/download/${entry.version}/${base.archive}`,
+      sizeBytes: entry.sizeBytes, archiveSha256: entry.archiveSha256, binarySha256: entry.binarySha256 });
+    if (Object.keys(release).some((field) => entry[field] !== release[field])) throw coreError("CORE_CONFIG");
+    if (!known) registered.set(key, release);
+    return release;
+  }
+
   /** 已校验文件的 stat 指纹与结果；watchdog 只 lstat，不重复读取约 90 MiB 核心。 */
   const verified = new Map();
   /** 当前实例的下载任务；同一缓存目标并发调用共享一次尝试。 */
@@ -343,9 +427,11 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
   }
 
   /** 目标固定为用户 dataDir/runtimes/version/platform-arch/发行路径的文件名；不读取或创建目录。 */
-  function resolveCoreBinaryPath({ dataDir, platform, arch }) {
+  function resolveCoreBinaryPath({ dataDir, platform, arch, version }) {
     if (typeof dataDir !== "string" || !dataDir.trim() || dataDir.includes("\0")) throw coreError("CORE_CONFIG");
-    const release = getCoreRelease({ platform, arch });
+    const base = getCoreRelease({ platform, arch });
+    const release = version === undefined || version === base.version ? base : registered.get(`${version}/${base.key}`);
+    if (!release) throw coreError("CORE_CONFIG");
     return resolve(dataDir, "runtimes", release.version, release.key, basename(release.path));
   }
 
@@ -353,7 +439,9 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
   function validateConfig(config) {
     if (!config || typeof config !== "object") throw coreError("CORE_CONFIG");
     if (config.core == null) return;
-    const release = getCoreRelease({ platform: config.core.platform, arch: config.core.arch });
+    const base = getCoreRelease({ platform: config.core.platform, arch: config.core.arch });
+    const release = config.core.version === base.version ? base : registered.get(`${config.core.version}/${base.key}`);
+    if (!release) throw coreError("CORE_CONFIG");
     for (const field of Object.keys(release)) if (config.core[field] !== release[field]) throw coreError("CORE_CONFIG");
     if (typeof config.binPath !== "string" || pathKey(config.binPath) !== pathKey(resolveCoreBinaryPath({ dataDir: config.dataDir, ...release }))) throw coreError("CORE_CONFIG");
   }
@@ -364,7 +452,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
       await checkDirectories(config);
       const stat = await lstat(config.binPath, { bigint: true });
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) return { state: "invalid", reason: MESSAGES.CORE_PATH, replaceable: false };
-      if (stat.size <= 0n || stat.size > BigInt(MAX_BINARY_BYTES)) return { state: "invalid", reason: MESSAGES.CORE_BINARY_HASH, replaceable: true };
+      if (stat.size !== BigInt(config.core.sizeBytes) || stat.size > BigInt(MAX_BINARY_BYTES)) return { state: "invalid", reason: MESSAGES.CORE_BINARY_HASH, replaceable: true };
       const key = cacheKey(config.binPath);
       const stamp = fingerprint(stat);
       const cached = verified.get(key);
@@ -384,7 +472,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
       return { state: "ready", reason: "核心缓存已通过 SHA256 校验。" };
     } catch (error) {
       checkCancelled(signal);
-      if (error.code === "ENOENT") return { state: "missing", reason: "核心尚未安装；首次启动订阅桥时优先从随包核心安装，未随包时下载。" };
+      if (error.code === "ENOENT") return { state: "missing", reason: "本机缺少所选版本的核心，启动时会下载并校验当前平台的官方发行文件。" };
       return { state: "error", reason: MESSAGES[error.code] ?? MESSAGES.CORE_CACHE, replaceable: false };
     }
   }
@@ -396,43 +484,32 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     let status = await inspect(config);
     if (status.replaceable !== false) {
       const key = cacheKey(config.binPath);
-      if (jobs.has(key)) status = { state: "downloading", reason: "正在准备当前平台核心，请稍候。" };
-      else if (status.state !== "ready" && failures.has(key)) status = { state: "error", reason: failures.get(key) };
+      const job = jobs.get(key);
+      if (job) return { state: "downloading", version: config.core.version, platform: config.core.key,
+        reason: "正在准备当前平台核心，请稍候。", progress: { ...job.progress } };
+      if (status.state !== "ready" && failures.has(key)) status = { state: "error", reason: failures.get(key) };
     }
     return { state: status.state, version: config.core.version, platform: config.core.key, reason: status.reason };
   }
 
-  /**
-   * 读取随包核心并按固定清单校验 SHA256；文件不存在返回 null 交由下载回退。
-   * 链接、特殊文件、超限或读取失败一律报 CORE_BUNDLE，哈希不符报 CORE_BINARY_HASH，均不回退网络。
-   */
-  async function readBundledBinary(core, signal) {
-    const path = join(bundleDir, core.path);
-    let stat;
-    try { stat = await lstat(path, { bigint: true }); }
-    catch (error) {
-      if (error.code === "ENOENT") return null;
-      throw coreError("CORE_BUNDLE");
-    }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0n || stat.size > BigInt(MAX_BINARY_BYTES)) throw coreError("CORE_BUNDLE");
-    checkCancelled(signal);
-    let bytes;
-    try { bytes = await readFile(path); } catch { throw coreError("CORE_BUNDLE"); }
-    checkCancelled(signal);
-    if (sha256(bytes) !== core.binarySha256) throw coreError("CORE_BINARY_HASH");
-    return bytes;
-  }
-
-  /** 完成一次安装事务：锁内重检、随包优先、两级摘要、有界原始字节、权限、原子 rename，失败保留已有核心。 */
-  async function install(config, signal, key) {
+  /** 在锁内重检并下载当前固定资产，校验后原子发布，失败保留已有核心。 */
+  async function install(config, job, key) {
+    const { signal } = job.controller;
     let lock;
     let temporary;
     let failure;
+    /** 本地立即记录真实计数，跨进程广播由持锁端节流。 */
+    function report(phase, receivedBytes) {
+      job.progress = { phase, receivedBytes, totalBytes: config.core.sizeBytes };
+      lock.publish(job.progress);
+    }
     try {
       // 只接续远端正常取消；共用原有总预算，本地取消和其他失败不重试。
       do {
-        lock = await acquireDownloadLock(key, signal);
+        lock = await acquireDownloadLock(key, signal, (snapshot) => { job.progress = snapshot; });
         checkCancelled(signal);
+        // 接续取消的持锁者时，新任务从零开始计数。
+        if (lock.cancelledLeader) job.progress = WAITING_PROGRESS;
       } while (lock.cancelledLeader);
       checkCancelled(signal);
       const current = await inspect(config, signal);
@@ -441,21 +518,24 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
       if (current.replaceable === false) throw coreError(current.reason === MESSAGES.CORE_PATH ? "CORE_PATH" : "CORE_CACHE");
       await checkDirectories(config, true);
       temporary = await mkdtemp(join(dirname(config.binPath), ".core-download-"));
-      // 随包核心优先：官方 ZIP 已内置当前平台二进制，安装后无需联网；源码运行等未随包场景才回退下载。
-      let binary = await readBundledBinary(config.core, signal);
-      if (!binary) {
-        const archivePath = join(temporary, "archive");
-        await fetchArchive({ url: config.core.url, destination: archivePath, signal, maxBytes: MAX_ARCHIVE_BYTES });
-        checkCancelled(signal);
-        const archiveStat = await lstat(archivePath);
-        if (!archiveStat.isFile() || archiveStat.isSymbolicLink() || archiveStat.nlink !== 1) throw coreError("CORE_ARCHIVE");
-        if (!archiveStat.size || archiveStat.size > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
-        const archive = await readFile(archivePath);
-        if (archive.length > MAX_ARCHIVE_BYTES) throw coreError("CORE_SIZE");
-        if (sha256(archive) !== config.core.archiveSha256) throw coreError("CORE_ARCHIVE_HASH");
-        binary = readRawBinary(archive, signal);
-        if (sha256(binary) !== config.core.binarySha256) throw coreError("CORE_BINARY_HASH");
-      }
+      // 仅在缓存需要准备时运行 curl，先限制流长度，再独立核对落盘大小和固定摘要。
+      const archivePath = join(temporary, "archive");
+      report("downloading", 0);
+      await fetchArchive({ url: config.core.url, destination: archivePath, signal, maxBytes: config.core.sizeBytes,
+        onProgress: (receivedBytes) => report("downloading", receivedBytes) });
+      checkCancelled(signal);
+      const archiveStat = await lstat(archivePath);
+      if (!archiveStat.isFile() || archiveStat.isSymbolicLink() || archiveStat.nlink !== 1) throw coreError("CORE_ARCHIVE");
+      if (archiveStat.size !== config.core.sizeBytes) throw coreError("CORE_SIZE");
+      report("verifying", archiveStat.size);
+      const archive = await readFile(archivePath);
+      if (archive.length !== config.core.sizeBytes) throw coreError("CORE_SIZE");
+      if (sha256(archive) !== config.core.archiveSha256) throw coreError("CORE_ARCHIVE_HASH");
+      const binary = readRawBinary(archive, signal);
+      if (sha256(binary) !== config.core.binarySha256) throw coreError("CORE_BINARY_HASH");
+
+      // 核验完成才写入暂存核心，权限与发布仍在同一把下载锁内完成。
+      report("installing", binary.length);
       const staged = join(temporary, "core");
       const file = await open(staged, "wx", 0o600);
       try { await file.writeFile(binary); await file.sync(); } finally { await file.close(); }
@@ -554,6 +634,8 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
       controller,
       /** 当前尚未结束的订阅者数量。 */
       waiters: 0,
+      /** @type {CoreProgress} 读取状态时按值返回；首次争锁和取消接续时从 waiting 开始。 */
+      progress: WAITING_PROGRESS,
       /** 安装完成后禁止订阅者清理再次取消。 */
       finished: false,
       /** 本次尝试的唯一结果 Promise，失败不会自动重建。 */
@@ -561,7 +643,7 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     };
     failures.delete(key);
     jobs.set(key, job);
-    job.promise = install(config, controller.signal, key).then(() => ({ available: true, state: "ready", reason: "核心缓存已通过 SHA256 校验。" }), (error) => {
+    job.promise = install(config, job, key).then(() => ({ available: true, state: "ready", reason: "核心缓存已通过 SHA256 校验。" }), (error) => {
       failures.set(key, error.safeMessage);
       throw error;
     }).finally(() => {
@@ -572,9 +654,21 @@ export function createCoreRuntime({ manifest = MANIFEST, bundleDir = join(PLUGIN
     return joinJob(job, signal);
   }
 
-  return { getCoreRelease, resolveCoreBinaryPath, getCoreStatus, ensureCore };
+  /** 候选元数据和可执行文件共用目录边界；只允许已注册发行的规范目标。 */
+  async function checkReleaseDirectory(config, create = false) {
+    validateConfig(config);
+    if (!config.core) throw coreError("CORE_CONFIG");
+    await checkDirectories(config, create);
+  }
+
+  /** 仅读取内存进度，管理页轮询无需重新散列正在发布的核心。 */
+  function getCoreProgress(config) {
+    validateConfig(config);
+    return { ...(jobs.get(cacheKey(config.binPath))?.progress ?? WAITING_PROGRESS) };
+  }
+  return { getCoreRelease, resolveCoreBinaryPath, getCoreStatus, ensureCore, registerStoredRelease, checkReleaseDirectory, getCoreProgress };
 }
 
 /** 默认生产实例，读取固定发行清单；导出的四个接口与配置/生命周期集成约定一致。 */
 const runtime = createCoreRuntime();
-export const { getCoreRelease, resolveCoreBinaryPath, getCoreStatus, ensureCore } = runtime;
+export const { getCoreRelease, resolveCoreBinaryPath, getCoreStatus, ensureCore, registerStoredRelease, checkReleaseDirectory, getCoreProgress } = runtime;

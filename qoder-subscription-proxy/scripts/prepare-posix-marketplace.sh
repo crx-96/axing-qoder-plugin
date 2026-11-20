@@ -1,8 +1,8 @@
 #!/bin/sh
-# 从源码生成独立 POSIX 本地市场；不注册市场、不安装插件、不修改已有缓存。
+# 从源码复制独立本地市场；与通用 ZIP 共用入口和分发清单。
 set -eu
 
-# 错误和用法写入 stderr；任何输入路径都作为单独参数处理，绝不 eval。
+# 将失败原因写入 stderr 并终止准备。
 fail() {
     printf 'qoder-subscription-proxy: %s\n' "$1" >&2
     exit 1
@@ -14,7 +14,7 @@ script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || fail '无法解析脚本
 plugin_root=$(CDPATH= cd -P "$script_dir/.." && pwd) || fail '无法解析插件目录。'
 market_root=$(CDPATH= cd -P "$plugin_root/.." && pwd) || fail '无法解析源码市场目录。'
 catalog="$market_root/.qoder-plugin/marketplace.json"
-[ -f "$catalog" ] && [ ! -L "$catalog" ] || fail '源码仓库缺少 .qoder-plugin/marketplace.json；请从原仓库运行此脚本。'
+[ ! -L "$market_root/.qoder-plugin" ] && [ -f "$catalog" ] && [ ! -L "$catalog" ] || fail '源码仓库缺少常规 .qoder-plugin/marketplace.json；请从原仓库运行此脚本。'
 
 # 先规范化已有父目录，拦截源仓库内目标及符号链接别名；不创建额外父目录。
 # 将相对路径加 ./，使以连字符开头的名称不会被 dirname/basename 当作选项。
@@ -32,8 +32,7 @@ case "$target/" in
 esac
 [ ! -e "$target" ] && [ ! -L "$target" ] || fail '目标已存在，拒绝覆盖；请选择新的目录。'
 
-# 只删除本次成功 mkdir 后拥有的目录；失败或中断不留下半成品市场。
-# 已有目录绝不进入清理范围；成功后清空 owned，保留正式交付目录。
+# 只清理本次成功 mkdir 后拥有的目录；完成时清空 owned 以保留成品。
 owned=
 cleanup() {
     if [ -n "$owned" ]; then rm -rf "$owned"; fi
@@ -45,11 +44,9 @@ owned=$target
 copy_root="$target/qoder-subscription-proxy"
 mkdir "$target/.qoder-plugin" "$copy_root" "$copy_root/.qoder-plugin" "$copy_root/assets" "$copy_root/server" "$copy_root/server/bin" "$copy_root/server/panel" "$copy_root/scripts"
 
-# 仅复制显式允许的常规文件；拒绝符号链接文件和目录，防止引用外部真实数据。
-# 参数为插件内相对路径，目标同名；目录已由本脚本创建。
+# 仅复制清单中的普通文件；所有目标目录均由本次创建，源目录逐层拒绝链接。
 copy_file() {
     relative=$1
-    # 清单只允许插件相对路径，禁止路径穿越和平台路径分隔符。按目录清单检查上层链接。
     case "/$relative/" in *//*|*/../*|*/./*|*\\*|*:*) fail "无效的分发路径：$relative" ;; esac
     source="$plugin_root/$relative"
     [ -f "$source" ] && [ ! -L "$source" ] || fail "分发文件缺失或是符号链接：$relative"
@@ -59,81 +56,21 @@ for directory in .qoder-plugin assets server server/bin server/panel scripts; do
     [ -d "$plugin_root/$directory" ] && [ ! -L "$plugin_root/$directory" ] || fail "分发目录缺失或是符号链接：$directory"
 done
 
-# 顶层 allowlist 不包含默认 Windows 清单、测试、data、临时目录或未知文件。
-# 市场 JSON 原样复制，保持 axing-qoder-plugins ID、版本和展示元数据不变。
+# 保留市场登记信息、顶层 README 与许可证，插件 README 的相对引用在副本中仍可使用。
 cp "$catalog" "$target/.qoder-plugin/marketplace.json"
-# 插件 README 的 ../README.md 链接仍指向市场说明，并保留市场自身许可证。
 for market_file in README.md LICENSE; do
     [ -f "$market_root/$market_file" ] && [ ! -L "$market_root/$market_file" ] || fail "市场分发文件缺失或是符号链接：$market_file"
     cp "$market_root/$market_file" "$target/$market_file"
 done
-# ZIP 与本地市场遵循同一份源码白名单，预先检查清单自身，避免跟随外部链接。
+
+# 插件仅按白名单复制；通用 mcp.json 字节不变，准备市场无需执行解释器或取得核心。
 list="$plugin_root/scripts/distribution-files.txt"
-[ -f "$list" ] && [ ! -L "$list" ] || fail "缺少常规文件 scripts/distribution-files.txt"
+[ -f "$list" ] && [ ! -L "$list" ] || fail '缺少常规文件 scripts/distribution-files.txt'
 while IFS= read -r relative || [ -n "$relative" ]; do
     copy_file "$relative"
 done < "$list"
-# 独立市场使用 POSIX 入口，源码中的默认 Windows 清单不进入此位置。
-cp "$copy_root/mcp.posix.json" "$copy_root/mcp.json"
-
-# 市场只内置当前 POSIX 平台的原始核心；不下载、不编译。失败由 trap 清理新副本。
-case "$(uname -s)" in
-    Linux) platform=linux ;;
-    Darwin) platform=darwin ;;
-    *) fail '核心市场仅支持 macOS/Linux。' ;;
-esac
-case "$(uname -m)" in
-    x86_64|amd64) platform="$platform-x64" ;;
-    arm64|aarch64) platform="$platform-arm64" ;;
-    *) fail '核心市场仅支持 x64/arm64。' ;;
-esac
-command -v node >/dev/null 2>&1 || fail '构建市场需要 PATH 中可用的 Node.js。'
-node --input-type=module - "$plugin_root" "$copy_root" "$platform" <<'NODE'
-import { lstatSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
-import { createHash } from 'node:crypto';
-import path from 'node:path';
-
-/** 本次源插件、新副本的绝对路径与已经 shell 校验的宿主平台键。 */
-const [root, copy, platform] = process.argv.slice(2);
-
-/** 拒绝路径及祖先中的链接；缺失路径直接失败，不跟随外部缓存或真实数据。 */
-function assertNoLinks(file) {
-  for (let current = file; ; current = path.dirname(current)) {
-    if (lstatSync(current).isSymbolicLink()) throw new Error(`核心拒绝符号链接：${current}`);
-    if (path.dirname(current) === current) break;
-  }
-}
-
-// 从已复制的白名单清单读取元数据，并限定当前平台路径，防止路径穿越或混入其他平台。
-assertNoLinks(copy);
-/** 本地分发清单，不从网络或其他已安装插件读取。 */
-const manifestPath = path.join(copy, 'server/bin/platforms.json');
-assertNoLinks(manifestPath);
-/** 当前平台的核心路径及固定 SHA256。 */
-const entry = JSON.parse(readFileSync(manifestPath, 'utf8')).platforms?.[platform];
-if (!entry || entry.path !== `${platform}/magpie` || !/^[a-f0-9]{64}$/.test(entry.binarySha256)) {
-  throw new Error('核心平台清单路径或 SHA256 无效');
-}
-/** fetch-core 预先准备的当前平台核心；不会自动下载或运行。 */
-const source = path.join(root, '.core-build', platform, path.basename(entry.path));
-assertNoLinks(source);
-if (!lstatSync(source).isFile()) throw new Error('核心缓存不是常规文件');
-/** 只复制同一份经过校验的原始字节，避免校验后再次读取源文件。 */
-const bytes = readFileSync(source);
-if (createHash('sha256').update(bytes).digest('hex') !== entry.binarySha256) {
-  throw new Error('核心 SHA256 不匹配');
-}
-// 独立副本中的平台目录排他创建；只写当前平台核心，不复制缓存、归档或未知文件。
-/** 白名单核心最终分发位置。 */
-const destination = path.join(copy, 'server/bin', entry.path);
-mkdirSync(path.dirname(destination));
-writeFileSync(destination, bytes, { flag: 'wx', mode: 0o755 });
-chmodSync(destination, 0o755);
-NODE
 owned=
 
-# 仅提示手动安装入口；本脚本不读写用户全局配置或 Qoder 已安装缓存。
-printf '已生成 macOS/Linux 独立本地市场：%s\n' "$target"
+printf '已生成独立本地市场：%s\n' "$target"
 printf '市场 ID：axing-qoder-plugins；插件：qoder-subscription-proxy。\n'
-printf '此目录供支持自定义市场的客户端使用；Qoder Desktop 请从源码用 package-plugin.mjs 按平台键（darwin-x64/darwin-arm64/linux-x64/linux-arm64）生成内置核心的 ZIP，再在扩展 → 插件中上传。\n'
-printf '未自动注册、安装或启用；若已存在同 ID 市场，请在界面确认市场来源。源目录和已安装缓存未修改，未复制真实 data。\n'
+printf '未自动注册、安装或启用；Qoder Desktop 可在扩展 → 插件中导入通用 ZIP。\n'

@@ -1,0 +1,43 @@
+<style>
+  #bridge-ports details { margin: 0; }
+  #bridge-ports summary { font-weight: 600; color: var(--ink); }
+  #bridge-ports .port-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15em), 1fr)); gap: 1rem; margin-block: .75rem; }
+  #bridge-ports .port-field { display: grid; align-content: start; gap: .3rem; }
+  #bridge-ports input { width: 9em; max-width: 100%; min-height: 44px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; font-variant-numeric: tabular-nums; }
+  #bridge-ports input:disabled { opacity: .65; }
+  #bridge-ports input[aria-invalid=true] { border-color: var(--error); }
+  #bridge-ports [data-part=confirmation] { margin-top: .75rem; border-inline-start: 3px solid var(--accent); padding-inline-start: .75rem; }
+  #bridge-ports [data-part=message]:not(:empty) { margin-top: .65rem; }
+  #bridge-ports [data-part=message][data-error=true] { color: var(--error); }
+</style>
+<section id="bridge-ports" aria-labelledby="bridge-ports-title" hidden>
+  <details>
+    <summary id="bridge-ports-title">端口设置</summary>
+    <p id="bridge-ports-range" class="hint">两个端口均为 1 到 65535 的整数，且不能相同。</p>
+    <div class="port-fields">
+      <div class="port-field">
+        <label for="bridge-model-port">模型端口</label>
+        <input id="bridge-model-port" data-part="modelPort" type="number" min="1" max="65535" step="1" required value="19787" aria-describedby="bridge-model-help bridge-ports-range" disabled>
+        <small id="bridge-model-help">默认 19787。<span data-part="modelLocked" hidden>模型端口由环境变量 BRIDGE_PORT 指定。要更改此端口，请调整该环境变量。</span></small>
+      </div>
+      <div class="port-field">
+        <label for="bridge-management-port">浏览器管理端口</label>
+        <input id="bridge-management-port" data-part="managementPort" type="number" min="1" max="65535" step="1" required value="19788" aria-describedby="bridge-management-help bridge-ports-range" disabled>
+        <small id="bridge-management-help">默认 19788。<span data-part="managementLocked" hidden>浏览器管理端口由环境变量 BRIDGE_MANAGEMENT_PORT 指定。要更改此端口，请调整该环境变量。</span></small>
+      </div>
+    </div>
+    <p id="bridge-ports-warning" class="hint">保存期间代理可能短暂重启。更改模型端口后，请更新客户端的 Base URL。如果使用 Agent 自动配置，请到原生管理页的「Agent」重新同步。</p>
+    <div class="actions">
+      <button type="button" data-part="save" data-primary="true" aria-expanded="false" aria-controls="bridge-ports-confirmation" aria-describedby="bridge-ports-warning" disabled>保存并应用</button>
+      <button type="button" data-part="defaults" disabled>恢复默认值</button>
+    </div>
+    <div id="bridge-ports-confirmation" data-part="confirmation" role="group" aria-labelledby="bridge-ports-preview" hidden>
+      <p id="bridge-ports-preview" data-part="preview"></p>
+      <div class="actions">
+        <button type="button" data-part="confirm" data-primary="true" aria-describedby="bridge-ports-preview bridge-ports-warning">确认应用</button>
+        <button type="button" data-part="cancel">继续编辑</button>
+      </div>
+    </div>
+    <p data-part="message" role="status" aria-live="polite" aria-atomic="true"></p>
+  </details>
+</section>

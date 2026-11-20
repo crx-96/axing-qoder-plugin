@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { magpieArguments, magpieEnvironment } from "../server/config.mjs";
 import {
-  CONTROL_MESSAGE_LIMIT, CONTROL_REQUEST_TIMEOUT_MS, encodePosixMessage,
+  CONTROL_MESSAGE_LIMIT, CONTROL_REQUEST_TIMEOUT_MS, POSIX_RUNTIME_REVISION, encodePosixMessage,
   createPosixControlMessage, posixSupervisorError, validatePosixControlMessage, validatePosixIdentity, validatePosixPaths,
 } from "../server/posix-supervisor.mjs";
 
@@ -179,7 +179,8 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
     // 原始核心输出可能含长期管理密钥，必须在落盘前脱敏且不能混进身份协议。
     const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW || 0);
     log = await open(join(config.dataDir, "bridge.log"), flags, 0o600);
-    if (!(await log.stat()).isFile()) throw posixSupervisorError();
+    const openedLog = await log.stat();
+    if (!openedLog.isFile() || openedLog.nlink !== 1) throw posixSupervisorError();
     await log.chmod(0o600);
     if (!closing) {
       server = createServer(acceptConnection);
@@ -219,8 +220,8 @@ export async function runCoreGuardian(config, { spawnChild = spawn } = {}) {
         const probe = { nonce: "0".repeat(64), operation: "status" };
         encodePosixMessage(createPosixControlMessage(identity, config, { ...probe, direction: "request" }));
         encodePosixMessage(createPosixControlMessage(identity, config, { ...probe, direction: "response", state: "running" }));
-        // 通过私有公告管道声明 stop 的回收语义，避免混装脚本被 owner 登记为新协议。
-        process.stdout.write(encodePosixMessage({ ...identity, stopClosesLease: true }));
+        // 私有管道声明本次启动的环境隔离协议及 stop 的回收语义。
+        process.stdout.write(encodePosixMessage({ ...identity, stopClosesLease: true, runtimeRevision: POSIX_RUNTIME_REVISION }));
       } else if (!closing) {
         throw posixSupervisorError();
       }
@@ -268,11 +269,12 @@ export async function runPosixSupervisor(config, { spawnGuardian = spawn } = {})
       if (newline !== buffer.length - 1) throw posixSupervisorError();
       const announcement = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
       const identity = validatePosixIdentity(announcement, config);
-      if (announcement.stopClosesLease !== true) throw posixSupervisorError();
+      // 旧 guardian 可支持远程 stop，但其核心仍可能使用宿主 HOME，须在转发身份前回收。
+      if (announcement.runtimeRevision !== POSIX_RUNTIME_REVISION || announcement.stopClosesLease !== true) throw posixSupervisorError();
       announced = true;
       buffer = Buffer.alloc(0);
       clearTimeout(deadline);
-      process.stdout.write(encodePosixMessage({ ...identity, stopClosesLease: true }), (error) => { if (error) onOutputError(); });
+      process.stdout.write(encodePosixMessage({ ...identity, stopClosesLease: true, runtimeRevision: POSIX_RUNTIME_REVISION }), (error) => { if (error) onOutputError(); });
     } catch { closeLease(true); }
   }
 

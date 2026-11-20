@@ -1,6 +1,7 @@
-mcp.posix.json
+mcp.json
 .qoder-plugin/plugin.json
 assets/logo.png
+assets/entrypoint.png
 DISCLAIMER.md
 LICENSE
 README.md
@@ -9,8 +10,16 @@ server/bin/LICENSE
 server/bin/README.md
 server/bin/README_CN.md
 server/bin/platforms.json
+server/bin/legacy-releases.json
 server/config.mjs
+server/bridge-ports.mjs
+server/panel/bridge-ports.html
+server/panel/bridge-ports.js
 server/core-runtime.mjs
+server/core-selection.mjs
+server/core-updates.mjs
+server/installed-cores.mjs
+server/legacy-core-cache.mjs
 server/crc32.mjs
 server/lifecycle-lock.mjs
 server/image-generation.mjs
@@ -22,6 +31,9 @@ server/mcp-protocol.mjs
 server/mcp-server.mjs
 server/owned-http.mjs
 server/panel/management-app.js
+server/panel/core-update.html
+server/panel/core-update.js
+server/panel/installed-cores.js
 server/posix-supervisor.mjs
 server/supervisor.mjs
 server/system-proxy.mjs
@@ -30,5 +42,6 @@ scripts/distribution-files.txt
 scripts/prepare-posix-marketplace.sh
 scripts/proxy-supervisor.mjs
 scripts/proxy-supervisor.ps1
+scripts/start-mcp.mjs
 scripts/start-mcp.ps1
 scripts/start-mcp.sh

@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export async function connectBrowser(profile) {
-  const deadline = Date.now() + 15000;
+  // 高负载 runner 上浏览器冷启动可能超过 15 秒；仍由调用方总时限兜底。
+  const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     let text;
     try { text = await readFile(join(profile, "DevToolsActivePort"), "utf8"); }

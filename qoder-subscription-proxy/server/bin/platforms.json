@@ -6,6 +6,7 @@
       "path": "magpie.exe",
       "binarySha256": "b8f7ed6cfa6a5e161dfaf3776ce4f97d0c10d4cf35cc33d0be1d8cf35bf1163a",
       "archive": "magpie-cli-windows-amd64.exe",
+      "sizeBytes": 97077760,
       "archiveSha256": "b8f7ed6cfa6a5e161dfaf3776ce4f97d0c10d4cf35cc33d0be1d8cf35bf1163a",
       "url": "https://github.com/yetone/magpie/releases/download/v0.1.4582/magpie-cli-windows-amd64.exe"
     },
@@ -14,6 +15,7 @@
       "mode": "0755",
       "binarySha256": "24b075c72ae11aaeb772c19b30e33aab2bfb98bd29da167d6b24dd643f01a406",
       "archive": "magpie-cli-darwin-amd64",
+      "sizeBytes": 96329648,
       "archiveSha256": "24b075c72ae11aaeb772c19b30e33aab2bfb98bd29da167d6b24dd643f01a406",
       "url": "https://github.com/yetone/magpie/releases/download/v0.1.4582/magpie-cli-darwin-amd64"
     },
@@ -22,6 +24,7 @@
       "mode": "0755",
       "binarySha256": "3187ee06bb2fdd11d05c6624eda017ef567793bf4916c160086bf26df55dede4",
       "archive": "magpie-cli-darwin-arm64",
+      "sizeBytes": 89408018,
       "archiveSha256": "3187ee06bb2fdd11d05c6624eda017ef567793bf4916c160086bf26df55dede4",
       "url": "https://github.com/yetone/magpie/releases/download/v0.1.4582/magpie-cli-darwin-arm64"
     },
@@ -30,6 +33,7 @@
       "mode": "0755",
       "binarySha256": "6b233b7b74364bf0205687ebc186adb223f2403bcc7f1d89f01af54ba24f8408",
       "archive": "magpie-cli-linux-amd64",
+      "sizeBytes": 94818466,
       "archiveSha256": "6b233b7b74364bf0205687ebc186adb223f2403bcc7f1d89f01af54ba24f8408",
       "url": "https://github.com/yetone/magpie/releases/download/v0.1.4582/magpie-cli-linux-amd64"
     },
@@ -38,6 +42,7 @@
       "mode": "0755",
       "binarySha256": "185948a63ebf9fb1efffcc079b3e513baf66ac350d403f45adcef08f03b74729",
       "archive": "magpie-cli-linux-arm64",
+      "sizeBytes": 87294114,
       "archiveSha256": "185948a63ebf9fb1efffcc079b3e513baf66ac350d403f45adcef08f03b74729",
       "url": "https://github.com/yetone/magpie/releases/download/v0.1.4582/magpie-cli-linux-arm64"
     }

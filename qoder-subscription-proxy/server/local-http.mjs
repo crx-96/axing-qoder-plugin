@@ -77,5 +77,6 @@ export function httpFailure(status, operation) {
     503: "暂无可用账号或上游暂不可用",
     504: "上游响应超时",
   };
-  return new Error(`${operation}失败（HTTP ${status}）：${hints[status] || "请在管理面板查看错误详情"}`);
+  const message = `${operation}失败（HTTP ${status}）：${hints[status] || "请在管理面板查看错误详情"}`;
+  return Object.assign(new Error(message), { safeMessage: message });
 }

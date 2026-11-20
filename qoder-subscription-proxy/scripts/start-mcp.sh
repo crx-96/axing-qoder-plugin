@@ -1,5 +1,5 @@
 #!/bin/sh
-# macOS/Linux 的 stdio 入口；由清单显式调用 sh，不依赖脚本执行位。
+# 兼容手动调用的 macOS/Linux stdio 入口；Qoder 插件清单使用通用 start-mcp.mjs。
 set -eu
 
 # 输出只写 stderr，避免破坏 MCP 的逐行 JSON-RPC stdout。
@@ -13,7 +13,7 @@ script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || fail '无法解析插件
 entry="$script_dir/../server/mcp-server.mjs"
 [ -f "$entry" ] || fail '缺少 server/mcp-server.mjs，请重新生成或安装插件。'
 
-# 仅接受已提供原生核心的系统与架构；Git Bash 不是正式支持的平台。
+# 仅接受运行时平台清单支持的系统与架构；Git Bash 不是正式支持的平台。
 system=$(uname -s) || fail '无法识别操作系统。'
 machine=$(uname -m) || fail '无法识别 CPU 架构。'
 case "$system" in Darwin|Linux) ;; *) fail '此入口仅支持 macOS/Linux；Windows 请使用默认清单。' ;; esac

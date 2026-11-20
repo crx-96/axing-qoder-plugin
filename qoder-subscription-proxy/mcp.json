@@ -2,8 +2,8 @@
   "mcpServers": {
     "qoder-subscription-proxy": {
       "type": "stdio",
-      "command": "powershell.exe",
-      "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "${QODER_PLUGIN_ROOT}/scripts/start-mcp.ps1"],
+      "command": "${QODER_NODE_RUNTIME}",
+      "args": ["${QODER_PLUGIN_ROOT}/scripts/start-mcp.mjs"],
       "timeout": 660000
     }
   }

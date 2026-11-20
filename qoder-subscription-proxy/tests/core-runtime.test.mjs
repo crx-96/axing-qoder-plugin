@@ -6,6 +6,7 @@ import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, 
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, win32 } from "node:path";
+import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
@@ -16,27 +17,18 @@ const moduleUrl = new URL("../server/core-runtime.mjs", import.meta.url).href;
 const binary = Buffer.from("synthetic core bytes; never executed\n".repeat(17));
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-async function fixture(t, { platform = "linux", arch = "x64", archive, expectedBinary = binary, bundle, download, spawnProcess, env = {}, readProxy = async () => "" } = {}) {
+async function fixture(t, { platform = "linux", arch = "x64", archive, download, spawnProcess, env = {}, readProxy = async () => "" } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "qoder-core-test-")));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const bytes = archive ?? binary;
   const catalog = structuredClone(manifest);
   const entry = catalog.platforms[`${platform}-${arch}`];
   entry.archiveSha256 = hash(bytes);
-  entry.binarySha256 = hash(expectedBinary);
-  // 随包目录与真实插件及数据目录隔离；未提供 bundle 时目录为空，安装走下载回退。
-  const bundleDir = `${root}-bundle`;
-  await mkdir(bundleDir, { recursive: true });
-  t.after(async () => { await rm(bundleDir, { recursive: true, force: true }); });
-  if (bundle !== undefined) {
-    const bundled = join(bundleDir, entry.path);
-    await mkdir(dirname(bundled), { recursive: true });
-    await writeFile(bundled, bundle);
-  }
+  entry.binarySha256 = entry.archiveSha256;
+  entry.sizeBytes = bytes.length;
   let calls = 0;
   const runtime = createCoreRuntime({
     manifest: catalog,
-    bundleDir,
     readProxy,
     ...(spawnProcess ? { spawnProcess, env } : { download: async (options) => {
       calls++;
@@ -49,7 +41,16 @@ async function fixture(t, { platform = "linux", arch = "x64", archive, expectedB
     core: runtime.getCoreRelease({ platform, arch }),
     binPath: runtime.resolveCoreBinaryPath({ dataDir: root, platform, arch }),
   };
-  return { runtime, config, root, bundleDir, archive: bytes, catalog, calls: () => calls };
+  return { runtime, config, root, archive: bytes, catalog, calls: () => calls };
+}
+
+async function waitForProgress(runtime, config, receivedBytes) {
+  const timeout = AbortSignal.timeout(5000);
+  for (;;) {
+    const { progress } = await runtime.getCoreStatus(config);
+    if (progress?.receivedBytes === receivedBytes) return progress;
+    await delay(10, undefined, { signal: timeout });
+  }
 }
 
 async function assertClean(config) {
@@ -79,7 +80,7 @@ test("固定发行清单、五种平台选择和目标文件名一致，状态�
     assert.equal(binPath, join(root, "runtimes", manifest.version, key, basename(entry.path)));
     const config = { core, dataDir: root, binPath };
     assert.deepEqual(await getCoreStatus(config), {
-      state: "missing", version: manifest.version, platform: key, reason: "核心尚未安装；首次启动订阅桥时优先从随包核心安装，未随包时下载。",
+      state: "missing", version: manifest.version, platform: key, reason: "本机缺少所选版本的核心，启动时会下载并校验当前平台的官方发行文件。",
     });
     assert.equal((await ensureCore(config, { allowDownload: false })).available, false);
   }
@@ -136,53 +137,8 @@ for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin",
   });
 }
 
-for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["darwin", "x64"], ["darwin", "arm64"], ["win32", "x64"]]) {
-  test(`${platform}-${arch} 随包核心直接安装不联网，校验后复用缓存`, async (t) => {
-    const { runtime, config, calls } = await fixture(t, { platform, arch, bundle: binary, download() { throw new Error("must not download"); } });
-    assert.equal((await runtime.ensureCore(config)).state, "ready");
-    assert.deepEqual(await readFile(config.binPath), binary);
-    assert.equal(calls(), 0);
-    assert.deepEqual(await readdir(dirname(config.binPath)), [basename(config.binPath)]);
-    const stamp = await lstat(config.binPath);
-    for (let index = 0; index < 3; index++) {
-      assert.equal((await runtime.getCoreStatus(config)).state, "ready");
-      assert.equal((await runtime.ensureCore(config, { allowDownload: false })).available, true);
-    }
-    assert.equal((await lstat(config.binPath)).mtimeMs, stamp.mtimeMs);
-    if (process.platform !== "win32" && platform !== "win32") assert.equal(stamp.mode & 0o777, 0o755);
-    await assertClean(config);
-  });
-}
-
-test("随包核心 SHA256 不符直接报错，不回退下载也不发布", async (t) => {
-  const { runtime, config, calls } = await fixture(t, { bundle: Buffer.from("tampered bundle"), download() { throw new Error("must not download"); } });
-  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BINARY_HASH"));
-  assert.equal(calls(), 0);
-  assert.equal((await runtime.getCoreStatus(config)).state, "error");
-  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
-  await assertClean(config);
-});
-
-test("随包核心为空文件或符号链接时拒绝安装，不回退下载", async (t) => {
-  const { runtime, config, bundleDir, calls } = await fixture(t, { download() { throw new Error("must not download"); } });
-  const bundled = join(bundleDir, config.core.path);
-  await mkdir(dirname(bundled), { recursive: true });
-  await writeFile(bundled, Buffer.alloc(0));
-  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BUNDLE"));
-  await rm(bundled);
-  try { await symlink(join(bundleDir, "不存在的目标"), bundled); }
-  catch (error) {
-    if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) return t.skip(`环境不支持链接：${error.code}`);
-    throw error;
-  }
-  await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_BUNDLE"));
-  assert.equal(calls(), 0);
-  await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
-  await assertClean(config);
-});
-
 test("归档 hash 错误不发布；allowDownload=false 不重试也不抛恢复异常", async (t) => {
-  const { runtime, config, calls } = await fixture(t, { download: (options) => writeFile(options.destination, "wrong", { flag: "wx" }) });
+  const { runtime, config, calls } = await fixture(t, { download: (options) => writeFile(options.destination, Buffer.alloc(binary.length), { flag: "wx" }) });
   await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE_HASH"));
   assert.equal((await runtime.getCoreStatus(config)).state, "error");
   for (let index = 0; index < 3; index++) assert.equal((await runtime.ensureCore(config, { allowDownload: false })).available, false);
@@ -308,16 +264,17 @@ test("一个并发等待者取消不影响另一个等待者", async (t) => {
 });
 
 test("空原始资源拒绝发布且清理临时目录", async (t) => {
-  const { runtime, config } = await fixture(t, { archive: Buffer.alloc(0), expectedBinary: Buffer.alloc(0) });
+  const { runtime, config } = await fixture(t, { download: ({ destination }) => writeFile(destination, Buffer.alloc(0), { flag: "wx" }) });
   await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_SIZE"));
   await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
   await assertClean(config);
 });
 
-test("下载原始资源截断或替换为归档时摘要失败，不尝试解压", async (t) => {
-  for (const bytes of [binary.subarray(0, 5), Buffer.from("504b03046e6f742061207261772072656c65617365", "hex")]) {
+test("下载原始资源被截断或替换为同长度归档时拒绝发布", async (t) => {
+  const zip = Buffer.concat([Buffer.from("504b0304", "hex"), Buffer.alloc(binary.length - 4)]);
+  for (const [bytes, code] of [[binary.subarray(0, 5), "CORE_SIZE"], [zip, "CORE_ARCHIVE_HASH"]]) {
     const { runtime, config } = await fixture(t, { download: ({ destination }) => writeFile(destination, bytes, { flag: "wx" }) });
-    await assert.rejects(runtime.ensureCore(config), expectSafeError("CORE_ARCHIVE_HASH"));
+    await assert.rejects(runtime.ensureCore(config), expectSafeError(code));
     await assert.rejects(lstat(config.binPath), { code: "ENOENT" });
     await assertClean(config);
   }
@@ -346,12 +303,12 @@ test("下载产物为硬链接时拒绝发布，不修改链接源文件", async
   await assertClean(config);
 });
 
-test("固定 Magpie 来源、平台命名、摘要和随包路径不可绕过", () => {
+test("固定 Magpie 来源、平台命名、大小、摘要和发行路径不可绕过", () => {
   for (const override of [
     { archive: "magpie-cli-linux-amd64.tar.gz" },
     { url: "http://github.com/yetone/magpie/releases/download/v0.1.4582/magpie-cli-linux-amd64" },
     { path: "../magpie" }, { path: "/magpie" }, { path: "linux-x64/other" },
-    { archiveSha256: "z".repeat(64) },
+    { archiveSha256: "z".repeat(64) }, { sizeBytes: 0 }, { sizeBytes: "1" }, { sizeBytes: 128 * 1024 * 1024 + 1 },
   ]) {
     const catalog = structuredClone(manifest);
     Object.assign(catalog.platforms["linux-x64"], override);
@@ -392,7 +349,7 @@ test("runtime 父目录链接或 junction 不可绕过缓存归属", async (t) =
 
 test("配置不能修改官方 URL/摘要，也不能把默认缓存写到插件目录", async (t) => {
   const { runtime, config, calls } = await fixture(t);
-  for (const field of ["url", "binarySha256", "archiveSha256", "path", "version", "key"]) {
+  for (const field of ["url", "binarySha256", "archiveSha256", "sizeBytes", "path", "version", "key"]) {
     await assert.rejects(runtime.ensureCore({ ...config, core: { ...config.core, [field]: "https://secret:password@example.invalid" } }), expectSafeError("CORE_CONFIG"));
   }
   // 使用模块 URL 的解码路径避免中文路径或 Windows 盘符影响归属判断。
@@ -414,7 +371,7 @@ function mockCurl(output, { exit = 0, failStart = false, hang = false } = {}) {
       queueMicrotask(() => child.emit("close", null));
       return true;
     };
-    observed.push({ command, args, options, killed: false });
+    observed.push({ command, args, options, stdout: child.stdout, killed: false });
     queueMicrotask(() => {
       if (failStart) {
         child.emit("error", new Error("secret curl startup error"));
@@ -569,8 +526,8 @@ test("等待系统代理检测时取消不启动 curl，清理临时目录并允
   await assertClean(config);
 });
 
-test("curl 启动和 HTTP 失败安全报告且不重试", async (t) => {
-  for (const [settings, code] of [[{ failStart: true }, "CORE_CURL"], [{ exit: 22 }, "CORE_DOWNLOAD"]]) {
+test("curl 启动、HTTP 和大小限制失败安全报告且不重试", async (t) => {
+  for (const [settings, code] of [[{ failStart: true }, "CORE_CURL"], [{ exit: 22 }, "CORE_DOWNLOAD"], [{ exit: 63 }, "CORE_SIZE"]]) {
     const fake = mockCurl(Buffer.from("secret response body"), settings);
     const { runtime, config } = await fixture(t, { spawnProcess: fake.implementation });
     await assert.rejects(runtime.ensureCore(config), expectSafeError(code));
@@ -584,10 +541,19 @@ test("curl 取消终止本次子进程，清理部分归档", async (t) => {
   const { runtime, config } = await fixture(t, { spawnProcess: fake.implementation });
   const controller = new AbortController();
   const attempt = runtime.ensureCore(config, { signal: controller.signal });
-  for (let count = 0; count < 100 && !fake.observed.length; count++) await delay(5);
-  assert.equal(fake.observed.length, 1);
-  controller.abort();
-  await assert.rejects(attempt, expectSafeError("CORE_CANCELLED"));
+  const first = Buffer.byteLength("partial");
+  const rejected = assert.rejects(attempt, expectSafeError("CORE_CANCELLED"));
+  try {
+    const snapshot = await waitForProgress(runtime, config, first);
+    assert.deepEqual(snapshot, { phase: "downloading", receivedBytes: first, totalBytes: binary.length });
+    snapshot.receivedBytes = 0;
+    assert.equal((await runtime.getCoreStatus(config)).progress.receivedBytes, first);
+    const next = Buffer.from("字节");
+    fake.observed[0].stdout.write(next);
+    assert.equal((await waitForProgress(runtime, config, first + next.length)).totalBytes, binary.length);
+  } finally { controller.abort(); }
+  await rejected;
+  assert.equal((await runtime.getCoreStatus(config)).progress, undefined);
   for (let count = 0; count < 100 && (await runtime.getCoreStatus(config)).state === "downloading"; count++) await delay(5);
   assert.equal(fake.observed[0].killed, true);
   await assertClean(config);
@@ -596,16 +562,26 @@ test("curl 取消终止本次子进程，清理部分归档", async (t) => {
 async function childRuntime(fixtureValue, mode = "ok") {
   const { catalog, config, archive } = fixtureValue;
   const script = `
-    import { writeFile } from 'node:fs/promises';
+    import { appendFile, writeFile } from 'node:fs/promises';
     import { createCoreRuntime } from ${JSON.stringify(moduleUrl)};
     const controller = new AbortController();
-    const runtime = createCoreRuntime({manifest: ${JSON.stringify(catalog)}, bundleDir: ${JSON.stringify(fixtureValue.bundleDir)}, download: async ({destination,signal}) => {
+    const bytes = Buffer.from(${JSON.stringify(archive.toString("base64"))}, 'base64');
+    const runtime = createCoreRuntime({manifest: ${JSON.stringify(catalog)}, download: async ({destination,onProgress}) => {
+      await writeFile(destination, bytes.subarray(0, 3), {flag:'wx'});
+      onProgress(3);
       process.send({type:'downloading'});
-      await new Promise(resolve => process.once('message', resolve));
+      const command = await new Promise(resolve => process.once('message', resolve));
+      let position = 3;
+      if (command === 'more') {
+        await appendFile(destination, bytes.subarray(position, 101));
+        while (position < 101) onProgress(++position);
+        await new Promise(resolve => process.once('message', resolve));
+      }
       if (${JSON.stringify(mode)} === 'cancel') controller.abort();
       if (${JSON.stringify(mode)} === 'timeout') throw Object.assign(new Error('timeout'), {code:'CORE_TIMEOUT'});
       if (${JSON.stringify(mode)} === 'fail') throw new Error('secret provider body');
-      await writeFile(destination, Buffer.from(${JSON.stringify(archive.toString("base64"))}, 'base64'), {flag:'wx'});
+      await appendFile(destination, bytes.subarray(position));
+      onProgress(bytes.length);
     }});
     try { await runtime.ensureCore(${JSON.stringify(config)}, {signal:controller.signal}); process.send({type:'done'}); }
     catch (error) { process.send({type:'error',code:error.code}); }
@@ -628,9 +604,11 @@ test("不同进程共享 OS 锁和下载结果，不触碰 bridge.lock", async (
   t.after(() => { if (running.child.exitCode === null) running.child.kill(); });
   await writeFile(join(value.root, "bridge.lock"), "unrelated lifecycle lock");
   const follower = value.runtime.ensureCore(value.config);
-  await delay(80);
+  const expected = { phase: "downloading", receivedBytes: 3, totalBytes: value.archive.length };
+  assert.deepEqual(await waitForProgress(value.runtime, value.config, 3), expected);
+  running.child.send("more");
+  assert.deepEqual(await waitForProgress(value.runtime, value.config, 101), { ...expected, receivedBytes: 101 });
   assert.equal(value.calls(), 0);
-  assert.equal((await value.runtime.getCoreStatus(value.config)).state, "downloading");
   running.child.send("continue");
   assert.equal((await follower).available, true);
   assert.equal((await running.exited)[0], 0);
@@ -659,7 +637,7 @@ test("跨进程领导者取消后，有效等待者接续且只下载一次", { 
   const controller = new AbortController();
   const follower = value.runtime.ensureCore(value.config, { signal: controller.signal });
   let otherCalls = 0;
-  const other = createCoreRuntime({ manifest: value.catalog, bundleDir: value.bundleDir, download: async ({ destination }) => {
+  const other = createCoreRuntime({ manifest: value.catalog, download: async ({ destination }) => {
     otherCalls++;
     await writeFile(destination, value.archive, { flag: "wx" });
   } });
@@ -818,6 +796,62 @@ function lockAddress(config) {
       ? `\0qoder-core-download-${key}`
       : { host: "127.0.0.1", port: 20_000 + Number.parseInt(key.slice(0, 8), 16) % 40_000, exclusive: true };
 }
+
+test("旧持锁者只发 v1 身份和结果时保留 waiting 并复用已校验缓存", { timeout: 5000 }, async (t) => {
+  const value = await fixture(t);
+  const handshaken = Promise.withResolvers();
+  const server = createServer(async (socket) => {
+    const lines = createInterface({ input: socket });
+    const [request] = await once(lines, "line");
+    const [protocol, key] = request.split(":");
+    const identity = { protocol, key };
+    socket.write(JSON.stringify({ ...identity, state: "downloading" }) + "\n");
+    handshaken.resolve(() => socket.end(JSON.stringify({ ...identity, state: "ready" }) + "\n"));
+  });
+  server.listen(lockAddress(value.config));
+  await once(server, "listening");
+  t.after(() => new Promise((resolveClose) => server.close(resolveClose)));
+  const controller = new AbortController();
+  const follower = value.runtime.ensureCore(value.config, { signal: controller.signal });
+  try {
+    const finish = await handshaken.promise;
+    assert.deepEqual((await value.runtime.getCoreStatus(value.config)).progress,
+      { phase: "waiting", receivedBytes: 0, totalBytes: null });
+    await mkdir(dirname(value.config.binPath), { recursive: true });
+    await writeFile(value.config.binPath, binary);
+    finish();
+    assert.equal((await follower).available, true);
+    assert.equal((await value.runtime.getCoreStatus(value.config)).progress, undefined);
+    assert.equal(value.calls(), 0);
+  } finally { controller.abort(); }
+});
+
+test("v1 等待连接合并连续字节帧并依次收到核验、安装和完成", { timeout: 10000 }, async (t) => {
+  const value = await fixture(t);
+  const running = await childRuntime(value);
+  t.after(() => { if (running.child.exitCode === null) running.child.kill(); });
+  const socket = createConnection(lockAddress(value.config));
+  t.after(() => socket.destroy());
+  const frames = createInterface({ input: socket })[Symbol.asyncIterator]();
+  const next = async () => JSON.parse((await frames.next()).value);
+  const { protocol, key } = await next();
+  socket.write(`${protocol}:${key}\n`);
+  const downloading = { phase: "downloading", receivedBytes: 3, totalBytes: binary.length };
+  assert.deepEqual((await next()).progress, downloading);
+  running.child.send("more");
+  assert.deepEqual((await next()).progress, { ...downloading, receivedBytes: 101 });
+  running.child.send("continue");
+  const full = { receivedBytes: binary.length, totalBytes: binary.length };
+  let frame = await next();
+  if (frame.progress?.phase === "downloading") {
+    assert.deepEqual(frame.progress, { ...full, phase: "downloading" });
+    frame = await next();
+  }
+  assert.deepEqual(frame.progress, { ...full, phase: "verifying" });
+  assert.deepEqual((await next()).progress, { ...full, phase: "installing" });
+  assert.equal((await next()).state, "ready");
+  assert.equal((await running.exited)[0], 0);
+});
 
 test("等待者尚未发送握手时下载完成，身份帧仍先于最终结果", async (t) => {
   const value = await fixture(t);

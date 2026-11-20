@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
+import { setPortSettings } from "../server/bridge-ports.mjs";
 import { PLUGIN_VERSION } from "../server/config.mjs";
 import { handleMessage, runMcp } from "../server/mcp-protocol.mjs";
 
@@ -92,18 +93,22 @@ test("MCP Apps 全局管理入口只读核心状态", async () => {
   const tools = (await handleMessage(request(2, "tools/list"), ctx)).result.tools;
   const app = tools.find(tool => tool.name === "bridge_management_app");
   assert.equal(app.title, "订阅代理管理");
+  assert.match(app.icons[0].src, /^data:image\/png;base64,iVBOR/);
+  assert.ok(app.icons[0].src.length <= 65_536);
   assert.deepEqual(app._meta.ui.visibility, ["app"]);
   assert.deepEqual(app._meta["qoder/ui"].entrypoints, [{ type: "global" }]);
   const resource = (await handleMessage(request(3, "resources/read", { uri: app._meta.ui.resourceUri }), ctx)).result.contents[0];
   assert.equal(resource.mimeType, "text/html;profile=mcp-app");
   assert.equal(resource._meta.csp, undefined);
-  assert.doesNotMatch(resource.text, /<iframe|\/app\/exchange|managementUrl/);
+  assert.doesNotMatch(resource.text, /<iframe|\/app\/exchange/);
   assert.equal(resource._meta["qoder/ui"].preferredDisplayMode, "fullscreen");
   assert.ok(resource.text.includes("订阅代理管理"));
   assert.ok(!resource.text.includes(config.mgmtKey));
   assert.equal((await handleMessage(request(4, "resources/read", { uri: "file:///private" }), ctx)).error.code, -32602);
   assert.equal(app.annotations.readOnlyHint, true);
-  assert.equal(tools.filter(tool => tool._meta?.ui?.visibility?.includes("app")).length, 1);
+  assert.equal(tools.filter(tool => tool._meta?.["qoder/ui"]?.entrypoints).length, 1);
+  assert.deepEqual(tools.filter(tool => tool._meta?.ui?.visibility?.includes("app")).map(tool => tool.name),
+    ["bridge_management_app", "bridge_check_update", "bridge_download_update", "bridge_download_version", "bridge_set_ports", "bridge_delete_version", "bridge_apply_update"]);
   let opened = 0;
   const state = { ready: false, reason: "核心暂停" };
   const response = await handleMessage(call(5, "bridge_management_app"), ctx, { handlers: {
@@ -116,6 +121,50 @@ test("MCP Apps 全局管理入口只读核心状态", async () => {
   await handleMessage(request(6, "initialize", { protocolVersion: "2025-06-18" }), legacy);
   assert.equal((await handleMessage(call(7, "bridge_management_app"), legacy)).error.code, -32602);
   assert.deepEqual((await handleMessage(request(8, "resources/list"), legacy)).result.resources, []);
+});
+
+test("检查、下载和确认切换是三个独立的 App 操作，旧宿主不能调用", async () => {
+  const ctx = { config, supportsApps: true };
+  const called = [];
+  const handlers = {
+    checkUpdate: async () => { called.push("check"); return { state: "available", version: "v0.1.9999" }; },
+    downloadUpdate: async (_config, version) => { called.push(`download ${version}`); return { state: "staged", version }; },
+    applyUpdate: async (_config, version) => { called.push(`apply ${version}`); return { ready: true, version }; },
+  };
+  const invoke = (name, args = {}) => handleMessage(call(1, name, args), ctx, { handlers });
+  assert.equal(JSON.parse(resultText(await invoke("bridge_check_update"))).state, "available");
+  assert.equal((await invoke("bridge_apply_update", { version: "../bad" })).result.isError, true);
+  assert.equal((await invoke("bridge_download_update")).error.code, -32602);
+  assert.equal(JSON.parse(resultText(await invoke("bridge_download_update", { version: "v0.1.9999" }))).state, "staged");
+  assert.deepEqual(called, ["check", "download v0.1.9999"]);
+  assert.equal(JSON.parse(resultText(await invoke("bridge_apply_update", { version: "v0.1.9999" }))).ready, true);
+  ctx.supportsApps = false;
+  assert.equal((await invoke("bridge_apply_update", { version: "v0.1.9999" })).error.code, -32602);
+});
+
+test('管理页端口工具要求两对有效整数，将旧值作为写入条件传给事务', async t => {
+  const ctx = { config, supportsApps: true };
+  const ports = { modelPort: 24477, managementPort: 24478 };
+  const args = { ...ports, expectedModelPort: 34477, expectedManagementPort: 34478 };
+  const setPorts = t.mock.fn(async (_config, values) => ({ ...values, changed: true }));
+  const signal = new AbortController().signal;
+  const invoke = values => handleMessage(call(1, 'bridge_set_ports', values), ctx, { handlers: { setPorts }, signal });
+  assert.deepEqual(JSON.parse(resultText(await invoke(args))), { ...ports, changed: true });
+  assert.deepEqual(setPorts.mock.calls[0].arguments, [config, ports, { signal, expectedPorts: { modelPort: 34477, managementPort: 34478 } }]);
+  for (const invalid of [ports, { ...ports, expectedModelPort: 1 }, { ...ports, expectedManagementPort: 2 },
+    { ...args, modelPort: '24477' }, { ...args, managementPort: 65536 }, { ...args, expectedModelPort: null },
+    { ...args, expectedManagementPort: 0 }, { ...args, host: '0.0.0.0' }]) {
+    assert.equal((await invoke(invalid)).error.code, -32602);
+  }
+  assert.equal(setPorts.mock.callCount(), 1);
+});
+
+test('面板绕过本地校验提交 6000 时，API 在访问数据目录前返回安全提示', async () => {
+  const args = { modelPort: 24477, managementPort: 6000, expectedModelPort: 24477, expectedManagementPort: 24478 };
+  const response = await handleMessage(call(1, 'bridge_set_ports', args), { config, supportsApps: true }, { handlers: { setPorts: setPortSettings } });
+  assert.equal(response.result.isError, true);
+  assert.match(resultText(response), /浏览器禁止访问管理端口 6000/);
+  assert.doesNotMatch(resultText(response), /private/);
 });
 
 test("输入 destroy 无 error 也会收尾并取消在途调用", { timeout: 3000 }, async (t) => {

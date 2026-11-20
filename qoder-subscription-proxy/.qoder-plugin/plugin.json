@@ -1,15 +1,15 @@
 {
   "name": "qoder-subscription-proxy",
   "displayName": "订阅代理管理",
-  "version": "1.1.7",
-  "description": "qoder订阅代理：基于 Magpie 的本机模型 API 与进程托管；从更多菜单查看核心状态、显式启动、刷新状态或打开原生管理页。",
+  "version": "2.0.0",
+  "description": "随 Qoder 启停的本机模型代理。复用已有 Magpie 核心或按平台下载，可在管理页查看进度和故障原因，下载、切换及清理核心版本。",
   "author": { "name": "crx-96" },
   "license": "MIT",
   "logo": "./assets/logo.png",
   "mcpServers": "./mcp.json",
   "interface": {
     "displayName": "订阅代理管理",
-    "shortDescription": "本机订阅代理，更多菜单查看状态与打开原生管理页",
+    "shortDescription": "随 Qoder 启停的本机订阅代理，可查看核心下载进度与运行诊断",
     "developerName": "crx-96"
   }
 }

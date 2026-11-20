@@ -30,7 +30,7 @@ test("分发清单固定 Magpie v0.1.4582 五平台，源码不携带二进制�
   assert.deepEqual(Object.keys(metadata.platforms).sort(), Object.keys(expected).sort());
   const entries = await readdir(binRoot, { withFileTypes: true });
   assert.deepEqual(entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(), [
-    "LICENSE", "README.md", "README_CN.md", "platforms.json",
+    "LICENSE", "README.md", "README_CN.md", "legacy-releases.json", "platforms.json",
   ]);
   for (const entry of entries.filter((entry) => entry.isDirectory())) {
     assert.deepEqual(await readdir(join(binRoot, entry.name)), [], "源码不得留下任何平台核心或归档");
@@ -52,7 +52,8 @@ test("CI 仅准备当前 Magpie 核心，保留五平台测试且不引用旧 Ru
     for (const [, script] of scripts) {
       assert.equal((await lstat(join(pluginRoot, "..", script))).isFile(), true, script);
     }
-    assert.match(source, workflow === "release.yml" ? /scripts\/fetch-core\.mjs/ : /scripts\/prepare-test-core\.mjs/);
+    assert.match(source, /scripts\/prepare-test-core\.mjs/);
+    assert.doesNotMatch(source, /scripts\/fetch-core\.mjs/);
   }
 });
 
@@ -69,7 +70,7 @@ test("Release 在草稿上传并核对远端资产后才公开，重跑已公开
 });
 
 for (const [key, pinned] of Object.entries(expected)) {
-  test(`${key} 原始资产、随包路径、缓存路径和双 SHA256 固定，离线检查不执行核心`, () => {
+  test(`${key} 原始资产的大小、缓存路径和双 SHA256 与固定版本一致`, () => {
     const entry = metadata.platforms[key];
     const [platform, arch] = key.split("-");
     const release = getCoreRelease({ platform, arch });
@@ -81,6 +82,8 @@ for (const [key, pinned] of Object.entries(expected)) {
       assert.equal(entry[field], pinned.sha256, `${key}.${field}`);
       assert.equal(release[field], pinned.sha256);
     }
+    assert.equal(entry.sizeBytes, pinned.size);
+    assert.equal(release.sizeBytes, pinned.size);
     assert.equal(entry.url, `https://github.com/yetone/magpie/releases/download/v0.1.4582/${pinned.archive}`);
     assert.equal(release.url, entry.url);
     assert.doesNotMatch(entry.archive, /\.(zip|gz)$/);

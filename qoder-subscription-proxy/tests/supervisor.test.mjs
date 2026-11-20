@@ -5,7 +5,7 @@ import { once, EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
+import { copyFile, link, lstat, mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ import { connectOwned } from "../server/owned-http.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import {
   probeBridge, sameProcess, processIdentity, withLifecycleLock, ensureDataDir,
-  ensureRunning, getStatus, stopBridge, startWatchdog, openCoreConnection, requestOwned,
+  ensureRunning, getStatus, stopBridge, startWatchdog, openCoreConnection, requestOwned, selectionLifecycle,
 } from "../server/supervisor.mjs";
 
 const pluginRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -555,6 +555,44 @@ test("暂停标记使 automatic ensureRunning 和 watchdog 不恢复进程", { t
   assert.equal((await getStatus(config)).autoRecoveryPaused, true);
 });
 
+for (const kind of ["hardlink", "symlink", "dangling", "outside"]) {
+  test(`暂停标记 ${kind} 越界时保留目标且拒绝启停`, async t => {
+    const root = await directoryFixture(t);
+    const config = testConfig(join(root, "data"), await unusedPort());
+    await mkdir(config.dataDir);
+    const target = join(root, "outside.txt");
+    if (kind !== "dangling") await writeFile(target, "preserved");
+    if (kind === "outside") config.pausedPath = target;
+    else if (kind === "hardlink") await link(target, config.pausedPath);
+    else {
+      try { await symlink(target, config.pausedPath, "file"); }
+      catch (error) {
+        if (process.platform === "win32" && error.code === "EPERM") return t.skip("当前 Windows 账户无文件符号链接创建权限");
+        throw error;
+      }
+    }
+    for (const operation of [() => stopBridge(config), () => ensureRunning(config), () => getStatus(config)]) {
+      await assert.rejects(operation, /暂停标记|私有普通文件/);
+    }
+    if (kind === "dangling") await assert.rejects(lstat(target), { code: "ENOENT" });
+    else assert.equal(await readFile(target, "utf8"), "preserved");
+    if (kind === "hardlink") assert.equal((await lstat(config.pausedPath)).nlink, 2);
+    if (kind === "symlink" || kind === "dangling") assert.ok((await lstat(config.pausedPath)).isSymbolicLink());
+  });
+}
+
+test("数据目录经目录链接指向其他目录时，停止保留对方的暂停标记", async t => {
+  const root = await directoryFixture(t);
+  const source = join(root, "source");
+  await mkdir(source);
+  const marker = join(source, "bridge.paused");
+  await writeFile(marker, "other directory");
+  const config = testConfig(join(root, "alias"), await unusedPort());
+  await symlink(source, config.dataDir, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(stopBridge(config), /目录/);
+  assert.equal(await readFile(marker, "utf8"), "other directory");
+});
+
 test("停止在排队取锁前即能取消本会话启动，已离线时重复暂停均成功", { timeout: 8000 }, async (t) => {
   const config = testConfig(await directoryFixture(t), await unusedPort());
   let stopping;
@@ -572,6 +610,7 @@ test("停止在排队取锁前即能取消本会话启动，已离线时重复�
   assert.equal((await stopping).stopped, true);
   assert.equal((await stopBridge(config)).stopped, true);
   assert.equal((await getStatus(config)).autoRecoveryPaused, true);
+  if (process.platform !== "win32") assert.equal((await stat(config.pausedPath)).mode & 0o777, 0o600);
 });
 
 test("ensureRunning 不接管只有根签名但无本版本 PID 归属的服务", async (t) => {
@@ -669,7 +708,7 @@ test("Windows 8.3 短路径经托管器展开后仍认证同一核心，不接�
 });
 
 test("独立真实 exe 完成 ensureRunning -> getStatus -> stopBridge，创建时间精度不会误拒绝停止", {
-  skip: windowsOnly, timeout: 60000,
+  skip: windowsOnly, timeout: 180000,
 }, async (t) => {
   const { config } = await realBridgeFixture(t);
   await writeFile(config.pidPath, JSON.stringify({
@@ -837,7 +876,7 @@ test("owner MCP 退出后另一个活跃 MCP 的 watchdog 自动恢复代理", {
 });
 
 test("隔离真实核心使用原生管理端口，旧托管修订不被接管", {
-  skip: windowsOnly, timeout: 60000,
+  skip: windowsOnly, timeout: 120000,
 }, async (t) => {
   const { config } = await realBridgeFixture(t);
   await ensureRunning(config);
@@ -851,16 +890,33 @@ test("隔离真实核心使用原生管理端口，旧托管修订不被接管",
   } finally { managementSocket.destroy(); }
   await assert.rejects(async () => openCoreConnection(config, undefined, 1), /目标端口/);
   const record = await readPid(config);
-  const legacyRecord = { ...record };
-  delete legacyRecord.runtimeRevision;
-  await writeFile(config.pidPath, JSON.stringify(legacyRecord));
-  await assert.rejects(ensureRunning(config), /托管协议/);
-  const legacyStatus = await getStatus(config);
-  assert.equal(legacyStatus.alive, true);
-  assert.equal(legacyStatus.ready, false);
-  assert.match(legacyStatus.models.note, /bridge_stop/);
-  assert.ok(await processIdentity(record.pid));
-  await stopBridge(config);
+  const copy = { ...testConfig(join(await directoryFixture(t), "copy"), await unusedPort()), binPath: config.binPath };
+  await mkdir(copy.dataDir);
+  await copyFile(config.pidPath, copy.pidPath);
+  assert.equal(await selectionLifecycle.hasOwnedProcess(copy), false);
+  assert.equal(await selectionLifecycle.inspect(copy), null);
+  assert.equal((await stopBridge(copy)).stopped, true);
+  assert.deepEqual(await readPid(copy), record);
+  assert.equal((await getStatus(config)).ready, true);
+
+  assert.equal(record.runtimeRevision, "magpie-win32-v3");
+  for (const revision of [undefined, "magpie-win32-v2"]) {
+    const legacyRecord = { ...record, runtimeRevision: revision };
+    await writeFile(config.pidPath, JSON.stringify(legacyRecord));
+    await assert.rejects(ensureRunning(config), /旧版 bridge_stop/);
+    const legacyStatus = await getStatus(config);
+    assert.equal(legacyStatus.alive, true);
+    assert.equal(legacyStatus.ready, false);
+    assert.match(legacyStatus.models.note, /旧版 bridge_stop/);
+    await assert.rejects(openCoreConnection(config), /未发送凭据/);
+    const refused = await stopBridge(config);
+    assert.equal(refused.stopped, false);
+    assert.match(refused.reason, /旧版 bridge_stop/);
+    assert.equal((await readPid(config)).runtimeRevision, revision);
+    assert.ok(sameProcess(record, await processIdentity(record.pid, record.creationDate), config));
+  }
+  await writeFile(config.pidPath, JSON.stringify(record));
+  assert.equal((await stopBridge(config)).stopped, true);
   const log = await waitUntil(async () => {
     const value = await readFile(join(config.dataDir, "bridge.log"), "utf8");
     return value.includes("[REDACTED]") ? value : false;
