@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, statSync } from "node:fs";
 import { access, link, lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import { privatePortFile, resolvePortConfig } from "./bridge-ports.mjs";
 import { publishPrivateState } from "./supervisor.mjs";
@@ -12,7 +12,7 @@ import { getCoreRelease, resolveCoreBinaryPath } from "./core-runtime.mjs";
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 19787;
 export const MANAGEMENT_PORT = 19788;
-export const PLUGIN_VERSION = "2.0.0";
+export const PLUGIN_VERSION = "2.0.1";
 const LEGACY_MGMT_KEY = "123456";
 
 /** 仅将本模块生成的字段名与纠正建议传给管理页，排除用户提供的配置值。 */
@@ -337,9 +337,9 @@ export function magpieArguments(config) {
   return ["serve", `--web=${DEFAULT_HOST}:${config.managementPort}`];
 }
 
-/** 核对 v0.1.4582～v0.1.4586 的 internal/agentenv/agentenv.go。升级时同步上游可重新导入的客户端变量。
- * 显式空值阻止 proc.UserPath 和 Windows 注册表补回宿主值，路径回落到私有 HOME。
- * Qoder、Codex 和 XDG_STATE_HOME 在下方显式赋值。 */
+/** 核对 v0.1.4582～v0.1.4597 的 internal/agentenv/agentenv.go 与 internal/agent/*.go。升级时同步上游可重新导入的客户端变量。
+ * 显式空值阻止 proc.UserPath 和 Windows 注册表补回宿主值；随后仅按下方白名单恢复客户端配置目录，
+ * 服务商密钥、URL 和行为变量继续保持清空。 */
 const clientPathVars = `CLAUDE_CONFIG_DIR COPILOT_HOME COPILOT_PROVIDERS_CONFIG CLAUDE_CODE_TMPDIR
 MAGPIE_ZED_BIN MAGPIE_ZED_CONFIG_DIR MAGPIE_ZED_PROCESS_NAMES CODEX_SQLITE_HOME GEMINI_CLI_HOME
 CLINE_DIR CLINE_DATA_DIR CLINE_SESSION_DATA_DIR CLINE_MCP_SETTINGS_PATH CLINE_GLOBAL_SETTINGS_PATH
@@ -357,7 +357,118 @@ OPENCODE_CONFIG OPENCODE_CONFIG_DIR OPENCODE_DB OPENCHAMBER_DATA_DIR KIROCREW_HO
 PI_ACP_BIN FACTORY_HOME_OVERRIDE NVM_DIR FNM_DIR MISE_DATA_DIR ASDF_DIR CARGO_HOME OMARCHY_PATH
 GOOGLE_APPLICATION_CREDENTIALS CLOUDSDK_CONFIG AGY_LLM_GATEWAY_URL NMEM_API_URL WINDSURF_API_SERVER_URL ZCODE_CREDENTIAL_SECRET`.split(/\s+/);
 
-/** 原生核心及中间托管器使用相同环境，多次构造仍指向同一私有目录和 Qoder 配置。 */
+/** 第二层托管的环境标记；下一跳沿用首跳解析好的客户端目录，不再探测私有 HOME 下的默认位置。 */
+const nestedCoreEnv = "BRIDGE_NESTED_CORE_ENV";
+
+/** 只接受可传给子进程的绝对路径；空值、含 NUL 或相对路径都视为未设置。 */
+function absolutePath(value) {
+  return typeof value === "string" && value && !value.includes("\0") && isAbsolute(value) ? value : null;
+}
+
+/** 判断宿主上的文件是否存在；用于识别 Qoder 的状态和设置标记，不读取内容。 */
+function fileExists(path) {
+  try { return statSync(path).isFile(); } catch { return false; }
+}
+
+/** 判断宿主上的目录是否存在；用于按默认位置识别已安装的客户端。 */
+function directoryExists(path) {
+  try { return statSync(path).isDirectory(); } catch { return false; }
+}
+
+/** Qoder 桌面端写入状态文件，CLI 写入 settings.json；任一标记存在都说明客户端已安装。 */
+const qoderStatusFiles = [".qoder-app-status.json", ".qoder-app-canary-status.json", ".qoder-app-dev-status.json"];
+function qoderPresent(dir) {
+  return qoderStatusFiles.some(name => fileExists(join(dir, name))) || fileExists(join(dir, "settings.json"));
+}
+
+/** 比较宿主路径；Windows 不区分大小写，避免同一客户端因盘符拼写不同被识别成两个。 */
+function samePath(a, b, platform) {
+  const normalize = path => platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+  return normalize(a) === normalize(b);
+}
+
+/**
+ * 隔离 HOME 下仍允许核心识别和接入的客户端目录变量。默认位置与 Magpie v0.1.4582～v0.1.4597 的 Agent 实现一致，
+ * 只列目录型变量；密钥、URL 和行为变量不在此表，仍被 clientPathVars 清空。
+ * home 相对宿主主目录，config 相对宿主 XDG 配置根，appData 相对宿主 Roaming 目录。
+ */
+const clientDirVars = Object.freeze({
+  CLAUDE_CONFIG_DIR: { home: [".claude"] },
+  CODEX_HOME: { home: [".codex"] },
+  COPILOT_HOME: { home: [".copilot"] },
+  CLINE_DIR: { home: [".cline"] },
+  CURSOR_CONFIG_DIR: { home: [".cursor"] },
+  QWEN_HOME: { home: [".qwen"] },
+  KIMI_CODE_HOME: { home: [".kimi-code", ".kimi"] },
+  GROK_HOME: { home: [".grok"] },
+  OPENCLAW_HOME: { home: [".openclaw"] },
+  ANTE_HOME: { home: [".ante"] },
+  OPENCODE_CONFIG_DIR: { config: ["opencode"] },
+  PI_CODING_AGENT_DIR: { home: [".pi/agent"] },
+  MAGPIE_ZED_CONFIG_DIR: { win32: { appData: ["Zed"] }, default: { config: ["zed"] } },
+});
+
+/** 按平台依次给出某个客户端变量的宿主候选目录，顺序靠前者优先。 */
+function clientDirCandidates(spec, { hostHome, configHome, appData, platform }) {
+  const roots = { home: hostHome, config: configHome, appData };
+  const collect = (value, into) => {
+    for (const kind of ["home", "config", "appData"]) {
+      if (value[kind]) into.push(...value[kind].map(rel => join(roots[kind], rel)));
+    }
+  };
+  const candidates = [];
+  collect(spec, candidates);
+  collect(spec[platform] ?? spec.default ?? {}, candidates);
+  return candidates;
+}
+
+/** 选择要暴露给核心的 Qoder 构建：显式选择优先；否则识别宿主上真实存在的构建并避免两个入口写同一份设置。 */
+function qoderClientDirs(host, { home, hostHome, selected, nested, platform }) {
+  const privateDir = (name) => join(home, name);
+  if (["qoder", "qoder-cn"].includes(selected)) {
+    return {
+      QODER_CONFIG_DIR: selected === "qoder" ? (absolutePath(host.QODER_CONFIG_DIR) ?? join(hostHome, ".qoder")) : privateDir(".qoder"),
+      QODERCN_CONFIG_DIR: selected === "qoder-cn" ? (absolutePath(host.QODERCN_CONFIG_DIR) ?? join(hostHome, ".qoder-cn")) : privateDir(".qoder-cn"),
+    };
+  }
+  if (nested) {
+    return {
+      QODER_CONFIG_DIR: absolutePath(host.QODER_CONFIG_DIR) ?? privateDir(".qoder"),
+      QODERCN_CONFIG_DIR: absolutePath(host.QODERCN_CONFIG_DIR) ?? privateDir(".qoder-cn"),
+    };
+  }
+  // Qoder 会同时把它自己的两个变量指到当前构建的目录；同一目录只暴露目录名对应的一侧。
+  let globalDir = absolutePath(host.QODER_CONFIG_DIR) ??
+    (qoderPresent(join(hostHome, ".qoder")) ? join(hostHome, ".qoder") : null);
+  let chinaDir = absolutePath(host.QODERCN_CONFIG_DIR) ??
+    (qoderPresent(join(hostHome, ".qoder-cn")) ? join(hostHome, ".qoder-cn") : null);
+  if (globalDir && chinaDir && samePath(globalDir, chinaDir, platform)) {
+    if (basename(globalDir).toLowerCase().startsWith(".qoder-cn")) globalDir = null;
+    else chinaDir = null;
+  }
+  return {
+    QODER_CONFIG_DIR: globalDir ?? privateDir(".qoder"),
+    QODERCN_CONFIG_DIR: chinaDir ?? privateDir(".qoder-cn"),
+  };
+}
+
+/** 把宿主上已存在的客户端目录交给核心用于识别和接入；未列出的客户端仍回落到私有 HOME。 */
+function clientDirectoryOverrides(host, { home, hostHome, nested, platform }) {
+  const configHome = absolutePath(host.XDG_CONFIG_HOME) ?? join(hostHome, ".config");
+  const appData = absolutePath(host.APPDATA) ?? join(hostHome, "AppData", "Roaming");
+  const dirs = {};
+  for (const [name, spec] of Object.entries(clientDirVars)) {
+    const explicit = absolutePath(host[name]);
+    if (explicit) dirs[name] = explicit;
+    else if (nested) dirs[name] = "";
+    else dirs[name] = clientDirCandidates(spec, { hostHome, configHome, appData, platform }).find(directoryExists) ?? "";
+  }
+  // Codex 一直使用私有目录承载核心自己的登录；没有宿主目录时保持原有私有位置。
+  dirs.CODEX_HOME ||= join(home, ".codex");
+  return dirs;
+}
+
+/** 原生核心及中间托管器使用相同环境，多次构造仍指向同一私有目录和客户端选择。 */
 export function magpieEnvironment(config, baseEnv = process.env) {
   const home = join(config.dataDir, "home");
   const temp = join(home, "tmp");
@@ -365,23 +476,22 @@ export function magpieEnvironment(config, baseEnv = process.env) {
   const host = process.platform === "win32"
     ? Object.fromEntries(Object.entries(baseEnv).map(([key, value]) => [key.toUpperCase(), value])) : baseEnv;
   const hostHome = host[process.platform === "win32" ? "USERPROFILE" : "HOME"] || homedir();
-  // 上游启动时会迁移 dial 等客户端设置，只有用户指定的客户端可以使用真实目录。
-  // POSIX supervisor/guardian 只从 argv 重建路径和端口；下一跳复用首跳已校验过的选择。
+  // 显式选择的客户端沿用旧行为；未选择时只暴露宿主上确实存在的客户端，便于核心识别和接入。
+  // POSIX supervisor/guardian 只从 argv 重建路径和端口；下一跳靠嵌套标记复用首跳的解析结果。
   const selected = Object.hasOwn(config, "qoderClient") ? config.qoderClient : host.BRIDGE_QODER_CLIENT;
-  const qoderDir = (client, name, fallback) => selected === client
-    ? (host[name] && isAbsolute(host[name]) ? host[name] : join(hostHome, fallback))
-    : join(home, fallback);
+  const nested = host[nestedCoreEnv] === "1";
   const overrides = {
     ...Object.fromEntries(clientPathVars.map(name => [name, ""])),
     ...(["qoder", "qoder-cn"].includes(selected) ? { BRIDGE_QODER_CLIENT: selected } : {}),
-    HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"),
+    HOME: home, USERPROFILE: home,
     HOMEDRIVE: parse(home).root.replace(/[\\/]$/, ""), HOMEPATH: home.slice(parse(home).root.length - 1),
     APPDATA: join(home, "AppData", "Roaming"), LOCALAPPDATA: join(home, "AppData", "Local"),
     XDG_CONFIG_HOME: config.dataDir, XDG_CACHE_HOME: join(config.dataDir, "cache"),
     XDG_STATE_HOME: join(config.dataDir, "state"), XDG_DATA_HOME: join(home, ".local", "share"),
     XDG_RUNTIME_DIR: join(home, "runtime"), TMPDIR: temp, TEMP: temp, TMP: temp,
-    QODER_CONFIG_DIR: qoderDir("qoder", "QODER_CONFIG_DIR", ".qoder"),
-    QODERCN_CONFIG_DIR: qoderDir("qoder-cn", "QODERCN_CONFIG_DIR", ".qoder-cn"),
+    ...qoderClientDirs(host, { home, hostHome, selected, nested, platform: process.platform }),
+    ...clientDirectoryOverrides(host, { home, hostHome, nested, platform: process.platform }),
+    [nestedCoreEnv]: "1",
     MAGPIE_ADDR: `${DEFAULT_HOST}:${config.port}`, MAGPIE_WEB_KEY: config.mgmtKey, DO_NOT_TRACK: "1",
   };
   // 仅传递系统运行、桌面会话、地区和网络所需的变量，避免服务商密钥或宿主配置文件路径进入核心。

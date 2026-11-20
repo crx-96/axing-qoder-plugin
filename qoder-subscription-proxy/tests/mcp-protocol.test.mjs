@@ -93,8 +93,12 @@ test("MCP Apps 全局管理入口只读核心状态", async () => {
   const tools = (await handleMessage(request(2, "tools/list"), ctx)).result.tools;
   const app = tools.find(tool => tool.name === "bridge_management_app");
   assert.equal(app.title, "订阅代理管理");
-  assert.match(app.icons[0].src, /^data:image\/png;base64,iVBOR/);
-  assert.ok(app.icons[0].src.length <= 65_536);
+  assert.deepEqual(app.icons.map(icon => icon.theme), [undefined, "light", "dark"]);
+  for (const icon of app.icons) {
+    assert.match(icon.src, /^data:image\/png;base64,iVBOR/);
+    assert.ok(icon.src.length <= 65_536);
+    assert.equal(icon.mimeType, "image/png");
+  }
   assert.deepEqual(app._meta.ui.visibility, ["app"]);
   assert.deepEqual(app._meta["qoder/ui"].entrypoints, [{ type: "global" }]);
   const resource = (await handleMessage(request(3, "resources/read", { uri: app._meta.ui.resourceUri }), ctx)).result.contents[0];

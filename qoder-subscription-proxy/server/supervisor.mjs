@@ -629,7 +629,7 @@ export async function getStatus(config) {
     credentialsFile: join(config.dataDir, "launcher-secrets.json"),
     models: modelState, autoRecoveryPaused: Boolean(await pauseFile(config)),
     core: await getCoreStatus(config),
-    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号；客户端文件位于插件数据目录，但该选项仍可能读取操作系统凭据存储。管理端口 ${config.managementPort} 与模型端口由同一核心提供；管理登录凭据每次启动核心时轮换，重启后请重新打开管理页。模型请求使用独立 apiKey。`,
+    loginHint: `调用 bridge_open_management 打开 Magpie 原生管理页。首次使用订阅需在设置 → 隐私中显式开启订阅账号；托管核心的缓存和使用私有目录的客户端文件位于插件数据目录，已识别的宿主客户端则使用其真实配置目录，该选项仍可能读取操作系统凭据存储。管理端口 ${config.managementPort} 与模型端口由同一核心提供；管理登录凭据每次启动核心时轮换，重启后请重新打开管理页。模型请求使用独立 apiKey。`,
   };
 }
 

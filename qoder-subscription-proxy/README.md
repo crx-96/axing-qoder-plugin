@@ -1,12 +1,12 @@
 # 订阅代理管理 · Qoder 使用指南
 
-这个插件专为 **Qoder Desktop** 提供本机模型代理。你在 Magpie 里登录自己的订阅账号或配置服务商，然后就能在 Qoder 中选择该账号有权使用的模型。插件版本 **2.0.0**。管理页会显示这台电脑正在使用的 Magpie 核心版本。
+这个插件专为 **Qoder Desktop** 提供本机模型代理。你在 Magpie 里登录自己的订阅账号或配置服务商，然后就能在 Qoder 中选择该账号有权使用的模型。插件版本 **2.0.1**。管理页会显示这台电脑正在使用的 Magpie 核心版本。
 
 **代理跟着 Qoder 启停。** 插件启用后，打开 Qoder 并连接插件，代理就会启动；完全退出 Qoder 后，它托管的代理也会停止。只关闭管理页标签或原生管理页的浏览器窗口，当前代理可以继续工作。如果你要让 Qoder、其他编辑器和命令行工具长期共用模型，推荐[单独运行 Magpie](https://github.com/yetone/magpie)，再把各工具接到独立实例的地址。这样即使关掉 Qoder，其他工具也能继续使用。
 
 ## 第一步：安装，等核心就绪
 
-1. 在 Qoder 安装并启用「订阅代理管理」。如果拿到的是 ZIP，进入 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择 `qoder-subscription-proxy-v2.0.0.zip`。无需解压，也无需选平台。支持 Windows x64、macOS x64 / ARM64、Linux x64 / ARM64。
+1. 在 Qoder 安装并启用「订阅代理管理」。如果拿到的是 ZIP，进入 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择 `qoder-subscription-proxy-v2.0.1.zip`。无需解压，也无需选平台。支持 Windows x64、macOS x64 / ARM64、Linux x64 / ARM64。
 2. 确认插件提供的 MCP 服务已连接。首次连接会优先复用本机已经校验的核心。全新安装会从 Magpie 官方 Release 下载当前平台的最新稳定版，校验后保存在本机。实际大小以页面显示为准。
 3. 点击 **更多 → 订阅代理管理**。下载期间能看到已接收大小、百分比和校验、安装阶段。看到 **核心已就绪** 后，点击 **打开原生管理页（浏览器）**。
 
@@ -22,15 +22,17 @@
 
 ## 第三步：让 Qoder 使用模型
 
-### 可选：允许 Magpie 写入一个 Qoder 客户端
+### 让 Magpie 识别并接入 Qoder 与其他已安装客户端
 
-默认使用下方的手动配置，托管核心会在插件私有目录中查找客户端设置。需要自动接入时，在启动 Qoder 的操作系统用户环境中设置 `BRIDGE_QODER_CLIENT=qoder`（国际版）或 `BRIDGE_QODER_CLIENT=qoder-cn`（中国版），完全退出并重开 Qoder 后连接插件、启动核心。授权的客户端目录取自对应的 `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` 或当前用户的默认目录。启用后，上游启动时也可能迁移该客户端的旧模型设置。若另一套 Magpie 已管理同一个客户端，建议使用手动配置。
+默认会自动识别这台电脑上已安装的客户端，并把它们的真实配置目录交给 Magpie 的 Agent 页面：Qoder / Qoder CN（按构建自动判断）、Codex、Claude Code、Copilot CLI、Cline、Cursor、Qwen、Kimi、Grok、OpenClaw、Ante、OpenCode、Pi 和 Zed。未列出的客户端仍只会看到插件私有目录；宿主的服务商密钥、URL 和行为变量不会传给核心。账号发现沿用 Magpie 原生设置，新安装由插件默认关闭，已有设置保持原样；订阅账号需在 Magpie 中显式开启。上游接入或迁移客户端时可能改写该客户端的模型设置；列出和识别本身不会主动改写模型设置。若另一套 Magpie 已管理同一个客户端，建议使用下方的手动配置，避免两套实例同时改写。
 
-1. 在 **Magpie 原生管理页 → Agent** 找到获准写入的 **Qoder** 或 **Qoder CN**。这里的「Agent」是 Magpie 的客户端配置页面。
-2. 打开该客户端的 **将 Qoder 接入 magpie** 开关（中国版选对应项），在模型选项里选择刚才准备好的模型。Magpie 会把本机代理地址、供应商和所选模型写入对应版本的 Qoder 用户设置。
+需要固定只开放一个 Qoder 构建时，可在启动 Qoder 的操作系统用户环境中设置 `BRIDGE_QODER_CLIENT=qoder`（国际版）或 `BRIDGE_QODER_CLIENT=qoder-cn`（中国版），完全退出并重开 Qoder 后再启动核心。显式选择只开放选中的构建；未设置时插件自动识别宿主上实际安装的构建。Qoder 会把两个变量同时指向当前构建的目录，插件只暴露与目录名一致的一个入口，避免两个 Agent 入口写同一份设置。
+
+1. 在 **Magpie 原生管理页 → Agent** 找到识别到的 **Qoder**、**Qoder CN** 或其他客户端。这里的「Agent」是 Magpie 的客户端配置页面。
+2. 打开该客户端的 **将 Qoder 接入 magpie** 开关（中国版选对应项），在模型选项里选择刚才准备好的模型。Magpie 会把本机代理地址、供应商和所选模型写入对应客户端在宿主上的用户设置。
 3. 回到 Qoder，**新建一个会话**，确认所选模型后发一句简单的问题。已打开的旧会话会继续使用它原来的模型。
 
-想撤销自动接入，可先在同一 Agent 页断开 Qoder，让 Magpie 尝试恢复接入前记录的模型。随后停止托管核心，移除 `BRIDGE_QODER_CLIENT`，重新连接插件并启动核心，新建 Qoder 会话即可。自动接入需要当前 Qoder 账号支持使用自定义供应商（BYOK）。[Magpie 的 Qoder 适配实现](https://github.com/yetone/magpie/blob/v0.1.4582/internal/agent/qoder.go)
+想撤销自动接入，可在同一 Agent 页断开 Qoder，让 Magpie 尝试恢复接入前记录的模型。自动接入需要当前 Qoder 账号支持使用自定义供应商（BYOK）。[Magpie 的 Qoder 适配实现](https://github.com/yetone/magpie/blob/v0.1.4597/internal/agent/qoder.go)
 
 ### 推荐：在 Qoder 手动添加自定义模型
 
@@ -108,7 +110,7 @@
 | `bridge_open_management` | 用默认浏览器打开 Magpie 原生管理页。 |
 | `image_gen_gpt` | 调用已配置且支持生图的 GPT 模型，图片保存到本机；有多个候选时可选择模型。 |
 
-默认数据目录为 `~/.qoder/qoder-subscription-proxy/data`，由本插件独占，升级插件时继续使用。`magpie/` 保存本实例的设置和授权，`home/` 是托管核心的用户主目录，`cache/` 和 `state/` 保存缓存与状态，`runtimes/` 缓存核心，`generated/` 保存图片。模型和管理端口都与独立 Magpie 错开后，两套服务可以同时运行。`BRIDGE_DATA_DIR` 可指定其他数据目录。`BRIDGE_PORT` 和 `BRIDGE_MANAGEMENT_PORT` 分别设置模型端口和管理端口；`BRIDGE_BIN` 可指向已准备好且具有执行权限的兼容核心，插件接到这个设置后会跳过下载。使用自定义核心时，请放在独立程序目录，旁边不要有 `data` 或 `.portable`。托管核心只接收运行所需的环境变量；宿主环境中的服务商密钥不会传给核心，请在本插件的原生管理页中填写。`BRIDGE_QODER_CLIENT` 仅用于显式开放一个 Qoder 客户端，见上文的可选自动接入。
+默认数据目录为 `~/.qoder/qoder-subscription-proxy/data`，由本插件独占，升级插件时继续使用。`magpie/` 保存本实例的设置和授权，`home/` 是托管核心的用户主目录，`cache/` 和 `state/` 保存缓存与状态，`runtimes/` 缓存核心，`generated/` 保存图片。模型和管理端口都与独立 Magpie 错开后，两套服务可以同时运行。`BRIDGE_DATA_DIR` 可指定其他数据目录。`BRIDGE_PORT` 和 `BRIDGE_MANAGEMENT_PORT` 分别设置模型端口和管理端口；`BRIDGE_BIN` 可指向已准备好且具有执行权限的兼容核心，插件接到这个设置后会跳过下载。使用自定义核心时，请放在独立程序目录，旁边不要有 `data` 或 `.portable`。托管核心只接收运行所需的环境变量；宿主环境中的服务商密钥不会传给核心，请在本插件的原生管理页中填写。为便于识别和接入，宿主上已存在的常见客户端配置目录（见上文 Agent 说明）会交给核心，其余宿主目录和密钥仍保持隔离；`BRIDGE_QODER_CLIENT` 可显式固定一个 Qoder 构建。
 
 代理仅供 `127.0.0.1` 本机使用。不要将端口映射到公网，也不要分享浏览器登录链接、Cookie、`launcher-secrets.json` 或未经脱敏的日志。卸载插件会保留本地数据；如需撤销订阅授权，请在服务商账号中操作。
 

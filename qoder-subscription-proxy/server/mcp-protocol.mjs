@@ -20,6 +20,13 @@ const MAX_LINE_LENGTH = 1_048_576;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 /** 服务版本与插件配置共用同一来源。 */
 const SERVER_INFO = { name: "qoder-subscription-proxy", version: PLUGIN_VERSION };
+/** 管理入口图标：中性图给不支持主题的客户端，明暗两套供支持 theme 的宿主按主题选择。 */
+const [entrypointIcon, entrypointLightIcon, entrypointDarkIcon] = await Promise.all([
+  readFile(new URL("../assets/entrypoint.png", import.meta.url), "base64"),
+  readFile(new URL("../assets/entrypoint-light.png", import.meta.url), "base64"),
+  readFile(new URL("../assets/entrypoint-dark.png", import.meta.url), "base64"),
+]);
+const iconSrc = base64 => `data:image/png;base64,${base64}`;
 /** 生产依赖与测试注入共用同一个分发器，进程操作只接收 config。 */
 const DEFAULT_HANDLERS = { ensureRunning, getStatus, stopBridge, generateImage };
 /** 无参数工具的契约；显式传 null、数组或额外参数均不接受。 */
@@ -66,7 +73,11 @@ const TOOLS = [
 const MANAGEMENT_APP_TOOL = {
   name: "bridge_management_app",
   title: "订阅代理管理",
-  icons: [{ src: `data:image/png;base64,${await readFile(new URL("../assets/entrypoint.png", import.meta.url), "base64")}`, mimeType: "image/png", sizes: ["96x96"] }],
+  icons: [
+    { src: iconSrc(entrypointIcon), mimeType: "image/png", sizes: ["96x96"] },
+    { src: iconSrc(entrypointLightIcon), mimeType: "image/png", sizes: ["96x96"], theme: "light" },
+    { src: iconSrc(entrypointDarkIcon), mimeType: "image/png", sizes: ["96x96"], theme: "dark" },
+  ],
   description: "打开订阅代理管理入口，只读取核心状态；启动核心与打开原生管理页由用户在页面明确操作。",
   inputSchema: EMPTY_SCHEMA,
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },

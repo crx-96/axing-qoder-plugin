@@ -10,16 +10,18 @@ export const MANAGEMENT_APP_MIME = "text/html;profile=mcp-app";
 
 /** 生成自包含的全屏管理页，所有业务数据在宿主握手后按需读取。 */
 export async function managementAppResource() {
-  const [script, updateScript, installedScript, updateSection, portsScript, portsSection, icon] = await Promise.all([
+  const [script, updateScript, installedScript, updateSection, portsScript, portsSection, logoLight, logoDark] = await Promise.all([
     readFile(new URL("./panel/management-app.js", import.meta.url), "utf8"),
     readFile(new URL("./panel/core-update.js", import.meta.url), "utf8"),
     readFile(new URL("./panel/installed-cores.js", import.meta.url), "utf8"),
     readFile(new URL("./panel/core-update.html", import.meta.url), "utf8"),
     readFile(new URL("./panel/bridge-ports.js", import.meta.url), "utf8"),
     readFile(new URL("./panel/bridge-ports.html", import.meta.url), "utf8"),
-    readFile(new URL("../assets/entrypoint.png", import.meta.url), "base64"),
+    readFile(new URL("../assets/logo-light.png", import.meta.url), "base64"),
+    readFile(new URL("../assets/logo-dark.png", import.meta.url), "base64"),
   ]);
-  const logo = `<img class="logo" alt="" width="44" height="44" src="data:image/png;base64,${icon}">`;
+  // 明暗两套图标由宿主题切换；未收到宿主主题时用 prefers-color-scheme 兜底。
+  const logo = `<img class="logo logo-light" alt="" width="44" height="44" src="data:image/png;base64,${logoLight}"><img class="logo logo-dark" alt="" width="44" height="44" src="data:image/png;base64,${logoDark}">`;
   // 将服务端的禁用端口表内联到自包含页面，表单可在确认前给出与写入入口一致的提示。
   const bootstrap = `const pluginVersion=${JSON.stringify(PLUGIN_VERSION)};\nconst blockedManagementPorts=${JSON.stringify(blockedManagementPorts)};`;
   return {
@@ -41,7 +43,10 @@ body { margin:0; background:var(--bg); color:var(--ink); overflow-wrap:anywhere 
 main { max-width:850px; margin:auto; padding:clamp(18px,4vw,46px) clamp(14px,4vw,40px) }
 header,.identity,.actions,.heading { display:flex; align-items:center }
 header { justify-content:space-between; gap:12px; margin-bottom:24px }
-.identity { gap:12px } .logo { flex:none; border-radius:10px }
+.identity { gap:12px } .logo { flex:none; border-radius:10px; width:44px; height:44px; display:block } .logo-dark { display:none }
+@media (prefers-color-scheme: dark) { .logo-light { display:none } .logo-dark { display:block } }
+html[data-theme="light"] .logo-light { display:block } html[data-theme="light"] .logo-dark { display:none }
+html[data-theme="dark"] .logo-light { display:none } html[data-theme="dark"] .logo-dark { display:block }
 h1,h2,p,dl,dd { margin:0 } h1 { font-size:clamp(1.25rem,3vw,1.65rem); line-height:1.25 }
 .version,.hint,dt,summary { color:var(--muted) } .version { font-size:.86rem; white-space:nowrap }
 .surface { background:var(--surface); border:1px solid var(--line); border-radius:14px }
@@ -81,7 +86,7 @@ dt { font-size:.9rem } dd { font-weight:540 } details { margin-top:12px } summar
 <div class="actions"><button id="start" hidden disabled>启动核心</button><button id="open" aria-label="打开原生管理页（浏览器）" disabled>打开原生管理页<span class="browser-label">（浏览器）</span></button><button id="refresh" disabled>刷新状态</button><button id="reconnect" hidden disabled>重新连接</button></div>
 <p id="notice" role="status" aria-live="polite"></p></section>
 <section id="overview" aria-labelledby="diagnostics" hidden><h2 id="diagnostics">诊断概览</h2><dl id="facts"></dl>
-<details><summary>配置与使用详情</summary><dl id="more"></dl><p class="usage">在 Qoder 添加自定义模型时，填写这里的模型端点和原生管理页中的 Model ID。需要用「Agent」写入 Qoder 或 Qoder CN 时，请按插件使用指南设置 BRIDGE_QODER_CLIENT。此代理随 Qoder 启停；多工具长期共用时，建议单独运行 Magpie。</p></details>
+<details><summary>配置与使用详情</summary><dl id="more"></dl><p class="usage">在 Qoder 添加自定义模型时，填写这里的模型端点和原生管理页中的 Model ID。需要让 Magpie 的 Agent 页面识别并写入 Qoder 或其他已安装客户端时，直接打开原生管理页的 Agent 页操作；插件默认按宿主真实配置目录识别常见客户端。此代理随 Qoder 启停；多工具长期共用时，建议单独运行 Magpie。</p></details>
 </section>${portsSection}${updateSection}<section id="installed-cores" hidden aria-label="已安装版本"></section></div></main><script>${[bootstrap, updateScript, installedScript, portsScript, script].join("\n").replaceAll("</script", "<\\/script")}</script></body></html>`,
     _meta: {
       "qoder/ui": { availableDisplayModes: ["fullscreen"], preferredDisplayMode: "fullscreen" },

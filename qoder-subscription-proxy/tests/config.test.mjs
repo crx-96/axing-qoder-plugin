@@ -25,7 +25,7 @@ test("插件和市场使用相同的管理入口名称，版本与 MCP 一致且
   const manifest = JSON.parse(await readFile(new URL("../.qoder-plugin/plugin.json", import.meta.url)));
   const marketplace = JSON.parse(await readFile(new URL("../../.qoder-plugin/marketplace.json", import.meta.url)));
   const listing = marketplace.plugins.find(p => p.name === manifest.name);
-  assert.equal(PLUGIN_VERSION, "2.0.0");
+  assert.equal(PLUGIN_VERSION, "2.0.1");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(manifest.displayName, "订阅代理管理");
@@ -259,7 +259,7 @@ test("启动前拒绝指向其他实例的私有 HOME、缓存及待迁移配置
   assert.deepEqual(await readdir(external), []);
 });
 
-test("原生启动只迁移私有 Codex，并保留用户控制账号发现和显式 Qoder CN 接入的能力", { skip: nativeCoreSkip }, async t => {
+test("原生核心在隔离数据中识别宿主客户端，只读列表不改写设置且显式选择仍有效", { skip: nativeCoreSkip }, async t => {
   const { root, load } = await fixture(t);
   const binDir = join(root, "bin");
   await mkdir(binDir);
@@ -276,53 +276,72 @@ test("原生启动只迁移私有 Codex，并保留用户控制账号发现和�
   const config = await load(options);
   await ensureMagpieConfig(config);
   const external = join(root, "simulated-host");
+  const hostQoder = join(external, "global");
+  const hostChina = join(external, "china");
   const hostCodex = join(external, "custom-codex");
   const hostEnv = {
-    SystemRoot: process.env.SystemRoot, PATH: binDir, HOME: external, USERPROFILE: external, CODEX_HOME: hostCodex,
-    XDG_CACHE_HOME: join(external, "cache"), LOCALAPPDATA: join(external, "local"), MAGPIE_NO_ACCOUNTS: "1",
+    SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, PATHEXT: process.env.PATHEXT,
+    HOME: external, USERPROFILE: external, APPDATA: join(external, "AppData", "Roaming"),
+    LOCALAPPDATA: join(external, "AppData", "Local"), CODEX_HOME: hostCodex, MAGPIE_NO_ACCOUNTS: "1",
+    GEMINI_CLI_HOME: join(external, "gemini-home"),
     HTTP_PROXY: "http://127.0.0.1:1", HTTPS_PROXY: "http://127.0.0.1:1",
-    QODER_CONFIG_DIR: join(external, "global"), QODERCN_CONFIG_DIR: join(external, "china"),
+    QODER_CONFIG_DIR: hostQoder, QODERCN_CONFIG_DIR: hostChina,
   };
   const env = magpieEnvironment(config, hostEnv);
-  const oldModel = JSON.stringify({ model: { name: "dial/fixture/model" } });
-  for (const dir of [hostEnv.QODER_CONFIG_DIR, hostEnv.QODERCN_CONFIG_DIR]) {
+  // 使用非 Magpie 的模型名，验证只读命令不会顺带迁移任何客户端设置。
+  const oldModel = JSON.stringify({ model: { name: "probe/old" }, providers: {} });
+  for (const dir of [hostQoder, hostChina]) {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "settings.json"), oldModel);
   }
-  for (const dir of [hostCodex, env.CODEX_HOME]) {
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, "config.toml"), 'model = "fixture"\n');
-    await writeFile(join(dir, "dial-models.json"), "sentinel");
-  }
+  await mkdir(hostCodex, { recursive: true });
+  await writeFile(join(hostCodex, "config.toml"), 'model = "fixture"\n');
+  // 非白名单客户端目录必须保持不可见；上游即使迁移 Codex，也不能触及它。
+  const externalClient = join(external, "gemini-home");
+  await mkdir(externalClient, { recursive: true });
+  await writeFile(join(externalClient, "legacy-catalog"), "sentinel");
+  await writeFile(join(externalClient, "settings.json"), "{}");
   const oldCache = join(external, "cache", "dial");
   await mkdir(oldCache, { recursive: true });
   await writeFile(join(oldCache, "legacy-catalog"), "outside-cache");
   const query = (args = ["accounts", "discovery"], childEnv = env) => promisify(execFile)(binPath, args,
     { env: childEnv, cwd: root, timeout: 20000, windowsHide: true });
   assert.match((await query()).stdout, /account discovery is off:/);
-  await query(["agents"]);
-  await assert.rejects(lstat(join(env.CODEX_HOME, "dial-models.json")), { code: "ENOENT" });
-  assert.equal(await readFile(join(hostCodex, "dial-models.json"), "utf8"), "sentinel");
-  assert.deepEqual((await readdir(external)).sort(), ["cache", "china", "custom-codex", "global"]);
-  await assert.rejects(lstat(join(env.XDG_CACHE_HOME, "magpie", "legacy-catalog")), { code: "ENOENT" });
-  const globalSettings = join(hostEnv.QODER_CONFIG_DIR, "settings.json");
-  const chinaSettings = join(hostEnv.QODERCN_CONFIG_DIR, "settings.json");
+  // 只读列表应识别宿主 Qoder 与 Qoder CN；未列入白名单的客户端目录保持原样。
+  const listed = (await query(["ls"])).stdout;
+  assert.match(listed, /Qoder/);
+  assert.match(listed, /Qoder CN/);
+  const globalSettings = join(hostQoder, "settings.json");
+  const chinaSettings = join(hostChina, "settings.json");
+  assert.equal(await readFile(globalSettings, "utf8"), oldModel);
   assert.equal(await readFile(chinaSettings, "utf8"), oldModel);
-  assert.equal(await readFile(globalSettings, "utf8"), oldModel);
+  assert.equal(await readFile(join(externalClient, "legacy-catalog"), "utf8"), "sentinel");
+  assert.equal(await readFile(join(externalClient, "settings.json"), "utf8"), "{}");
+  assert.deepEqual(await readdir(oldCache), ["legacy-catalog"]);
+  await assert.rejects(lstat(join(env.XDG_CACHE_HOME, "magpie", "legacy-catalog")), { code: "ENOENT" });
+  // 显式选择只开放 Qoder CN；国际版回落到私有目录，普通列表命令不改写两个客户端。
   const optedIn = await load({ ...options, BRIDGE_QODER_CLIENT: "qoder-cn" });
-  await query(["agents"], magpieEnvironment(optedIn, hostEnv));
-  assert.equal(JSON.parse(await readFile(chinaSettings, "utf8")).model.name, "magpie/fixture/model");
+  const selectedEnv = magpieEnvironment(optedIn, hostEnv);
+  const home = join(config.dataDir, "home");
+  assert.equal(selectedEnv.QODER_CONFIG_DIR, join(home, ".qoder"));
+  assert.equal(selectedEnv.QODERCN_CONFIG_DIR, hostChina);
+  await query(["agents"], selectedEnv);
   assert.equal(await readFile(globalSettings, "utf8"), oldModel);
+  assert.equal(await readFile(chinaSettings, "utf8"), oldModel);
   const settings = JSON.parse(await readFile(config.configPath, "utf8"));
   await writeFile(config.configPath, JSON.stringify({ ...settings, noAccountDiscovery: false }));
   await ensureMagpieConfig(config);
   assert.match((await query()).stdout, /account discovery is on:/);
 });
 
-test("子进程使用隔离配置和明确监听，不继承宿主Magpie重定向", async t => {
+test("子进程使用隔离配置和明确监听，未识别的客户端仍回落到私有目录", async t => {
   const { load } = await fixture(t);
   const config = await load({ BRIDGE_PORT: "21001", BRIDGE_MANAGEMENT_PORT: "21002" });
-  const env = magpieEnvironment(config, { PATH: "keep-path", HOME: "keep-home", MAGPIE_ADDR: "0.0.0.0:1", magpie_web_url: "https://example.invalid", MAGPIE_TRUST_PROXY: "1" });
+  const hostHome = join(config.dataDir, "host-home");
+  const env = magpieEnvironment(config, {
+    PATH: "keep-path", HOME: hostHome, USERPROFILE: hostHome,
+    MAGPIE_ADDR: "0.0.0.0:1", magpie_web_url: "https://example.invalid", MAGPIE_TRUST_PROXY: "1",
+  });
   assert.equal(env.PATH, "keep-path");
   const home = join(config.dataDir, "home");
   assert.equal(env.HOME, home);
@@ -330,6 +349,7 @@ test("子进程使用隔离配置和明确监听，不继承宿主Magpie重定�
   assert.equal(env.CODEX_HOME, join(home, ".codex"));
   assert.equal(env.QODER_CONFIG_DIR, join(home, ".qoder"));
   assert.equal(env.QODERCN_CONFIG_DIR, join(home, ".qoder-cn"));
+  assert.equal(env.BRIDGE_NESTED_CORE_ENV, "1");
   assert.equal(env.MAGPIE_ADDR, "127.0.0.1:21001");
   assert.equal(env.XDG_CONFIG_HOME, config.dataDir);
   assert.equal(env.MAGPIE_WEB_KEY, config.mgmtKey);
@@ -340,31 +360,60 @@ test("子进程使用隔离配置和明确监听，不继承宿主Magpie重定�
   assert.deepEqual(magpieArguments(config), ["serve", "--web=127.0.0.1:21002"]);
 });
 
-test("仅显式选中的 Qoder 客户端可以使用宿主目录，经过两层托管仍然有效", async t => {
+test("未指定客户端时自动识别宿主 Qoder，两个变量指向同一目录只暴露国际版", async t => {
   const { load, root } = await fixture(t);
-  await assert.rejects(load({ BRIDGE_QODER_CLIENT: "all" }), /BRIDGE_QODER_CLIENT/);
-  const host = join(root, "host");
-  for (const selected of [undefined, "qoder", "qoder-cn"]) {
-    const config = await load({ BRIDGE_QODER_CLIENT: selected });
-    for (const custom of [false, true]) {
-      const base = { HOME: host, USERPROFILE: host, APPDATA: host, LOCALAPPDATA: host, XDG_CACHE_HOME: host,
-        XDG_DATA_HOME: host, XDG_RUNTIME_DIR: host, XDG_STATE_HOME: host, TEMP: host, CODEX_HOME: host,
-        CLAUDE_CONFIG_DIR: host, OPENCODE_CONFIG: host, PI_CODING_AGENT_DIR: host, APPIMAGE: host, APPDIR: host,
-        OPENAI_API_KEY: 'synthetic-host-token', AWS_SHARED_CREDENTIALS_FILE: join(host, 'credentials'),
-        ...(custom ? { QODER_CONFIG_DIR: join(host, "global"), QODERCN_CONFIG_DIR: join(host, "cn") } : {}) };
-      const env = magpieEnvironment(config, base);
-      const guardian = { dataDir: config.dataDir, port: config.port, mgmtKey: config.mgmtKey };
-      assert.deepEqual(magpieEnvironment(guardian, magpieEnvironment(guardian, env)), env);
-      const home = join(config.dataDir, "home");
-      assert.equal(env.QODER_CONFIG_DIR, selected === "qoder" ? join(host, custom ? "global" : ".qoder") : join(home, ".qoder"));
-      assert.equal(env.QODERCN_CONFIG_DIR, selected === "qoder-cn" ? join(host, custom ? "cn" : ".qoder-cn") : join(home, ".qoder-cn"));
-      for (const key of ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CACHE_HOME", "XDG_DATA_HOME",
-        "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "TEMP", "CODEX_HOME"]) assert.ok(env[key].startsWith(config.dataDir));
-      for (const key of ["CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "OPENCODE_CONFIG"]) assert.equal(env[key], "");
-      assert.equal(env.OPENAI_API_KEY, undefined);
-      assert.equal(env.AWS_SHARED_CREDENTIALS_FILE, undefined);
-      assert.equal(env.APPIMAGE, undefined);
-      assert.equal(env.APPDIR, undefined);
-    }
-  }
+  const config = await load();
+  const host = join(root, "host-qoder");
+  const qoder = join(host, ".qoder");
+  await mkdir(qoder, { recursive: true });
+  await writeFile(join(qoder, "settings.json"), "{}");
+  await writeFile(join(qoder, ".qoder-app-status.json"), "{}");
+  const base = { HOME: host, USERPROFILE: host, APPDATA: join(host, "AppData", "Roaming"),
+    QODER_CONFIG_DIR: qoder, QODERCN_CONFIG_DIR: qoder };
+  const env = magpieEnvironment(config, base);
+  assert.equal(env.QODER_CONFIG_DIR, qoder);
+  assert.equal(env.QODERCN_CONFIG_DIR, join(config.dataDir, "home", ".qoder-cn"));
+  const guardian = { dataDir: config.dataDir, port: config.port, mgmtKey: config.mgmtKey };
+  assert.deepEqual(magpieEnvironment(guardian, env), env);
+});
+
+test("Qoder CN 构建按目录识别，国际版保持私有", async t => {
+  const { load, root } = await fixture(t);
+  const config = await load();
+  const host = join(root, "host-qoder-cn");
+  const china = join(host, ".qoder-cn");
+  await mkdir(china, { recursive: true });
+  await writeFile(join(china, "settings.json"), "{}");
+  const env = magpieEnvironment(config, { HOME: host, USERPROFILE: host,
+    QODER_CONFIG_DIR: china, QODERCN_CONFIG_DIR: china });
+  assert.equal(env.QODER_CONFIG_DIR, join(config.dataDir, "home", ".qoder"));
+  assert.equal(env.QODERCN_CONFIG_DIR, china);
+});
+
+test("常见客户端目录按宿主位置暴露，密钥和非白名单变量仍保持隔离", async t => {
+  const { load, root } = await fixture(t);
+  const config = await load();
+  const host = join(root, "host-clients");
+  const appData = join(host, "AppData", "Roaming");
+  await mkdir(join(host, ".claude"), { recursive: true });
+  await mkdir(join(host, ".pi", "agent"), { recursive: true });
+  await mkdir(join(appData, "Zed"), { recursive: true });
+  const base = {
+    HOME: host, USERPROFILE: host, APPDATA: appData, LOCALAPPDATA: join(host, "AppData", "Local"),
+    QWEN_HOME: join(host, "custom-qwen"), GEMINI_CLI_HOME: join(host, "custom-gemini"),
+    OPENAI_API_KEY: "synthetic-host-token", AWS_SHARED_CREDENTIALS_FILE: join(host, "credentials"),
+    QODER_CONFIG_DIR: join(host, ".qoder"), QODERCN_CONFIG_DIR: join(host, ".qoder"),
+  };
+  const env = magpieEnvironment(config, base);
+  const home = join(config.dataDir, "home");
+  assert.equal(env.CLAUDE_CONFIG_DIR, join(host, ".claude"));
+  assert.equal(env.PI_CODING_AGENT_DIR, join(host, ".pi", "agent"));
+  assert.equal(env.MAGPIE_ZED_CONFIG_DIR, join(appData, "Zed"));
+  assert.equal(env.QWEN_HOME, join(host, "custom-qwen"));
+  assert.equal(env.GEMINI_CLI_HOME, "");
+  assert.equal(env.HOME, home);
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.AWS_SHARED_CREDENTIALS_FILE, undefined);
+  const guardian = { dataDir: config.dataDir, port: config.port, mgmtKey: config.mgmtKey };
+  assert.deepEqual(magpieEnvironment(guardian, env), env);
 });

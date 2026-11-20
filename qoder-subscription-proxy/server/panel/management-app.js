@@ -335,9 +335,11 @@ async function openNative() {
   finally { action = ""; controls(); }
 }
 
-/** 应用宿主的初始主题及后续主题通知。 */
+/** 应用宿主的初始主题及后续主题通知，同时切换明暗两套图标。 */
 function hostContext(context) {
-  if (["light", "dark"].includes(context?.theme)) document.documentElement.style.colorScheme = context.theme;
+  if (!["light", "dark"].includes(context?.theme)) return;
+  document.documentElement.style.colorScheme = context.theme;
+  document.documentElement.dataset.theme = context.theme;
 }
 
 /** 只接收父窗口的协议消息；迟到响应不会被误当作宿主请求。 */

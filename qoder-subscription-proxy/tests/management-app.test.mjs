@@ -18,7 +18,7 @@ function page(t) {
   }
   const parent = { postMessage: message => sent.push(message) };
   const window = { parent, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
-  const document = { querySelector(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, documentElement: { style: {} } };
+  const document = { querySelector(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element, documentElement: { style: {}, dataset: {} } };
   const panel = () => ({ render() {}, initialize() {}, dispose() {} });
   runInNewContext(script, { document, window, console, pluginVersion: PLUGIN_VERSION, createUpdatePanel: panel, createInstalledCoresPanel: panel, createPortPanel: panel,
     setTimeout(fn, ms) {
@@ -62,6 +62,7 @@ test("初始化仅查状态，早到与重复通知均不打开浏览器或写�
   assert.deepEqual(p.calls().map(call => call.params.name), ["bridge_status"]);
   assert.equal(p.sent[0].params.appInfo.version, PLUGIN_VERSION);
   assert.equal(p.document.documentElement.style.colorScheme, "dark");
+  assert.equal(p.document.documentElement.dataset.theme, "dark");
   assert.equal(p.timers.size, 0);
 });
 test("初始化 30 秒超时后仅可手动重连，迟到响应不干扰新握手", async t => {
@@ -336,6 +337,7 @@ test("主题通知和取消提示不发送写入", async t => {
   p.notify("ui/notifications/host-context-changed", { theme: "light" });
   p.notify("ui/notifications/tool-cancelled", {});
   assert.equal(p.document.documentElement.style.colorScheme, "light");
+  assert.equal(p.document.documentElement.dataset.theme, "light");
   assert.match(p.get("#notice").textContent, /已取消/);
   assert.equal(p.calls().length, 1);
 });

@@ -1,7 +1,11 @@
 mcp.json
 .qoder-plugin/plugin.json
 assets/logo.png
+assets/logo-light.png
+assets/logo-dark.png
 assets/entrypoint.png
+assets/entrypoint-light.png
+assets/entrypoint-dark.png
 DISCLAIMER.md
 LICENSE
 README.md

@@ -144,6 +144,9 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
     for (const theme of ["light", "dark"]) {
       await evaluate(`window.notify('ui/notifications/host-context-changed',{theme:'${theme}'})`);
       await waitFor(`${doc}.documentElement.style.colorScheme==='${theme}'`);
+      assert.equal(await evaluate(`${doc}.documentElement.dataset.theme`), theme);
+      assert.equal(await evaluate(`getComputedStyle(${el('.logo-light')}).display !== 'none'`), theme === "light");
+      assert.equal(await evaluate(`getComputedStyle(${el('.logo-dark')}).display !== 'none'`), theme === "dark");
       assert.ok(await evaluate(`${doc}.documentElement.scrollWidth<=${doc}.documentElement.clientWidth`));
       assert.equal(await evaluate(`${el('#open')}.disabled`), false);
       assert.equal(await evaluate(`${el('#open')}.offsetTop===${el('#refresh')}.offsetTop`), true);

@@ -161,7 +161,9 @@ async function fixture(t, { ignoreTerm = false, owner = false, announcement = "n
     `);
   }
   const child = spawn(process.execPath, [target], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", MAGPIE_ADDR: "must-be-overridden", MAGPIE_ROGUE: "must-not-inherit" },
+    // 合成宿主主目录，保证客户端自动识别在任意开发机上结果一致。
+    env: { ...process.env, HOME: join(directory, "synthetic-host"), USERPROFILE: join(directory, "synthetic-host"),
+      ELECTRON_RUN_AS_NODE: "1", MAGPIE_ADDR: "must-be-overridden", MAGPIE_ROGUE: "must-not-inherit" },
     windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
