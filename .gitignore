@@ -23,6 +23,8 @@ qoder-subscription-proxy/server/bin/*
 **/runtimes/
 node_modules/
 coverage/
+# Windows PowerShell 在相对环境变量下生成的模块分析缓存，不进入仓库。
+/Microsoft/
 .qoder/
 .qoder-cn/
 .codegraph/
