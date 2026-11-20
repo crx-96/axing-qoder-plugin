@@ -22,7 +22,7 @@ async function fixture(t, extra = {}) {
 test("插件、市场与MCP版本一致，固定端口保持不变", async () => {
   const manifest = JSON.parse(await readFile(new URL("../.qoder-plugin/plugin.json", import.meta.url)));
   const marketplace = JSON.parse(await readFile(new URL("../../.qoder-plugin/marketplace.json", import.meta.url)));
-  assert.equal(PLUGIN_VERSION, "1.1.5");
+  assert.equal(PLUGIN_VERSION, "1.1.6");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(marketplace.plugins.find(p => p.name === manifest.name).version, PLUGIN_VERSION);
   assert.equal(manifest.mcpServers, "./mcp.json");

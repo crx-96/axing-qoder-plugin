@@ -24,7 +24,7 @@ const processModuleUrl = new URL("../server/supervisor.mjs", import.meta.url).hr
 const execFileAsync = promisify(execFile);
 const windowsOnly = process.platform !== "win32" ? "仅在 Windows 验证进程身份与隔离 exe" : nativeCoreSkip;
 const powerShell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-const signature = { name: "magpie", version: "0.1.4520" };
+const signature = { name: "magpie", version: "0.1.4582" };
 
 function testConfig(directory, port = 1) {
   assert.ok(![8787, 19787].includes(port), "禁止访问旧桥或插件默认端口");
@@ -313,6 +313,50 @@ test("Windows PID 原子发布有界重试短暂占用，永久错误保留原�
     }
     assert.equal(module.attempts, expectedAttempts);
     assert.deepEqual(await readdir(directory), ["bridge.pid"]);
+  }
+});
+
+test("Windows PID 被复用且 CIM 隐藏路径和命令行时，仅确证旧实例已退出才继续启动", async (t) => {
+  const config = testConfig(await directoryFixture(t), await unusedPort());
+  const current = "2026-11-20T03:09:45.1234560Z";
+  const older = "2026-11-20T03:09:45.1234550Z";
+  const record = { pid: 17428, creationDate: older, binPath: config.binPath, configPath: config.configPath };
+  const url = new URL("../server/supervisor.mjs", import.meta.url);
+  const source = (await readFile(url, "utf8"))
+    .replaceAll("import.meta.url", JSON.stringify(url.href))
+    .replace(/from "(\.\/[^\"]+)"/g, (_, path) => `from ${JSON.stringify(new URL(path, url).href)}`)
+    .replace("promisify(execFile)", "cimQuery");
+  const fixture = `
+    const process = { platform: "win32", env: {} };
+    let created;
+    export function setCreated(value) { created = value; }
+    async function cimQuery(_exe, args) {
+      if (!args.at(-1).includes("Get-CimInstance Win32_Process -Filter 'ProcessId = 17428'")) throw Error("Unexpected process operation");
+      return { stdout: JSON.stringify({pid: 17428, executablePath: null, commandLine: null, creationDate: created}) };
+    }
+  `;
+  const bridge = await import(`data:text/javascript;base64,${Buffer.from(fixture + source).toString("base64")}`);
+  bridge.setCreated(current);
+  await writeFile(config.pidPath, JSON.stringify(record));
+  await assert.rejects(bridge.ensureRunning(config, { allowDownload: false }), /BRIDGE_BIN 不存在/);
+  assert.deepEqual(await readPid(config), record);
+  await assert.rejects(bridge.processIdentity(record.pid), /无法读取进程归属/);
+
+  const server = await localServer(t, (request, response) => {
+    assert.equal(request.headers.authorization, undefined);
+    response.end(JSON.stringify(signature));
+  });
+  const occupied = { ...config, port: server.address().port };
+  await assert.rejects(bridge.ensureRunning(occupied), /旧版或外部 Magpie/);
+  assert.equal((await bridge.stopBridge(occupied)).stopped, false);
+  assert.deepEqual(await readPid(config), record);
+
+  for (const [saved, observed] of [[current, current], [null, current], ["invalid", current], [older, null]]) {
+    bridge.setCreated(observed);
+    await writeFile(config.pidPath, JSON.stringify({ ...record, creationDate: saved }));
+    for (const operation of [() => bridge.ensureRunning(config), () => bridge.stopBridge(config)]) {
+      await assert.rejects(operation(), /无法读取进程归属/);
+    }
   }
 });
 
@@ -687,7 +731,7 @@ test("启动后 PID 登记失败会回滚自己启动的进程，不留下孤儿
 });
 
 test("并发 ensureRunning 只启动一个实例，两个真实 MCP 子进程复用同一 PID", {
-  skip: windowsOnly, timeout: 90000,
+  skip: windowsOnly, timeout: 180000,
 }, async (t) => {
   const { config, env, beforeCleanup } = await realBridgeFixture(t);
   const results = await Promise.all(Array.from({ length: 4 }, () => ensureRunning(config)));

@@ -89,8 +89,11 @@ export async function ensureDataDir(config) {
   await ensureMagpieConfig(config);
 }
 
-/** PID 必须连同启动身份核对，不能仅凭仍存活或同名程序判断归属。 */
-export async function processIdentity(pid) {
+/** Windows 的 CIM 创建时间以 UTC 和七位小数写入记录；字符串比较保留亚毫秒精度。 */
+const windowsCreationTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/;
+
+/** 读取进程完整身份；指定 Windows 实例的创建时间时，已被复用的 PID 表示该实例已退出。 */
+export async function processIdentity(pid, expectedCreationDate) {
   if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) return null;
   if (process.platform === "linux") {
     try {
@@ -107,12 +110,15 @@ export async function processIdentity(pid) {
     } catch (error) { if (error.code === 1) return null; throw error; }
   }
   if (process.platform !== "win32") return null;
-  const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if($p){ [pscustomobject]@{pid=[int]$p.ProcessId; executablePath=$p.ExecutablePath; commandLine=$p.CommandLine; creationDate=$p.CreationDate.ToUniversalTime().ToString('o')} | ConvertTo-Json -Compress }`;
+  const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if($p){ [pscustomobject]@{pid=[int]$p.ProcessId; executablePath=$p.ExecutablePath; commandLine=$p.CommandLine; creationDate=if($p.CreationDate){$p.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress }`;
   const { stdout } = await execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true, timeout: 5000, maxBuffer: 32768,
   });
   if (!stdout.trim()) return null;
   const identity = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+  // PID 复用后的进程可能隐藏路径和命令行；同一次 CIM 查询中的创建时间足以排除旧实例。
+  if (identity.pid === pid && typeof expectedCreationDate === "string" && windowsCreationTime.test(expectedCreationDate) &&
+      windowsCreationTime.test(identity.creationDate) && expectedCreationDate !== identity.creationDate) return null;
   if (!identity.executablePath || !identity.commandLine || !identity.creationDate) {
     throw bridgeError("无法读取进程归属信息，拒绝接管或停止");
   }
@@ -157,7 +163,7 @@ async function trackedProcess(config) {
     throw bridgeError("旧版本进程仍存在或无法确认已退出；请手动停止旧版本并关闭其 MCP 会话后重试，新版不会接管或按 PID 停止");
   }
   const identity = process.platform === "win32"
-    ? await processIdentity(record.pid)
+    ? await processIdentity(record.pid, record.creationDate)
     // 升级会改变安装目录；先按记录自身路径认证同协议实例，再单独判定是否属于当前配置。
     : await queryPosixSupervisor(record, { binPath: record?.binPath, configPath: record?.configPath, managementPort: record?.managementPort });
   return { record, identity, owned: sameProcess(record, identity, config) };
@@ -520,7 +526,7 @@ export async function stopBridge(config) {
     try {
       await execFileAsync(powerShell, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 8000, maxBuffer: 32768 });
     } catch { return { stopped: false, reason: "停止进程失败或归属已变化；没有报告虚假成功" }; }
-    const after = await processIdentity(tracked.record.pid);
+    const after = await processIdentity(tracked.record.pid, tracked.record.creationDate);
     if (sameProcess(tracked.record, after, config)) return { stopped: false, reason: "进程仍在运行" };
     await unlink(config.pidPath);
     return { stopped: true, reason: "已停止本版本订阅桥，自动恢复暂停；bridge_start 可恢复" };

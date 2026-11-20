@@ -7,14 +7,14 @@
 | 项目 | 值 |
 | --- | --- |
 | 上游仓库 | https://github.com/yetone/magpie |
-| 固定核心版本 | `v0.1.4520` |
-| 参考源码 | https://github.com/yetone/magpie/tree/v0.1.4520 （已核对固定源码标签） |
-| 发布页 | https://github.com/yetone/magpie/releases/tag/v0.1.4520 |
+| 固定核心版本 | `v0.1.4582` |
+| 参考源码 | https://github.com/yetone/magpie/tree/v0.1.4582 （已核对固定源码标签） |
+| 发布页 | https://github.com/yetone/magpie/releases/tag/v0.1.4582 |
 | 许可证 | MIT，原文保存在 `server/bin/LICENSE` |
 | 版权 | `Copyright (c) 2026 yetone` |
 | 修改情况 | 使用原始 CLI 二进制，不修改其内容；分发路径按插件平台清单组织 |
 
-插件 **1.1.5** 的每个平台 ZIP 只内置对应平台核心。固定资产、下载 URL、分发路径与完整 SHA256 以 [`server/bin/platforms.json`](server/bin/platforms.json) 为单一清单：
+插件 **1.1.6** 的每个平台 ZIP 只内置对应平台核心。固定资产、下载 URL、分发路径与完整 SHA256 以 [`server/bin/platforms.json`](server/bin/platforms.json) 为单一清单：
 
 | 平台 | 随包路径（相对 server/bin） | 上游资产 |
 | --- | --- | --- |
@@ -26,7 +26,7 @@
 
 这些资产为原始可执行文件，清单保留下载资产和二进制两个摘要字段。构建通过 `scripts/fetch-core.mjs` 下载、校验，运行时校验随包核心后安装到私有缓存；源码未随包才允许下载回退。摘要不等于数字签名、安全审计或五平台运行验收。
 
-2026-11-19 已逐字节核对：本次工作树的 [`server/bin/LICENSE`](server/bin/LICENSE) 与 `v0.1.4520` 标签的 [`LICENSE`](https://github.com/yetone/magpie/blob/v0.1.4520/LICENSE) 一致，[`server/magpie-third-party-notices.txt`](server/magpie-third-party-notices.txt) 与同一标签的 [`THIRD_PARTY_NOTICES`](https://github.com/yetone/magpie/blob/v0.1.4520/THIRD_PARTY_NOTICES) 一致。两份原文均随包保留。本说明不重写其依赖清单。MIT 不意味着远程服务、商标及全部依赖由本仓库重新许可。
+2026-11-20 已核对 Git blob 摘要：本次工作树的 [`server/bin/LICENSE`](server/bin/LICENSE) 与 `v0.1.4582` 标签的 [`LICENSE`](https://github.com/yetone/magpie/blob/v0.1.4582/LICENSE) 一致，[`server/magpie-third-party-notices.txt`](server/magpie-third-party-notices.txt) 与同一标签的 [`THIRD_PARTY_NOTICES`](https://github.com/yetone/magpie/blob/v0.1.4582/THIRD_PARTY_NOTICES) 一致。两份原文均随包保留。本说明不重写其依赖清单。MIT 不意味着远程服务、商标及全部依赖由本仓库重新许可。
 
 ## 用户自行安装的第三方插件
 
