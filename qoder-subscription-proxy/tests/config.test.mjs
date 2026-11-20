@@ -19,12 +19,16 @@ async function fixture(t, extra = {}) {
   return { root, env, load };
 }
 
-test("插件、市场与MCP版本一致，固定端口保持不变", async () => {
+test("插件和市场使用相同的管理入口名称，版本与 MCP 一致且端口固定", async () => {
   const manifest = JSON.parse(await readFile(new URL("../.qoder-plugin/plugin.json", import.meta.url)));
   const marketplace = JSON.parse(await readFile(new URL("../../.qoder-plugin/marketplace.json", import.meta.url)));
-  assert.equal(PLUGIN_VERSION, "1.1.6");
+  const listing = marketplace.plugins.find(p => p.name === manifest.name);
+  assert.equal(PLUGIN_VERSION, "1.1.7");
   assert.equal(manifest.version, PLUGIN_VERSION);
-  assert.equal(marketplace.plugins.find(p => p.name === manifest.name).version, PLUGIN_VERSION);
+  assert.equal(listing.version, PLUGIN_VERSION);
+  assert.equal(manifest.displayName, "订阅代理管理");
+  assert.equal(listing.displayName, manifest.displayName);
+  assert.equal(listing.displayName_i18n["zh-CN"], manifest.displayName);
   assert.equal(manifest.mcpServers, "./mcp.json");
   assert.equal(DEFAULT_HOST, "127.0.0.1");
   assert.equal(DEFAULT_PORT, 19787);

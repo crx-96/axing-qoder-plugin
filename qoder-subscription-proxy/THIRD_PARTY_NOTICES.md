@@ -14,7 +14,7 @@
 | 版权 | `Copyright (c) 2026 yetone` |
 | 修改情况 | 使用原始 CLI 二进制，不修改其内容；分发路径按插件平台清单组织 |
 
-插件 **1.1.6** 的每个平台 ZIP 只内置对应平台核心。固定资产、下载 URL、分发路径与完整 SHA256 以 [`server/bin/platforms.json`](server/bin/platforms.json) 为单一清单：
+插件 **1.1.7** 的每个平台 ZIP 只内置对应平台核心。固定资产、下载 URL、分发路径与完整 SHA256 以 [`server/bin/platforms.json`](server/bin/platforms.json) 为单一清单：
 
 | 平台 | 随包路径（相对 server/bin） | 上游资产 |
 | --- | --- | --- |
