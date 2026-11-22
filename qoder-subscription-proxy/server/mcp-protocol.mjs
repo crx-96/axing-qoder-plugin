@@ -94,7 +94,8 @@ const APP_TOOLS = [
   MANAGEMENT_APP_TOOL,
   {
     name: "bridge_check_update", description: "查询当前平台的 Magpie 官方稳定版和暂存状态。",
-    inputSchema: EMPTY_SCHEMA, annotations: { readOnlyHint: true }, _meta: { ui: { visibility: ["app"] } },
+    inputSchema: { type: "object", properties: { automatic: { type: "boolean", description: "面板打开时自动检查，使用较长的缓存有效期。" } }, additionalProperties: false },
+    annotations: { readOnlyHint: true }, _meta: { ui: { visibility: ["app"] } },
   },
   {
     name: "bridge_download_update", description: "按用户选择下载并校验指定更新，当前服务继续运行。",
@@ -131,7 +132,7 @@ function validToolArguments(tool, args) {
     const field = properties[key];
     if (field.type === "integer") {
       if (!Number.isSafeInteger(value) || value < field.minimum || value > field.maximum) return false;
-    } else if (field.type !== "string" || typeof value !== "string") return false;
+    } else if (typeof value !== field.type) return false;
   }
   return (tool.inputSchema.required ?? []).every(key => Object.hasOwn(args, key) && (typeof args[key] !== "string" || args[key].trim().length > 0));
 }
@@ -234,7 +235,7 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       return textResult(await handlers.setPorts(config, { modelPort, managementPort }, { signal, expectedPorts }));
     }
     case "bridge_check_update":
-      return textResult(await handlers.checkUpdate(config, { signal }));
+      return textResult(await handlers.checkUpdate(config, { signal, automatic: args.automatic === true }));
     case "bridge_download_update":
     case "bridge_download_version":
     case "bridge_delete_version":

@@ -37,7 +37,7 @@ test('检查并发去重、限时缓存，无点击不下载；暂存可在新�
   const f = await setup(t);
   const {config, updates} = f;
   assert.deepEqual(await updates.getUpdateStatus(config), {state: 'idle', version: null});
-  const checks = await Promise.all([updates.checkCoreUpdate(config), updates.checkCoreUpdate(config)]);
+  const checks = await Promise.all([updates.checkCoreUpdate(config, {automatic: true}), updates.checkCoreUpdate(config)]);
   assert.deepEqual(checks, Array(2).fill({state: 'available', version}));
   await updates.checkCoreUpdate(config);
   assert.equal(f.calls(), 1);
@@ -66,6 +66,31 @@ test('检查并发去重、限时缓存，无点击不下载；暂存可在新�
   assert.throws(() => registerStoredRelease({...release, url: release.url + '?secret'}));
   await writeFile(binPath, Buffer.alloc(bytes.length));
   await assert.rejects(fresh.getStagedCore(config, version));
+});
+
+test('自动检查缓存 30 分钟，手动检查仍按 1 分钟刷新两者共用的结果', async t => {
+  const f = await setup(t);
+  const {config, updates} = f;
+  const auto = () => updates.checkCoreUpdate(config, {automatic: true});
+  const fifthMinute = 5 * 60_000;
+  const halfHour = 30 * 60_000;
+  const initial = await auto();
+  assert.deepEqual(initial, {state: 'available', version});
+  f.time += fifthMinute;
+  f.data = metadata(config.core, 'v1.20.101');
+  assert.deepEqual(await auto(), initial);
+  assert.equal(f.calls(), 1);
+  const newer = await updates.checkCoreUpdate(config);
+  assert.deepEqual(newer, {state: 'available', version: 'v1.20.101'});
+  assert.deepEqual(await updates.checkCoreUpdate(config), newer);
+  assert.equal(f.calls(), 2);
+  f.time += halfHour - 1;
+  assert.deepEqual(await auto(), newer);
+  assert.equal(f.calls(), 2);
+  f.time++;
+  f.data = metadata(config.core, 'v1.20.102');
+  assert.deepEqual(await auto(), {state: 'available', version: 'v1.20.102'});
+  assert.equal(f.calls(), 3);
 });
 
 for (const index of [0, 1]) {
@@ -308,30 +333,55 @@ test('指定下载无 tag、404、错 tag、错平台、缺摘要及网络失败
   assert.deepEqual(await updates.downloadSpecifiedCore({...config, core: null}, version), {state: 'custom', version: null});
 });
 
-test('生产元数据传输将 curl 的最终 HTTP 404 与网络错误区分开', async t => {
+test('生产元数据传输区分最终响应的 404、普通 403 和 GitHub 限流', async t => {
   const {config} = await setup(t);
   const moduleUrl = new URL('../server/core-updates.mjs', import.meta.url).href;
+  const reset = Math.floor(Date.now() / 1000) + 300;
+  const prefix = 'HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 302\r\nX-RateLimit-Remaining: 0\r\n\r\n';
+  const responses = [
+    ['403', 'HTTP/2 403\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: ' + reset],
+    ['404', 'HTTP/2 404'],
+    ['403', 'HTTP/2 403'],
+    ['403', 'HTTP/2 403\r\nRetry-After: 120'],
+    ['429', 'HTTP/2 429'],
+    ['000', ''],
+  ].map(([status, headers]) => [status, prefix + headers + '\r\n\r\n']);
   const output = execFileSync(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import childProcess from 'node:child_process';
+    import {writeFileSync} from 'node:fs';
     import {syncBuiltinESMExports} from 'node:module';
     const spawn = childProcess.spawn;
+    const responses = ${JSON.stringify(responses)};
     let calls = 0;
     childProcess.spawn = (_file, args, options) => {
-      calls++;
-      assert.ok(args.includes(${JSON.stringify(`${api}/tags/${version}`)}));
+      assert.ok(args.includes(calls === 0 ? ${JSON.stringify(`${api}/latest`)} : ${JSON.stringify(`${api}/tags/${version}`)}));
       assert.ok(args.includes('%{stderr}%{http_code}'));
       assert.equal(options.env.HTTPS_PROXY, 'http://127.0.0.1:1');
-      return spawn(process.execPath, ['-e', "process.stderr.write('404'); process.exitCode = 22"], options);
+      const [status, headers] = responses[calls++];
+      const headersIndex = args.indexOf('--dump-header');
+      assert.ok(headersIndex >= 0);
+      writeFileSync(args[headersIndex + 1], headers);
+      return spawn(process.execPath, ['-e', "process.stderr.write(process.argv[1]); process.exitCode = 22", status], options);
     };
     syncBuiltinESMExports();
-    const {downloadSpecifiedCore} = await import(${JSON.stringify(moduleUrl)});
-    const result = await downloadSpecifiedCore(JSON.parse(process.argv[1]), ${JSON.stringify(version)});
-    console.log(JSON.stringify([calls, result]));
+    const {checkCoreUpdate, downloadSpecifiedCore} = await import(${JSON.stringify(moduleUrl)});
+    const config = JSON.parse(process.argv[1]);
+    const results = [await checkCoreUpdate(config)];
+    for (let i = 1; i < responses.length; i++) results.push(await downloadSpecifiedCore(config, ${JSON.stringify(version)}));
+    console.log(JSON.stringify([calls, results]));
   `, JSON.stringify(config)], {encoding: 'utf8', timeout: 5000, env: {...process.env, QODER_HTTP_PROXY: 'http://127.0.0.1:1'}});
-  const [calls, result] = JSON.parse(output);
-  assert.equal(calls, 1);
-  assert.equal(result.state, 'error'); assert.match(result.reason, /404/);
+  const [calls, results] = JSON.parse(output);
+  const resetTime = new Intl.DateTimeFormat('zh-CN', {dateStyle: 'short', timeStyle: 'medium', hour12: false}).format(reset * 1000);
+  assert.equal(calls, responses.length);
+  assert.ok(results.every(result => result.state === 'error'));
+  const [exhausted, missing, forbidden, throttled, tooMany, offline] = results.map(result => result.reason);
+  assert.equal(exhausted, `GitHub API 查询额度已用完。请在本地时间 ${resetTime} 后重试。`);
+  assert.match(missing, /404/);
+  assert.match(forbidden, /无法读取官方发行信息/);
+  assert.match(throttled, /GitHub API 请求暂时受限。请在本地时间 .* 后重试。/);
+  assert.equal(tooMany, 'GitHub API 请求暂时受限。请稍后重试。');
+  assert.equal(offline, forbidden);
   assert.deepEqual(await readdir(config.dataDir), []);
 });
 

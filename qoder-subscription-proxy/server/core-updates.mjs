@@ -15,6 +15,9 @@ const METADATA_LIMIT = 1024 * 1024;
 const INVALID = '更新候选无效或已过期，请重新检查更新。';
 /** 未取得可用的公开元数据时不透传远端正文、URL 或代理凭据。 */
 const NETWORK = '无法读取官方发行信息，请检查网络或代理后重试。';
+/** 自动检查复用最近结果半小时，手动检查维持一分钟的请求节流。 */
+const AUTO_CHECK_CACHE_MS = 30 * 60_000;
+const MANUAL_CHECK_CACHE_MS = 60_000;
 /** 数据目录尚未获得下载器进度时使用同一快照格式。 */
 const WAITING = Object.freeze({ phase: 'waiting', receivedBytes: 0, totalBytes: null });
 
@@ -50,20 +53,54 @@ function compare(a, b) {
   }
   return 0;
 }
-/** 复用 runtime 的 HTTPS、代理和流量限制。仅额外保留 curl 最终 HTTP 状态以区分 404。 */
+/** 只用最终响应的限额头生成提示，避免把代理 CONNECT 或重定向的头用于分类。 */
+function rateLimitError(status, rawHeaders) {
+  const response = rawHeaders.trimEnd().split(/\r?\n\r?\n/).at(-1);
+  const [statusLine, ...lines] = response.split(/\r?\n/);
+  const headers = new Map();
+  if (statusLine.split(/\s+/)[1] === status) {
+    for (const line of lines) {
+      const colon = line.indexOf(':');
+      if (colon > 0) headers.set(line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim());
+    }
+  }
+
+  const exhausted = headers.get('x-ratelimit-remaining') === '0';
+  const retryAfter = headers.get('retry-after');
+  const retrySeconds = /^\d+$/.test(retryAfter ?? '') ? Number(retryAfter) : NaN;
+  if (status === '403' && !exhausted && !Number.isFinite(retrySeconds)) return;
+
+  const reason = exhausted ? 'GitHub API 查询额度已用完。' : 'GitHub API 请求暂时受限。';
+  const now = Date.now();
+  const resetAt = exhausted ? Number(headers.get('x-ratelimit-reset')) * 1000 : NaN;
+  const retryAt = Math.max(resetAt > now ? resetAt : 0, retrySeconds > 0 ? now + retrySeconds * 1000 : 0);
+  if (retryAt > 0 && Number.isFinite(new Date(retryAt).getTime())) {
+    const localTime = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium', hour12: false }).format(retryAt);
+    return new UpdateError(`${reason}请在本地时间 ${localTime} 后重试。`);
+  }
+  return new UpdateError(`${reason}请稍后重试。`);
+}
+
+/** 复用 runtime 的传输约束，独立保存响应头，避免计入正文或将远端错误透传到界面。 */
 async function fetchOfficialMetadata(signal, url) {
   const dir = await mkdtemp(join(tmpdir(), 'qoder-release-'));
+  const headersPath = join(dir, 'headers');
   let status = '';
   try {
     const destination = join(dir, 'metadata');
     await production.downloadWithCurl({ url, destination, maxBytes: METADATA_LIMIT, signal }, (file, args, options) => {
-      const child = spawn(file, [...args, '--write-out', '%{stderr}%{http_code}'], { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(file, [...args, '--dump-header', headersPath, '--write-out', '%{stderr}%{http_code}'], { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
       child.stderr.on('data', chunk => { status = (status + chunk.toString('ascii')).slice(-3); });
       return child;
     });
     return JSON.parse(await readFile(destination, 'utf8'));
   } catch (error) {
     if (status === '404') throw Object.assign(new Error(), { status: 404 });
+    if (status === '403' || status === '429') {
+      const headers = await readFile(headersPath, 'utf8').catch(() => '');
+      const limited = rateLimitError(status, headers);
+      if (limited) throw limited;
+    }
     throw error;
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
@@ -116,7 +153,7 @@ export function createCoreUpdates({ runtime = production.createCoreRuntime(), fe
   function session(config) {
     let item = sessions.get(config.binPath);
     if (!item) {
-      item = { expires: 0, checks: new Map(), metadata: new Map(), downloads: new Map() };
+      item = { checkedAt: -Infinity, checks: new Map(), metadata: new Map(), downloads: new Map() };
       sessions.set(config.binPath, item);
     }
     return item;
@@ -271,13 +308,14 @@ export function createCoreUpdates({ runtime = production.createCoreRuntime(), fe
   }
   /** 全新安装可取本机官方 latest；不比较活动版本或包内基线。 */
   function latestCoreRelease(config, {signal} = {}) { return official(config, undefined, signal); }
-  /** 管理页限时缓存检查结果；只将高于活动版本的官方 latest 公布为提示。 */
-  async function checkCoreUpdate(config, {signal} = {}) {
+  /** 自动和手动检查共享最近结果及在途请求，手动检查可更早刷新。 */
+  async function checkCoreUpdate(config, {signal, automatic = false} = {}) {
     if (!config.core) return getUpdateStatus(config);
     const item = session(config);
+    const maxAge = automatic ? AUTO_CHECK_CACHE_MS : MANUAL_CHECK_CACHE_MS;
     try {
       signal?.throwIfAborted();
-      if (item.checks.size || now() >= item.expires) {
+      if (item.checks.size || now() - item.checkedAt >= maxAge) {
         await share(item.checks, 'latest', signal, async (_job, sharedSignal) => {
           try {
             const release = await latestCoreRelease(config, {signal: sharedSignal});
@@ -291,7 +329,7 @@ export function createCoreUpdates({ runtime = production.createCoreRuntime(), fe
             sharedSignal.throwIfAborted();
             item.error = failed(error.safeMessage ?? '无法读写本地发行记录，请检查缓存目录。');
           }
-          item.expires = now() + 60000;
+          item.checkedAt = now();
         });
       }
       signal?.throwIfAborted();

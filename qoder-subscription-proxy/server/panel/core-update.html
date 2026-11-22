@@ -3,7 +3,8 @@
   #core-update [hidden] { display: none; }
   #core-update :is(h2,p) { margin: 0; overflow-wrap: anywhere; }
   #core-update [data-part=running], #core-update [data-part=meter] { color: var(--muted); }
-  #core-update [data-part=reason] { color: var(--error); }
+  #core-update [data-part=reason], #magpie-releases-feedback { color: var(--error); }
+  #magpie-releases { color: var(--accent); text-underline-offset: .2em; }
   #core-update .update-actions, #core-update .choose-version { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
   #core-update input { min-width: 8em; width: 11em; max-width: 100%; min-height: 44px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; padding: 7px 11px; }
   #core-update progress { width: 100%; accent-color: var(--accent); }
@@ -21,6 +22,7 @@
     <button data-part="download" type="button" data-primary="true" hidden>下载更新</button>
     <button data-part="switch" type="button" data-primary="true" aria-expanded="false" aria-controls="core-update-confirm" hidden>切换版本</button>
   </div>
+  <p class="hint" data-part="releaseHelp">在 <a id="magpie-releases" href="https://github.com/yetone/magpie/releases" target="_blank" rel="noopener noreferrer">Magpie 官方发布页</a> 查找正式版本号，填写后点击「下载指定版本」。遇到 GitHub 限流时，请在限流解除后下载。<span id="magpie-releases-feedback" role="status"></span></p>
   <div class="choose-version"><label for="release-tag">指定版本</label><input id="release-tag" data-part="tag" type="text" placeholder="例如 v0.1.4582" maxlength="32" autocomplete="off" spellcheck="false"><button type="button" data-part="specified" disabled>下载指定版本</button></div>
   <div id="core-update-confirm" data-part="confirmation" role="group" aria-labelledby="core-update-warning" hidden>
     <p id="core-update-warning">切换会短暂重启核心。你也可以稍后切换。</p>

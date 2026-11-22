@@ -39,6 +39,7 @@ const createUpdatePanel = function createUpdatePanel({ request, readStatus, root
     if (action === 'check' && !busyState(state)) display = 'checking';
     ui.running.textContent = `当前选用版本：${snapshot?.core?.version || '尚未选择'}`;
     ui.tag.disabled = ui.specified.disabled = !initialized || busy || state === 'custom' || !state;
+    ui.releaseHelp.hidden = state === 'custom';
     const specifiedInstalled = snapshot?.installedVersions?.some(entry => entry.version === requestedVersion);
     if (action === 'specified' || (state === 'downloading' && snapshot.update.source === 'specified')) {
       const tag = state === 'downloading' ? version : requestedVersion;
@@ -108,11 +109,11 @@ const createUpdatePanel = function createUpdatePanel({ request, readStatus, root
     schedule();
   }
 
-  /** 发起一次互斥工具调用；仅信任状态查询判断是否已经切换或下载完成。 */
-  async function run(kind, version) {
+  /** 发起互斥工具调用，由服务端决定自动检查能否复用缓存，后续以状态查询为准。 */
+  async function run(kind, args = {}) {
     if (disposed || action) return;
     action = kind;
-    requestedVersion = kind === 'specified' ? version : '';
+    requestedVersion = kind === 'specified' ? args.version : '';
     notice = '';
     paint();
     schedule();
@@ -120,7 +121,7 @@ const createUpdatePanel = function createUpdatePanel({ request, readStatus, root
     try {
       const name = kind === 'specified' ? 'bridge_download_version' : `bridge_${kind}_update`;
       const timeout = ['download', 'specified'].includes(kind) ? 11 * 60_000 : kind === 'apply' ? 120_000 : 30_000;
-      const result = await request('tools/call', { name, arguments: version ? { version } : {} }, timeout);
+      const result = await request('tools/call', { name, arguments: args }, timeout);
       if (result?.isError) {
         const raw = result.content?.[0]?.text;
         let reason = raw;
@@ -148,14 +149,14 @@ const createUpdatePanel = function createUpdatePanel({ request, readStatus, root
     const { state, version } = snapshot?.update || {};
     switch (button.dataset.part) {
       case 'check': return run('check');
-      case 'download': if (state === 'available' && version) return run('download', version); break;
+      case 'download': if (state === 'available' && version) return run('download', { version }); break;
       case 'specified': {
         const input = ui.tag.value.trim();
         if (!/^v?(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(input)) {
           notice = '请输入三段数字的版本号，例如 v0.1.4582。';
           paint(); ui.tag.focus(); return;
         }
-        return run('specified', input.startsWith('v') ? input : `v${input}`);
+        return run('specified', { version: input.startsWith('v') ? input : `v${input}` });
       }
       case 'switch':
         if (state !== 'staged' || !version) return;
@@ -169,7 +170,7 @@ const createUpdatePanel = function createUpdatePanel({ request, readStatus, root
         paint();
         ui.switch.focus();
         break;
-      case 'confirm': if (state === 'staged' && candidate && candidate === version) return run('apply', version); break;
+      case 'confirm': if (state === 'staged' && candidate && candidate === version) return run('apply', { version }); break;
     }
   }
 
@@ -178,7 +179,7 @@ const createUpdatePanel = function createUpdatePanel({ request, readStatus, root
     if (disposed || initialized || !status?.update) return;
     initialized = true;
     render(status);
-    if (!ui.check.disabled) return run('check');
+    if (!ui.check.disabled) return run('check', { automatic: true });
   }
 
   /** 页面关闭时解绑并使晚到的工具结果失效；后台下载可在重开后观察。 */

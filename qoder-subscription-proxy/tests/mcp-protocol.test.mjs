@@ -131,16 +131,18 @@ test("检查、下载和确认切换是三个独立的 App 操作，旧宿主不
   const ctx = { config, supportsApps: true };
   const called = [];
   const handlers = {
-    checkUpdate: async () => { called.push("check"); return { state: "available", version: "v0.1.9999" }; },
+    checkUpdate: async (_config, { automatic }) => { called.push(`check ${automatic}`); return { state: "available", version: "v0.1.9999" }; },
     downloadUpdate: async (_config, version) => { called.push(`download ${version}`); return { state: "staged", version }; },
     applyUpdate: async (_config, version) => { called.push(`apply ${version}`); return { ready: true, version }; },
   };
   const invoke = (name, args = {}) => handleMessage(call(1, name, args), ctx, { handlers });
   assert.equal(JSON.parse(resultText(await invoke("bridge_check_update"))).state, "available");
+  assert.equal(JSON.parse(resultText(await invoke("bridge_check_update", { automatic: true }))).state, "available");
+  assert.equal((await invoke("bridge_check_update", { automatic: "true" })).error.code, -32602);
   assert.equal((await invoke("bridge_apply_update", { version: "../bad" })).result.isError, true);
   assert.equal((await invoke("bridge_download_update")).error.code, -32602);
   assert.equal(JSON.parse(resultText(await invoke("bridge_download_update", { version: "v0.1.9999" }))).state, "staged");
-  assert.deepEqual(called, ["check", "download v0.1.9999"]);
+  assert.deepEqual(called, ["check false", "check true", "download v0.1.9999"]);
   assert.equal(JSON.parse(resultText(await invoke("bridge_apply_update", { version: "v0.1.9999" }))).ready, true);
   ctx.supportsApps = false;
   assert.equal((await invoke("bridge_apply_update", { version: "v0.1.9999" })).error.code, -32602);

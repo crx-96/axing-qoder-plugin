@@ -54,7 +54,7 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     if (req.url === "/shell") { res.end(resource.text); return; }
     res.end(`<!doctype html><html><body style="margin:0"><iframe id="app" src="/shell" style="border:0;width:100vw;height:100vh;display:block"></iframe><script>
-      const app=document.querySelector('#app');window.calls=[];window.nextError='';
+      const app=document.querySelector('#app');window.calls=[];window.nextError='';window.openedLinks=[];
       window.ready=${JSON.stringify(ready)};
       window.data=window.ready;
       window.handshakes=[];window.rpcErrors=[];
@@ -63,12 +63,16 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
         if(event.source!==app.contentWindow||event.origin!==location.origin)return;
         const m=event.data,reply=result=>app.contentWindow.postMessage({jsonrpc:'2.0',id:m.id,result},location.origin);
         if(m.error)window.rpcErrors.push(m);
-        if(m.method==='ui/initialize')window.handshakes.push(()=>reply({protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{}},hostContext:{theme:'dark',displayMode:'fullscreen'}}));
+        if(m.method==='ui/initialize')window.handshakes.push(()=>reply({protocolVersion:'2026-01-26',hostCapabilities:{serverTools:{},openLinks:{}},hostContext:{theme:'dark',displayMode:'fullscreen'}}));
         else if(m.method==='ui/notifications/initialized')notify('ui/notifications/tool-result',{content:[]});
+        else if(m.method==='ui/open-link'){
+          window.openedLinks.push(m.params.url);
+          reply({isError:window.failOpenLink===true});
+        }
         else if(m.method==='tools/call'){
           const {name}=m.params;window.calls.push(m.params);
           if(window.nextError){reply({isError:true,content:[{type:'text',text:window.nextError}]});window.nextError='';return;}
-          if(name==='bridge_check_update')window.data.update=${JSON.stringify(offer)};
+          if(name==='bridge_check_update')window.data.update=window.checkResult ?? ${JSON.stringify(offer)};
           if(name==='bridge_start'){
             window.finishStart=()=>{window.data=window.ready;reply({content:[]});};
             return;
@@ -131,7 +135,8 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
   assert.equal(await evaluate(`${el('#reconnect')}.hidden`), true);
   assert.deepEqual(await evaluate('window.rpcErrors'), []);
   const statusCall = { name: 'bridge_status', arguments: {} };
-  assert.deepEqual(await evaluate('window.calls'), [statusCall, { name: 'bridge_check_update', arguments: {} }, statusCall]);
+  assert.deepEqual(await evaluate('window.calls'), [statusCall, { name: 'bridge_check_update', arguments: { automatic: true } }, statusCall]);
+  assert.deepEqual(await evaluate('window.openedLinks'), []);
   assert.equal(await evaluate(`${el('#start')}.hidden`), true);
   assert.equal(await evaluate(`${doc}.querySelectorAll('input').length`), 3);
   assert.doesNotMatch(await evaluate(`${doc}.body.textContent`), /审批/);
@@ -279,6 +284,27 @@ test("真实浏览器验证核心状态、显式启动与原生管理入口", {
   };
   const offered = { ...ready, update: offer };
   const versionButton = (version, kind) => `#installed-cores [data-focus="${version}-${kind}"]`;
+
+  await t.test('检查更新显示 GitHub 额度耗尽，重查成功后清除提示', async () => {
+    const reason = 'GitHub API 查询额度已用完。请在本地时间 2026/11/22 11:33:56 后重试。';
+    await loadSnapshot(offered);
+    await evaluate(`window.checkResult=${JSON.stringify({ state: 'error', version: null, reason })}`);
+    await submit(updatePart('check'), 'bridge_check_update', {}, offered, shows(updatePart('reason'), reason));
+    const releasesUrl = 'https://github.com/yetone/magpie/releases';
+    assert.equal(await evaluate(`${el('#magpie-releases')}.href`), releasesUrl);
+    assert.ok(await evaluate(shows(updatePart('releaseHelp'), '填写后点击「下载指定版本」')));
+    await evaluate('window.failOpenLink=true');
+    await press('#magpie-releases');
+    await waitFor(shows('#magpie-releases-feedback', '可复制链接'));
+    await evaluate('window.failOpenLink=false');
+    await press('#magpie-releases');
+    await waitFor(`${el('#magpie-releases-feedback')}.textContent===''`);
+    assert.deepEqual(await evaluate('window.openedLinks'), [releasesUrl, releasesUrl]);
+    assert.ok(await evaluate(shows(updatePart('reason'), reason)));
+    await evaluate('delete window.checkResult');
+    await submit(updatePart('check'), 'bridge_check_update', {}, offered, shows(updatePart('message'), `发现新版 ${latest}`));
+    assert.equal(await evaluate(`${el(updatePart('reason'))}.hidden`), true);
+  });
 
   await t.test('新版提示、指定版本下载及确认切换', async () => {
     await loadSnapshot(offered);

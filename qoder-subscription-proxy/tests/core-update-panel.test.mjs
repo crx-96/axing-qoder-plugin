@@ -58,7 +58,7 @@ test('连接后的自动检查只执行一次；手动复查失败后可重试',
   assert.equal(f.calls.length, 0);
   f.current = status('current');
   await Promise.all([f.panel.initialize(status('idle')), f.panel.initialize(status('idle')), f.click('check')]);
-  assert.deepEqual(f.calls, [{ method: 'tools/call', name: 'bridge_check_update', arguments: {}, timeout: 30000 }]);
+  assert.deepEqual(f.calls, [{ method: 'tools/call', name: 'bridge_check_update', arguments: { automatic: true }, timeout: 30000 }]);
   assert.match(f.nodes.message.textContent, /最新/);
   f.reply = async () => ({ isError: true, content: [{ text: '{"reason":"<img onerror=x>"}' }] });
   await f.click('check');
@@ -67,7 +67,7 @@ test('连接后的自动检查只执行一次；手动复查失败后可重试',
   f.reply = async () => ({});
   await f.click('check');
   assert.equal(f.nodes.reason.hidden, true);
-  assert.equal(f.calls.length, 3);
+  assert.deepEqual(f.calls.slice(1).map(call => call.arguments), [{}, {}]);
 });
 
 test('长下载使用公共查询显示真实进度，收尾再获取就绪快照', async () => {

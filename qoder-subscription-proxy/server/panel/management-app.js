@@ -13,6 +13,8 @@ const POLL_MS = 1200;
 let sequence = 0;
 /** 宿主连接状态，closed 为终态。 */
 let connection = "idle";
+/** 宿主可从隔离面板打开系统浏览器时，外链由宿主处理。 */
+let canOpenLinks = false;
 /** 最近一次通过基本结构校验的状态快照。 */
 let snapshot = null;
 /** 用户发起的互斥操作，空字符串表示当前没有写操作。 */
@@ -406,6 +408,7 @@ async function connect() {
       view("error", "此会话不支持管理工具，请在本机 Qoder 中打开。");
       return;
     }
+    canOpenLinks = Boolean(result.hostCapabilities.openLinks);
     connection = "ready";
     await readStatus();
   } catch {
@@ -422,6 +425,18 @@ const ports = createPortPanel({ request, readStatus });
 
 // 只读工具可自动刷新，启动与浏览器操作必须由用户显式触发。
 $("#open").onclick = openNative;
+$("#magpie-releases").onclick = async event => {
+  if (!canOpenLinks) return;
+  event.preventDefault();
+  const url = event.currentTarget.href;
+  try {
+    const result = await request("ui/open-link", { url });
+    if (result?.isError) throw Error();
+    text("#magpie-releases-feedback", "");
+  } catch {
+    text("#magpie-releases-feedback", "未能打开发布页。可复制链接后在浏览器中打开。");
+  }
+};
 $("#start").onclick = start;
 $("#refresh").onclick = async () => {
   const button = $("#refresh");

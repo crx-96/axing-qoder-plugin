@@ -14,7 +14,7 @@
 | 版权 | `Copyright (c) 2026 yetone` |
 | 修改情况 | 插件通过官方 Release 下载原始 CLI，按清单校验后写入用户缓存 |
 
-插件 **2.0.1** 使用通用安装包。没有可复用的本地核心时，从 Magpie 官方最新稳定 Release 下载对应原始 CLI。用户也可以指定某个已发布的版本。新下载按对应 Release 的资产大小和 SHA256 校验；旧安装的版本、平台及摘要见[历史发行清单](server/bin/legacy-releases.json)。
+插件 **2.0.2** 使用通用安装包。没有可复用的本地核心时，从 Magpie 官方最新稳定 Release 下载对应原始 CLI。用户也可以指定某个已发布的版本。新下载按对应 Release 的资产大小和 SHA256 校验；旧安装的版本、平台及摘要见[历史发行清单](server/bin/legacy-releases.json)。
 
 | 平台 | 清单中的路径标识 | 上游资产 |
 | --- | --- | --- |
