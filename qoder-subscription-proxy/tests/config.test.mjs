@@ -25,7 +25,7 @@ test("插件和市场使用相同的管理入口名称，版本与 MCP 一致且
   const manifest = JSON.parse(await readFile(new URL("../.qoder-plugin/plugin.json", import.meta.url)));
   const marketplace = JSON.parse(await readFile(new URL("../../.qoder-plugin/marketplace.json", import.meta.url)));
   const listing = marketplace.plugins.find(p => p.name === manifest.name);
-  assert.equal(PLUGIN_VERSION, "2.0.2");
+  assert.equal(PLUGIN_VERSION, "2.0.3");
   assert.equal(manifest.version, PLUGIN_VERSION);
   assert.equal(listing.version, PLUGIN_VERSION);
   assert.equal(manifest.displayName, "订阅代理管理");

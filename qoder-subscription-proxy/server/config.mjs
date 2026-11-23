@@ -12,7 +12,7 @@ import { getCoreRelease, resolveCoreBinaryPath } from "./core-runtime.mjs";
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 19787;
 export const MANAGEMENT_PORT = 19788;
-export const PLUGIN_VERSION = "2.0.2";
+export const PLUGIN_VERSION = "2.0.3";
 const LEGACY_MGMT_KEY = "123456";
 
 /** 仅将本模块生成的字段名与纠正建议传给管理页，排除用户提供的配置值。 */

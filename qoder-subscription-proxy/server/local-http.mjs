@@ -1,16 +1,16 @@
 import http from "node:http";
 
-/** 回环请求使用独立连接，不读取系统代理，也不复用切换网络前的连接。 */
+/** 回环请求使用独立连接，不读取系统代理。binary 为真时保留响应原始字节，否则返回 UTF-8 文本。 */
 export function requestLocal(config, path, {
   method = "GET", body, authenticated = false, signal,
-  timeoutMs = 3000, maxBytes = 1024 * 1024, socket,
+  timeoutMs = 3000, maxBytes = 1024 * 1024, socket, binary = false,
 } = {}) {
   if (config.host !== "127.0.0.1" || !path.startsWith("/") || path.startsWith("//")) {
     return Promise.reject(new Error("仅允许访问订阅桥的本机回环地址"));
   }
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-    const headers = { Accept: "application/json", Connection: "close" };
+    const headers = { Accept: binary ? "image/*" : "application/json", Connection: "close" };
     if (authenticated) headers.Authorization = `Bearer ${config.apiKey}`;
     if (payload) {
       headers["Content-Type"] = "application/json";
@@ -52,9 +52,13 @@ export function requestLocal(config, path, {
       });
       res.on("error", (error) => finish(error));
       res.on("aborted", () => finish(Object.assign(new Error("桥连接提前断开"), { code: "ECONNRESET" })));
-      res.on("end", () => finish(null, {
-        status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString("utf8"),
-      }));
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        finish(null, {
+          status: res.statusCode, headers: res.headers,
+          ...(binary ? { bytes: buffer } : { text: buffer.toString("utf8") }),
+        });
+      });
     });
     // 使用总时限而非空闲时限，持续输出无效字节也不能无限延长请求。
     timer = setTimeout(() => {

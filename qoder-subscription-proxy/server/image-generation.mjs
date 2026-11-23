@@ -1,23 +1,22 @@
-/** Magpie 原生生图 HTTP 薄适配；只交付本地文件，不下载上游 URL，也不重试生成。 */
+/** 复用 Magpie 原生生图 MCP，将返回的图片内容交付为本地文件。 */
 import { randomUUID } from "node:crypto";
 import { mkdir, open, link, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { httpFailure } from "./local-http.mjs";
 import { requestOwned } from "./supervisor.mjs";
 import { privatePortFile } from "./bridge-ports.mjs";
 
-/** Magpie 目录使用 provider/model；不接受旧裸模型名或其他图片族。 */
-const GPT_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]*\/gpt-image-[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** 生图总请求时限，单位毫秒。 */
 const REQUEST_TIMEOUT_MS = 300_000;
-/** 模型目录请求时限，单位毫秒。 */
-const MODELS_TIMEOUT_MS = 10_000;
 /** 包含 base64 的 JSON 响应上限，单位字节。 */
 const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 /** 单张解码图片上限，单位字节。 */
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
-/** 缺省输出尺寸；由 Magpie 验证具体模型是否支持调用方提供的尺寸。 */
-export const DEFAULT_IMAGE_SIZE = "1024x1024";
+/** 生图及结果查询共用同一模型网关路径。 */
+const IMAGE_MCP_PATH = "/mcp/magpie/image";
+/** 仅接受核心生成的文件路径与下载令牌，连接目标始终来自当前托管配置。 */
+const IMAGE_FILE_PATH = /^\/mcp\/magpie\/image\/files\/[0-9a-f]{32}\.[a-z0-9]+$/;
 
 /** 创建可公开错误，始终不包含上游正文、URL 或凭据。 */
 function failure(message, code = "IMAGE_OUTPUT_INVALID") {
@@ -29,46 +28,71 @@ function checkCancelled(signal) {
   if (signal?.aborted) throw failure("生图请求已取消。", "ABORT_ERR");
 }
 
-/** 请求只经托管器；网络错误采用固定诊断，不透传原始 error.message。 */
-async function requestJson(config, path, options, request) {
-  checkCancelled(options.signal);
+/** 超时时核心可能仍在生成，保留可区分的错误码。 */
+function imageTimeout() {
+  return failure("等待图片超时，请检查已有任务结果，避免重复提交。", "ETIMEDOUT");
+}
+
+/** 使用单调时钟计算全部生图请求共用的剩余毫秒数。 */
+function remainingTime(deadline) {
+  const timeoutMs = Math.floor(deadline - performance.now());
+  if (timeoutMs <= 0) throw imageTimeout();
+  return timeoutMs;
+}
+
+/** 建连核验与 HTTP 共用截止信号，调用方取消仍优先于超时。 */
+async function requestImage(config, path, options, deadline, request, resultOperation) {
+  const { signal } = options;
+  checkCancelled(signal);
+  const timeoutMs = remainingTime(deadline);
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const activeSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let response;
-  try { response = await request(config, path, options); }
+  try { response = await request(config, path, { ...options, signal: activeSignal, authenticated: true, timeoutMs }); }
   catch (error) {
-    checkCancelled(options.signal);
+    checkCancelled(signal);
+    if (timeout.aborted || error?.code === "ETIMEDOUT") throw imageTimeout();
+    remainingTime(deadline);
     if (error?.code === "ABORT_ERR") throw failure("生图请求已取消。", "ABORT_ERR");
-    throw failure("Magpie 请求未取得有效响应，请检查运行状态，不要重复提交生图。", "IMAGE_REQUEST_FAILED");
+    if (error?.code === "RESPONSE_TOO_LARGE") throw failure("图片响应超过大小限制。", "RESPONSE_TOO_LARGE");
+    throw failure("订阅代理未返回有效响应，请检查运行状态，避免重复提交生图。", "IMAGE_REQUEST_FAILED");
   }
-  checkCancelled(options.signal);
+  // 定时器可能因事件循环忙碌而延迟，收到响应后仍要检查实际截止时间。
+  checkCancelled(signal);
+  if (timeout.aborted) throw imageTimeout();
+  remainingTime(deadline);
   if (response?.status !== 200) {
     const status = Number.isInteger(response?.status) ? response.status : 0;
-    throw failure(httpFailure(status, "生图").message, status);
+    if (resultOperation) throw failure(`${resultOperation}失败（HTTP ${status}），请检查已有任务结果，避免重复提交生图。`, status);
+    if (status === 404) throw failure("原生 MCP 生图接口不可用（HTTP 404），请在管理页检查并切换到支持该接口的核心版本。", status);
+    throw failure(httpFailure(status, "订阅代理生图").message, status);
   }
-  if (typeof response.text !== "string" || Buffer.byteLength(response.text) > options.maxBytes) {
-    throw failure("Magpie 响应超过大小限制。", "RESPONSE_TOO_LARGE");
-  }
-  try { return JSON.parse(response.text); }
-  catch { throw failure("Magpie 响应不是有效 JSON。"); }
+  return response;
 }
 
-/** 过滤并去重目录中的 GPT 图片模型；未知族立即拒绝且不回显输入。 */
-export function imageModelsByFamily(ids, family) {
-  if (family !== "gpt") throw failure("未支持的生图渠道。", "INVALID_PARAMS");
-  return [...new Set(ids.filter((id) => typeof id === "string" && id.length <= 200 && GPT_MODEL.test(id)))];
-}
-
-/** 查询 Magpie 模型目录；request 是测试替身，生产默认使用 requestOwned。 */
-export async function listImageModels(config, family, signal, request = requestOwned) {
-  imageModelsByFamily([], family);
-  const body = await requestJson(config, "/mcp/magpie/image", {
-    authenticated: true, method: "POST", signal, timeoutMs: MODELS_TIMEOUT_MS, maxBytes: 1024 * 1024,
-    body: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
-  }, request);
-  if (body?.error || !Array.isArray(body?.result?.tools)) throw failure("Magpie 图片能力目录结构无效。");
-  const models = body.result.tools.find(tool => tool.name === "generate_image")?.inputSchema?.properties?.model?.enum;
-  // 上游在未配置图片模型或候选超过 40 个时省略 enum，不能据此宣称没有图片能力。
-  if (!Array.isArray(models)) throw failure("Magpie 未提供完整图片模型枚举，请在管理页确认图片能力后显式指定 model。", "IMAGE_MODELS_UNAVAILABLE");
-  return imageModelsByFamily(models, family);
+/** 生图工具的文本可能含临时令牌、提示词或上游错误正文，仅消费结构化结果。 */
+async function callImageTool(config, name, args, signal, deadline, request) {
+  const resultOperation = name === "generation_result" ? "查询生图结果" : undefined;
+  const response = await requestImage(config, IMAGE_MCP_PATH, {
+    method: "POST", signal, maxBytes: MAX_RESPONSE_BYTES,
+    body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+  }, deadline, request, resultOperation);
+  if (typeof response.text !== "string" || Buffer.byteLength(response.text) > MAX_RESPONSE_BYTES) {
+    throw failure("图片响应超过大小限制。", "RESPONSE_TOO_LARGE");
+  }
+  let body;
+  try { body = JSON.parse(response.text); }
+  catch { throw failure("生图响应不是有效 JSON。"); }
+  if (body?.error || body?.result?.isError === true) {
+    const message = resultOperation
+      ? "查询生图结果失败，请检查已有任务和运行日志，避免重复提交生图。"
+      : "订阅代理生图失败，请检查管理页中的生图设置、模型权限或运行日志。";
+    throw failure(message, "IMAGE_TOOL_FAILED");
+  }
+  if (body?.jsonrpc !== "2.0" || body.id !== 1 || !Array.isArray(body.result?.content)) {
+    throw failure("生图响应结构无效。");
+  }
+  return body.result;
 }
 
 /** 从首个 IHDR 取像素宽高，仅在 IDAT 和末尾 IEND 也通过边界校验后返回。 */
@@ -160,30 +184,63 @@ function webpMetadata(bytes) {
   return frameSize && offset === bytes.length ? { extension: "webp", size: canvasSize ?? frameSize } : null;
 }
 
-/** 严格校验标准 base64 和声明的 MIME，避免 Buffer.from 静默忽略非法字节。 */
-function decodeImage(body) {
-  const item = Array.isArray(body?.data) ? body.data[0] : undefined;
-  if (!item?.b64_json && typeof item?.url === "string" && item.url) {
-    throw failure("上游仅返回远程图片链接，未取得可保存图片，请在Magpie检查生成结果，不要重复提交", "IMAGE_OUTPUT_UNAVAILABLE");
-  }
-  const base64 = item?.b64_json;
+/** 严格校验标准 base64，避免 Buffer.from 静默忽略非法字节。 */
+function decodeImage(base64) {
   if (typeof base64 !== "string" || !base64.length || base64.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3) ||
       base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
     throw failure("图片 base64 数据无效或超过大小限制。");
   }
   const bytes = Buffer.from(base64, "base64");
-  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES || bytes.toString("base64") !== base64) {
-    throw failure("图片 base64 数据无效或超过大小限制。");
+  if (bytes.toString("base64") !== base64) throw failure("图片 base64 数据无效。");
+  return bytes;
+}
+
+/** 按实际写盘的图片字节校验 MIME 和容器，并读取像素尺寸。 */
+function validateImage(bytes, mime) {
+  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX_IMAGE_BYTES) {
+    throw failure("图片数据为空或超过大小限制。");
   }
-  // 仅从即将原样写盘的字节读取尺寸，按声明的 MIME 选择对应容器校验。
   let metadata;
-  switch (item.mime_type) {
+  switch (mime) {
     case "image/png": metadata = pngMetadata(bytes); break;
     case "image/jpeg": metadata = jpegMetadata(bytes); break;
     case "image/webp": metadata = webpMetadata(bytes); break;
   }
-  if (!metadata) throw failure("图片 MIME 或实际文件格式无效；仅支持 PNG、JPEG、WebP。");
-  return { bytes, mime: item.mime_type, ...metadata };
+  if (!metadata) throw failure("图片 MIME 或实际文件格式无效，仅支持 PNG、JPEG、WebP。");
+  return { bytes, mime, ...metadata };
+}
+
+/** 只提取核心签名文件路径，丢弃链接中的主机、端口和其余查询参数。 */
+function signedImagePath(fileUrl) {
+  const url = typeof fileUrl === "string" && fileUrl.length <= 4096 && URL.canParse(fileUrl) ? new URL(fileUrl) : null;
+  const token = url?.searchParams.get("t");
+  if (!url || !["http:", "https:"].includes(url.protocol) || !IMAGE_FILE_PATH.test(url.pathname) ||
+      !token || !/^\d{1,20}\.[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  return `${url.pathname}?t=${token}`;
+}
+
+/** 优先保存可用的内联图片，必要时从同次结果下载签名文件。 */
+async function resolveImage(config, result, signal, deadline, request) {
+  let invalidImage;
+  for (const item of result.content) {
+    if (item?.type !== "image") continue;
+    try { return validateImage(decodeImage(item.data), item.mimeType); }
+    catch (error) {
+      if (error?.code !== "IMAGE_OUTPUT_INVALID") throw error;
+      invalidImage = error;
+    }
+  }
+  // 无效的候选链接可以跳过，下载仍只发往已核验的模型端口。
+  const files = result._meta?.["usemagpie.ai/files"];
+  for (const file of Array.isArray(files) ? files : []) {
+    const path = signedImagePath(file?.url);
+    if (!path) continue;
+    const response = await requestImage(config, path, {
+      signal, binary: true, maxBytes: MAX_IMAGE_BYTES,
+    }, deadline, request, "下载生图结果");
+    return validateImage(response.bytes, response.headers?.["content-type"]);
+  }
+  throw invalidImage ?? failure("订阅代理未返回可保存的图片，请检查已有任务结果，避免重复提交。", "IMAGE_OUTPUT_UNAVAILABLE");
 }
 
 // 硬链接原子发布，避免读到半张图片或覆盖已有文件。
@@ -224,29 +281,35 @@ async function saveImage(config, image, signal) {
   }
 }
 
-/** 生成并保存图片。成功时 size 是文件的像素宽高，requestedSize 是发送给模型的尺寸。 */
-export async function generateImage(config, { family, prompt, model, size = DEFAULT_IMAGE_SIZE, signal }, request = requestOwned) {
-  // 请求参数在模型查询和生图之前统一校验。
-  imageModelsByFamily([], family);
+/** 生成一张图片。省略模型与尺寸时沿用原生设置，成功时返回本地路径和实际像素尺寸。 */
+export async function generateImage(config, { prompt, model, size, signal }, request = requestOwned) {
   if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 32_000) {
     throw failure("生图提示词必须是非空字符串，且不超过 32000 个字符。", "INVALID_PARAMS");
   }
-  if (model !== undefined && (typeof model !== "string" || !imageModelsByFamily([model], family).length)) {
-    throw failure("生图模型必须为 provider/gpt-image-* 格式。", "INVALID_PARAMS");
+  if (model !== undefined && (typeof model !== "string" || !model.trim() || model.length > 200)) {
+    throw failure("生图模型必须是非空的模型 ID。", "INVALID_PARAMS");
   }
-  if (typeof size !== "string" || !/^[1-9]\d{0,4}x[1-9]\d{0,4}$/.test(size)) {
-    throw failure("生图尺寸必须为宽x高像素格式。", "INVALID_PARAMS");
+  if (size !== undefined && (typeof size !== "string" || !/^[1-9]\d{0,4}[x:][1-9]\d{0,4}$/.test(size))) {
+    throw failure("生图尺寸请使用宽x高或宽高比格式。", "INVALID_PARAMS");
   }
-  checkCancelled(signal);
-  const models = model === undefined ? await listImageModels(config, family, signal, request) : [model];
-  if (!models.length) throw failure("当前没有可用的 GPT 生图模型，请检查 Magpie 模型列表。", "BRIDGE_NOT_READY");
-  if (models.length > 1) return { needsModelChoice: true, family, models };
-  const chosen = models[0];
-  const body = await requestJson(config, "/v1/images/generations", {
-    authenticated: true, method: "POST", signal, timeoutMs: REQUEST_TIMEOUT_MS, maxBytes: MAX_RESPONSE_BYTES,
-    body: { model: chosen, prompt, size, n: 1, response_format: "b64_json" },
-  }, request);
-  const image = decodeImage(body);
+  const deadline = performance.now() + REQUEST_TIMEOUT_MS;
+  const args = { prompt };
+  if (model !== undefined) args.model = model;
+  if (size !== undefined) args.size = size;
+  let result = await callImageTool(config, "generate_image", args, signal, deadline, request);
+  const pending = result._meta?.["usemagpie.ai/pending"];
+  if (pending !== undefined) {
+    if (typeof pending !== "string" || !/^img_[0-9a-f]{24}$/.test(pending)) throw failure("生图任务 ID 无效。");
+    // 原生核心会继续生成。只按原 ID 等待结果，避免再次消耗生图额度。
+    do {
+      await delay(Math.min(250, remainingTime(deadline)), undefined, { signal }).catch(() => { throw failure("生图请求已取消。", "ABORT_ERR"); });
+      result = await callImageTool(config, "generation_result", { id: pending }, signal, deadline, request);
+      const next = result._meta?.["usemagpie.ai/pending"];
+      if (next === undefined) break;
+      if (next !== pending) throw failure("生图任务 ID 不一致。");
+    } while (true);
+  }
+  const image = await resolveImage(config, result, signal, deadline, request);
   const saved = await saveImage(config, image, signal);
-  return { generated: true, family, model: chosen, size: image.size, requestedSize: size, ...saved };
+  return { generated: true, size: image.size, ...(size === undefined ? {} : { requestedSize: size }), ...saved };
 }

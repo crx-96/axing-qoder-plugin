@@ -4,14 +4,17 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, stat, symlink } from 
 import http from "node:http";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
+import { setPortSettings } from "../server/bridge-ports.mjs";
 import { loadConfig, ensureMagpieConfig } from "../server/config.mjs";
-import { ensureRunning, stopBridge } from "../server/supervisor.mjs";
+import { resolveActiveConfig } from "../server/core-selection.mjs";
+import { crc32 } from "../server/crc32.mjs";
+import { ensureRunning, probeBridge, stopBridge } from "../server/supervisor.mjs";
 import { copyTestCore, nativeCoreSkip } from "./helpers/native-core.mjs";
 import { tmpdir } from "node:os";
 import { join, extname, isAbsolute } from "node:path";
-import { generateImage, imageModelsByFamily, listImageModels } from "../server/image-generation.mjs";
+import { generateImage } from "../server/image-generation.mjs";
 
-const MODEL = "codex/gpt-image-2";
+const MODEL = "ai-studio/gemini-nano-banana-2.1";
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=", "base64");
 const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAADAAcBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z", "base64");
 const WEBP = Buffer.from("UklGRi4AAABXRUJQVlA4ICIAAACwAgCdASoRAAMAPm0sk0WkIqGYBABABsS0gABKxAAA5EAA", "base64");
@@ -31,14 +34,22 @@ function webpContainer(...chunks) {
   file.writeUInt32LE(file.length - 8, 4);
   return file;
 }
-const OPTIONS = { family: "gpt", model: MODEL, prompt: "一只猫" };
+const OPTIONS = { model: MODEL, prompt: "一只猫" };
+const JOB_ID = `img_${"a".repeat(24)}`;
+const FILE_PATH = `/mcp/magpie/image/files/${"b".repeat(32)}.png?t=1234567890.${"c".repeat(43)}`;
 
 function response(body) { return { status: 200, text: JSON.stringify(body) }; }
-function modelsResponse(models) {
-  return response({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "generate_image", inputSchema: { properties: { model: { type: "string", enum: models } } } }] } });
+function toolResponse(content, extra = {}) {
+  return response({ jsonrpc: "2.0", id: 1, result: { content, isError: false, ...extra } });
 }
 function imageResponse(bytes = PNG, mime = "image/png") {
-  return response({ data: [{ b64_json: bytes.toString("base64"), mime_type: mime }] });
+  return toolResponse([{ type: "text", text: "private-message" }, { type: "image", data: bytes.toString("base64"), mimeType: mime }]);
+}
+function pendingResponse(id = JOB_ID) {
+  return toolResponse([{ type: "text", text: "pending" }], { _meta: { "usemagpie.ai/pending": id } });
+}
+function fileResponse(url) {
+  return toolResponse([{ type: "text", text: "private-link" }], { _meta: { "usemagpie.ai/files": [{ url }] } });
 }
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), "magpie-image-test-"));
@@ -60,8 +71,14 @@ function safeError(error, code) {
   return true;
 }
 
-test("原生核心图片目录与生成端点贯通，假上游图片实际落盘", { skip: nativeCoreSkip, timeout: 60000 }, async t => {
+test("原生生图 MCP 自动选择 Gemini，更换模型和管理端口后仍能保存大图", { skip: nativeCoreSkip, timeout: 120000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "magpie-native-image-"));
+  const textChunk = Buffer.alloc(5 * 1024 * 1024 + 12, 0x61);
+  textChunk.writeUInt32BE(textChunk.length - 12);
+  textChunk.write("tEXtcomment\0", 4);
+  textChunk.writeUInt32BE(crc32(textChunk.subarray(4, -4)), textChunk.length - 4);
+  const largePng = Buffer.concat([PNG.subarray(0, -12), textChunk, PNG.subarray(-12)]);
+  const models = ["gpt-image-1", "gemini-2.5-flash-image"];
   const seen = [];
   const servers = [];
   let config;
@@ -77,130 +94,138 @@ test("原生核心图片目录与生成端点贯通，假上游图片实际落�
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     res.setHeader("Content-Type", "application/json");
-    if (req.url === "/v1/models") return res.end(JSON.stringify({ data: [{ id: "gpt-image-1" }] }));
+    if (req.url === "/v1/models") return res.end(JSON.stringify({ data: models.map(id => ({ id })) }));
     if (req.url === "/v1/images/generations") {
       seen.push(JSON.parse(Buffer.concat(chunks).toString()));
-      return res.end(JSON.stringify({ data: [{ b64_json: PNG.toString("base64") }] }));
+      return res.end(JSON.stringify({ data: [{ b64_json: largePng.toString("base64") }] }));
+    }
+    if (req.url === "/v1/chat/completions") {
+      seen.push(JSON.parse(Buffer.concat(chunks).toString()));
+      return res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Here you go!",
+        multi_mod_content: [{ inline_data: { mime_type: "image/png", data: PNG.toString("base64") } }],
+      } }] }));
     }
     res.writeHead(404).end("{}");
   });
-  for (const server of [upstream, http.createServer(), http.createServer()]) {
+  for (const server of [upstream, ...Array.from({ length: 4 }, () => http.createServer())]) {
     servers.push(server);
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
   }
-  const port = servers[1].address().port;
-  const managementPort = servers[2].address().port;
+  const [modelPort, managementPort, nextModelPort, nextManagementPort] = servers.slice(1).map(server => server.address().port);
+  const dataDir = join(root, "data");
   const binDir = join(root, "bin");
+  await mkdir(dataDir);
   await mkdir(binDir);
+  await writeFile(join(dataDir, "bridge-ports.json"), JSON.stringify({ modelPort, managementPort }));
   const binPath = await copyTestCore(join(binDir, process.platform === "win32" ? "magpie.exe" : "magpie"));
   config = await loadConfig({ pluginRoot: fileURLToPath(new URL("../", import.meta.url)), env: {
-    BRIDGE_DATA_DIR: join(root, "data"), BRIDGE_BIN: binPath,
-    BRIDGE_PORT: String(port), BRIDGE_MANAGEMENT_PORT: String(managementPort),
+    BRIDGE_DATA_DIR: dataDir, BRIDGE_BIN: binPath,
   } });
   await ensureMagpieConfig(config);
   const settings = JSON.parse(await readFile(config.configPath, "utf8"));
-  await writeFile(config.configPath, JSON.stringify({ ...settings, proxy: "direct", imageGen: "fixture/gpt-image-1" }));
+  await writeFile(config.configPath, JSON.stringify({ ...settings, proxy: "direct", imageGen: "fixture/gemini-2.5-flash-image" }));
   await writeFile(join(config.profileDir, "providers.json"), JSON.stringify({ providers: [{
     id: "fixture", name: "Local image fixture", key: "test-only-key", listOff: true,
-    chat: `http://127.0.0.1:${upstream.address().port}/v1`, models: ["gpt-image-1"],
+    chat: `http://127.0.0.1:${upstream.address().port}/v1`, models,
   }] }));
   for (const server of servers.slice(1)) await new Promise(resolve => server.close(resolve));
   assert.equal((await ensureRunning(config)).ready, true);
-  assert.ok((await listImageModels(config, "gpt")).includes("fixture/gpt-image-1"));
-  const result = await generateImage(config, { family: "gpt", prompt: "local image fixture", model: "fixture/gpt-image-1" });
-  assert.deepEqual(await readFile(result.path), PNG);
-  assert.equal(result.mime, "image/png");
-  assert.equal(result.size, "1x1");
-  assert.equal(result.requestedSize, "1024x1024");
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].model, "gpt-image-1");
-  assert.equal(seen[0].prompt, "local image fixture");
+  const before = await generateImage(await resolveActiveConfig(config), { prompt: "before port change" });
+  assert.deepEqual(await readFile(before.path), PNG);
+  assert.equal(before.mime, "image/png");
+  assert.equal(before.size, "1x1");
+
+  assert.equal((await setPortSettings(config, { modelPort: nextModelPort, managementPort: nextManagementPort })).ready, true);
+  assert.equal(config.port, modelPort);
+  assert.equal((await probeBridge(config)).state, "offline");
+  const active = await resolveActiveConfig(config);
+  assert.equal(active.port, nextModelPort);
+  assert.equal(active.managementPort, nextManagementPort);
+  const after = await generateImage(active, { prompt: "after port change", model: "fixture/gpt-image-1" });
+  assert.deepEqual(await readFile(after.path), largePng);
+  assert.notEqual(after.path, before.path);
+  assert.deepEqual(seen.map(({ model }) => model), ["gemini-2.5-flash-image", "gpt-image-1"]);
+  assert.match(JSON.stringify(seen[0].messages), /before port change/);
+  assert.equal(seen[1].prompt, "after port change");
 });
 
-test("目录只匹配 provider/gpt-image-*，去重且排除旧裸名、聊天和 Gemini", () => {
-  assert.deepEqual(imageModelsByFamily([MODEL, "other/gpt-image-fixture", MODEL, "gpt-image-2",
-    "codex/gpt-5", "agy/gemini-image", "codex/gpt-image-", "../gpt-image-2", "x/y/gpt-image-2", null], "gpt"),
-  [MODEL, "other/gpt-image-fixture"]);
-  assert.throws(() => imageModelsByFamily([], "gemini"), e => e.code === "INVALID_PARAMS");
-});
-
-test("模型目录解析 provider 前缀，使用短时限、鉴权与有界响应", async () => {
-  const controller = new AbortController();
-  const ids = await listImageModels({}, "gpt", controller.signal, async (_config, path, options) => {
-    assert.equal(path, "/mcp/magpie/image");
-    assert.equal(options.signal, controller.signal);
-    assert.equal(options.authenticated, true);
-    assert.equal(options.timeoutMs, 10000);
-    assert.equal(options.maxBytes, 1024 * 1024);
-    assert.equal(options.method, "POST");
-    assert.deepEqual(options.body, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
-    return modelsResponse([null, MODEL, "codex/gpt-5"]);
-  });
-  assert.deepEqual(ids, [MODEL]);
-});
-
-test("单模型自动生成，严格使用 Magpie 原生协议，结果仅为本地元数据", async (t) => {
+test("省略模型与尺寸仅调用原生生成工具，默认值由核心决定", async (t) => {
   const config = await fixture(t);
   const calls = [];
-  const output = await generateImage(config, { family: "gpt", prompt: "一只猫" }, async (_config, path, options) => {
+  const output = await generateImage(config, { prompt: "一只猫" }, async (_config, path, options) => {
     calls.push(path);
-    if (path === "/mcp/magpie/image") return modelsResponse([MODEL]);
     assert.equal(options.authenticated, true);
     assert.equal(options.method, "POST");
-    assert.equal(options.timeoutMs, 300000);
+    assert.ok(options.timeoutMs > 0 && options.timeoutMs <= 300000);
     assert.equal(options.maxBytes, 64 * 1024 * 1024);
-    assert.deepEqual(options.body, { model: MODEL, prompt: "一只猫", size: "1024x1024", n: 1, response_format: "b64_json" });
+    assert.deepEqual(options.body, { jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "generate_image", arguments: { prompt: "一只猫" } } });
     return imageResponse();
   });
-  assert.deepEqual(calls, ["/mcp/magpie/image", "/v1/images/generations"]);
+  assert.deepEqual(calls, ["/mcp/magpie/image"]);
   assert.equal(output.generated, true);
-  assert.equal(output.model, MODEL);
   assert.equal(output.mime, "image/png");
   assert.equal(output.bytes, PNG.length);
   assert.equal(isAbsolute(output.path), true);
   assert.equal(output.path.startsWith(join(config.dataDir, "generated")), true);
   assert.deepEqual(await readFile(output.path), PNG);
   assert.equal(output.size, "1x1");
-  assert.equal(output.requestedSize, "1024x1024");
-  assert.deepEqual(Object.keys(output).sort(), ["bytes", "family", "generated", "mime", "model", "path", "requestedSize", "size"]);
+  assert.deepEqual(Object.keys(output).sort(), ["bytes", "generated", "mime", "path", "size"]);
   assert.doesNotMatch(JSON.stringify(output), /private-|b64_json/);
   if (process.platform !== "win32") assert.equal((await stat(output.path)).mode & 0o777, 0o600);
 });
 
-test("多模型只返回选择，不提交生图或创建目录", async (t) => {
+test("慢任务只提交一次生图，使用同一 ID 取回结果", async t => {
   const config = await fixture(t);
-  let calls = 0;
-  const output = await generateImage(config, { family: "gpt", prompt: "x" }, async (_config, path) => {
-    calls++;
+  const calls = [];
+  const output = await generateImage(config, { ...OPTIONS, size: "16:9" }, async (_config, path, options) => {
     assert.equal(path, "/mcp/magpie/image");
-    return modelsResponse([MODEL, "second/gpt-image-test"]);
+    calls.push(options.body.params);
+    return calls.length < 3 ? pendingResponse() : imageResponse();
   });
-  assert.deepEqual(output, { needsModelChoice: true, family: "gpt", models: [MODEL, "second/gpt-image-test"] });
-  assert.equal(calls, 1);
+  assert.deepEqual(calls, [
+    { name: "generate_image", arguments: { ...OPTIONS, size: "16:9" } },
+    { name: "generation_result", arguments: { id: JOB_ID } },
+    { name: "generation_result", arguments: { id: JOB_ID } },
+  ]);
+  assert.deepEqual(await readFile(output.path), PNG);
+  assert.equal(output.requestedSize, "16:9");
+});
+
+test("超时信号覆盖建连阶段，截止后的响应也不会保存", async t => {
+  const config = await fixture(t);
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const timeout = new AbortController();
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    assert.equal(ms, 300_000);
+    return timeout.signal;
+  });
+  for (const abortConnection of [false, true]) {
+    now = 0;
+    const calls = [];
+    await assert.rejects(generateImage(config, { ...OPTIONS, signal: new AbortController().signal }, async (_config, _path, { signal, body }) => {
+      calls.push(body.params.name);
+      if (!abortConnection) {
+        now = 300_000;
+        return imageResponse();
+      }
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("private-connection-detail")), { once: true });
+        timeout.abort();
+        assert.equal(signal.aborted, true);
+      });
+    }), e => safeError(e, "ETIMEDOUT"));
+    assert.deepEqual(calls, ["generate_image"]);
+  }
   assert.deepEqual(await readdir(config.dataDir), []);
 });
 
-test("上游省略图片枚举时要求显式选择，不回退聊天模型目录", async () => {
-  let calls = 0;
-  await assert.rejects(listImageModels({}, "gpt", undefined, async (_config, path) => {
-    calls++;
-    assert.equal(path, "/mcp/magpie/image");
-    return modelsResponse(undefined);
-  }), error => error.code === "IMAGE_MODELS_UNAVAILABLE" && /显式指定 model/.test(error.safeMessage));
-  assert.equal(calls, 1);
-});
-
-test("无图片模型安全失败", async () => {
-  await assert.rejects(generateImage({}, { family: "gpt", prompt: "x" }, async () => modelsResponse(["codex/gpt-5"])),
-    e => safeError(e, "BRIDGE_NOT_READY"));
-});
-
-test("prompt/model/family/size 非法时不访问核心", async () => {
+test("prompt/model/size 非法时不访问核心", async () => {
   const invalid = [{ prompt: "" }, { prompt: "  " }, { prompt: 7 }, { prompt: "x".repeat(32001) },
-    { model: "" }, { model: null }, { model: 7 }, { model: "gpt-image-2" }, { model: "codex/gpt-5" },
-    { model: "agy/gemini-image" }, { model: "https://private-key/gpt-image-2" },
-    { family: "gemini" }, { size: "1K" }, { size: null }, { size: "0x1" }, { size: "1x999999" }];
+    { model: "" }, { model: null }, { model: 7 }, { model: "x".repeat(201) },
+    { size: "1K" }, { size: null }, { size: "0x1" }, { size: "1x999999" }];
   for (const options of invalid) {
     await assert.rejects(generateImage({}, { ...OPTIONS, ...options }, async () => assert.fail("不能请求")),
       e => safeError(e, "INVALID_PARAMS"));
@@ -216,13 +241,14 @@ for (const [format, mime, bytes, extension, expectedSize] of [
   ["VP8X", "image/webp", webpContainer(["VP8X", Buffer.from("00000000010001000100", "hex")],
     ["VP8 ", WEBP.subarray(20)]), ".webp", "65538x257"],
 ]) {
-  test(`${format} 落盘并返回文件尺寸和请求尺寸，指定模型不查询目录`, async (t) => {
+  test(`${format} 落盘并返回文件尺寸和请求尺寸，可指定非 GPT 模型`, async (t) => {
     const config = await fixture(t);
     let calls = 0;
     const output = await generateImage(config, { ...OPTIONS, size: "1536x1024" }, async (_config, path, options) => {
       calls++;
-      assert.equal(path, "/v1/images/generations");
-      assert.equal(options.body.size, "1536x1024");
+      assert.equal(path, "/mcp/magpie/image");
+      assert.equal(options.body.params.name, "generate_image");
+      assert.deepEqual(options.body.params.arguments, { ...OPTIONS, size: "1536x1024" });
       return imageResponse(bytes, mime);
     });
     assert.equal(calls, 1);
@@ -246,7 +272,7 @@ test("并行保存文件唯一且不留下临时文件、不覆盖既有文件",
 test("非法、非规范或空 base64 拒绝且不落盘", async (t) => {
   const config = await fixture(t);
   for (const base64 of ["", "!!!!", "a===", "YW Jj", "YWJj\n", "Zh==", "data:image/png;base64,eA==", 123]) {
-    await assert.rejects(generateImage(config, OPTIONS, async () => response({ data: [{ b64_json: base64, mime_type: "image/png" }] })),
+    await assert.rejects(generateImage(config, OPTIONS, async () => toolResponse([{ type: "image", data: base64, mimeType: "image/png" }])),
       e => safeError(e, "IMAGE_OUTPUT_INVALID"));
   }
   assert.deepEqual(await readdir(config.dataDir), []);
@@ -257,7 +283,7 @@ test("MIME 不匹配、假图片、截断容器拒绝", async (t) => {
   for (const [bytes, mime] of [[PNG, "image/jpeg"], [PNG, undefined], [PNG, "image/svg+xml"],
     [Buffer.from("not-an-image"), "image/png"], [PNG.subarray(0, 33), "image/png"],
     [JPEG.subarray(0, -2), "image/jpeg"], [WEBP.subarray(0, -2), "image/webp"]]) {
-    await assert.rejects(generateImage(config, OPTIONS, async () => response({ data: [{ b64_json: bytes.toString("base64"), mime_type: mime }] })),
+    await assert.rejects(generateImage(config, OPTIONS, async () => toolResponse([{ type: "image", data: bytes.toString("base64"), mimeType: mime }])),
       e => safeError(e, "IMAGE_OUTPUT_INVALID"));
   }
   assert.deepEqual(await readdir(config.dataDir), []);
@@ -286,23 +312,54 @@ test("尺寸字段无效、越过块边界或只有画布头时拒绝且不落�
   assert.deepEqual(await readdir(config.dataDir), []);
 });
 
-test("URL-only 不访问任意远端、不重试且固定安全诊断", async (t) => {
-  const config = await fixture(t);
-  let calls = 0;
-  await assert.rejects(generateImage(config, OPTIONS, async () => {
-    calls++;
-    return response({ data: [{ url: "http://127.0.0.1/private-token" }] });
-  }), e => {
-    safeError(e, "IMAGE_OUTPUT_UNAVAILABLE");
-    assert.equal(e.message, "上游仅返回远程图片链接，未取得可保存图片，请在Magpie检查生成结果，不要重复提交");
-    return true;
+test("大图从已验证的模型连接下载，不采用链接中的主机或端口", async t => {
+  const config = { ...await fixture(t), host: "127.0.0.1", port: 32123, managementPort: 32124 };
+  const paths = [];
+  const output = await generateImage(config, OPTIONS, async (actual, path, options) => {
+    assert.equal(actual, config);
+    assert.equal(options.authenticated, true);
+    paths.push(path);
+    if (options.method === "POST") return fileResponse(`https://public.example:443${FILE_PATH}`);
+    assert.equal(options.binary, true);
+    assert.equal(options.maxBytes, 32 * 1024 * 1024);
+    return { status: 200, bytes: PNG, headers: { "content-type": "image/png" } };
   });
-  assert.equal(calls, 1);
+  assert.deepEqual(paths, ["/mcp/magpie/image", FILE_PATH]);
+  assert.deepEqual(await readFile(output.path), PNG);
+  assert.doesNotMatch(JSON.stringify(output), /public\.example|1234567890/);
+});
+
+test("跳过无效内联图和无效文件候选，下载同次生成的有效图片", async t => {
+  const config = await fixture(t);
+  const paths = [];
+  const output = await generateImage(config, OPTIONS, async (_config, path, options) => {
+    paths.push(path);
+    if (options.method === "POST") {
+      return toolResponse([{ type: "image", data: "invalid", mimeType: "image/png" }], {
+        _meta: { "usemagpie.ai/files": [{ url: "https://public.example/invalid" }, { url: `https://public.example${FILE_PATH}` }] },
+      });
+    }
+    return { status: 200, bytes: PNG, headers: { "content-type": "image/png" } };
+  });
+  assert.deepEqual(paths, ["/mcp/magpie/image", FILE_PATH]);
+  assert.deepEqual(await readFile(output.path), PNG);
+});
+
+test("缺少有效同源文件路径时不下载，也不重试生成", async t => {
+  const config = await fixture(t);
+  for (const url of [undefined, "http://127.0.0.1/private-token", `file://${FILE_PATH}`, `http://localhost${FILE_PATH.split("?")[0]}`]) {
+    let calls = 0;
+    await assert.rejects(generateImage(config, OPTIONS, async () => {
+      calls++;
+      return fileResponse(url);
+    }), e => safeError(e, "IMAGE_OUTPUT_UNAVAILABLE"));
+    assert.equal(calls, 1);
+  }
   assert.deepEqual(await readdir(config.dataDir), []);
 });
 
 test("HTTP 错误只公开状态和本地诊断，不泄漏正文、不重试", async () => {
-  for (const status of [401, 403, 429, 500, 502]) {
+  for (const status of [401, 403, 404, 429, 500, 502]) {
     let calls = 0;
     await assert.rejects(generateImage({}, OPTIONS, async () => {
       calls++;
@@ -316,12 +373,34 @@ test("HTTP 错误只公开状态和本地诊断，不泄漏正文、不重试", 
   }
 });
 
+test("生成已提交后，查询或下载失败保留状态码且提示避免重复提交", async () => {
+  for (const [initial, followUp, label] of [
+    [pendingResponse(), "generation_result", "查询生图结果"],
+    [fileResponse(`http://localhost${FILE_PATH}`), FILE_PATH, "下载生图结果"],
+  ]) {
+    const calls = [];
+    await assert.rejects(generateImage({}, OPTIONS, async (_config, path, options) => {
+      calls.push(options.body?.params.name ?? path);
+      return calls.length === 1 ? initial : { status: 502, text: "private-upstream-detail" };
+    }), e => {
+      safeError(e, 502);
+      assert.match(e.message, new RegExp(`${label}失败（HTTP 502）`));
+      assert.match(e.message, /避免重复提交/);
+      assert.doesNotMatch(e.message, /后重试/);
+      return true;
+    });
+    assert.deepEqual(calls, ["generate_image", followUp]);
+  }
+});
+
 test("错误 JSON、结构和传输错误固定脱敏", async () => {
-  for (const text of ["private-token{", "null", "{}", '{"data":{}}', '{"data":[]}']) {
+  for (const text of ["private-token{", "null", "{}", '{"jsonrpc":"2.0","id":1,"result":{}}']) {
     await assert.rejects(generateImage({}, OPTIONS, async () => ({ status: 200, text })), e => safeError(e, "IMAGE_OUTPUT_INVALID"));
   }
+  for (const failed of [toolResponse([{ type: "text", text: "private-token" }], { isError: true }), response({ error: { message: "private-token" } })]) {
+    await assert.rejects(generateImage({}, OPTIONS, async () => failed), e => safeError(e, "IMAGE_TOOL_FAILED"));
+  }
   await assert.rejects(generateImage({}, OPTIONS, async () => { throw new Error("private-api-key"); }), e => safeError(e, "IMAGE_REQUEST_FAILED"));
-  await assert.rejects(listImageModels({}, "gpt", undefined, async () => response(null)), e => safeError(e, "IMAGE_OUTPUT_INVALID"));
 });
 
 test("响应和解码大小有限，超限不会落盘", async (t) => {
@@ -329,7 +408,7 @@ test("响应和解码大小有限，超限不会落盘", async (t) => {
   await assert.rejects(generateImage(config, OPTIONS, async () => ({ status: 200, text: "x".repeat(64 * 1024 * 1024 + 1) })),
     e => safeError(e, "RESPONSE_TOO_LARGE"));
   const tooLarge = Buffer.alloc(32 * 1024 * 1024 + 1).toString("base64");
-  await assert.rejects(generateImage(config, OPTIONS, async () => response({ data: [{ b64_json: tooLarge, mime_type: "image/png" }] })),
+  await assert.rejects(generateImage(config, OPTIONS, async () => toolResponse([{ type: "image", data: tooLarge, mimeType: "image/png" }])),
     e => safeError(e, "IMAGE_OUTPUT_INVALID"));
   assert.deepEqual(await readdir(config.dataDir), []);
 });
@@ -342,7 +421,7 @@ test("预先取消不请求、不传播 reason；进行中取消传给 HTTP", as
     e => safeError(e, "ABORT_ERR"));
   const during = new AbortController();
   const pending = generateImage(config, { ...OPTIONS, signal: during.signal }, async (_config, _path, { signal }) => {
-    assert.equal(signal, during.signal);
+    assert.equal(signal.aborted, false);
     return new Promise((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(new Error("private-cancel-reason")), { once: true });
       during.abort("private-cancel-reason");
@@ -352,15 +431,19 @@ test("预先取消不请求、不传播 reason；进行中取消传给 HTTP", as
   assert.deepEqual(await readdir(config.dataDir), []);
 });
 
-test("HTTP 完成后取消不保存；模型查询结束后取消不生成", async (t) => {
+test("生成完成后取消不保存，等待慢任务期间取消不再查询", async t => {
   const config = await fixture(t);
-  for (const model of [MODEL, undefined]) {
+  for (const pending of [false, true]) {
     const controller = new AbortController();
     let calls = 0;
-    await assert.rejects(generateImage(config, { ...OPTIONS, model, signal: controller.signal }, async () => {
+    await assert.rejects(generateImage(config, { ...OPTIONS, signal: controller.signal }, async () => {
       calls++;
+      if (pending) {
+        setTimeout(() => controller.abort("private-reason"), 0);
+        return pendingResponse();
+      }
       controller.abort("private-reason");
-      return model ? imageResponse() : response({ data: [{ id: MODEL }] });
+      return imageResponse();
     }), e => safeError(e, "ABORT_ERR"));
     assert.equal(calls, 1);
   }

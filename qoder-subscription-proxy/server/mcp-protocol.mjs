@@ -36,8 +36,8 @@ const IMAGE_SCHEMA = {
   type: "object",
   properties: {
     prompt: { type: "string", description: "画面内容描述" },
-    model: { type: "string", description: "可选；省略时按族内可用生图模型自动决策" },
-    size: { type: "string", description: "可选输出尺寸，如 1024x1024" },
+    model: { type: "string", description: "可选的生图模型 ID。省略时使用订阅代理当前生图设置。" },
+    size: { type: "string", description: "可选的像素尺寸或宽高比，如 1024x1024 或 16:9。" },
   },
   required: ["prompt"],
   additionalProperties: false,
@@ -65,8 +65,8 @@ const TOOLS = [
     inputSchema: EMPTY_SCHEMA,
   },
   {
-    name: "image_gen_gpt",
-    description: "经 Magpie 原生图片接口生图（如 codex/gpt-image-2 或目录中的 provider/gpt-image-* 模型）。用户说 GPT/OpenAI 生图时调用。省略 model 时：族内仅一个可用生图模型则直接生成；多个则结果返回 needsModelChoice 与 models 列表，此时必须用宿主提问弹窗让用户选择模型后带 model 重调，不得替用户选择。成功后图片保存在本机 generated 目录，返回路径、实际文件尺寸 size、请求尺寸 requestedSize 等元数据。",
+    name: "subscription_generate_image",
+    description: "订阅代理生图工具。用户说‘用订阅代理生图’或要求通过订阅代理生成图片时调用。默认按订阅代理的生图设置自动选择模型。用户明确指定模型时才传 model。生成成功后返回本地图片路径和像素尺寸。",
     inputSchema: IMAGE_SCHEMA,
   },
 ];
@@ -141,7 +141,7 @@ function validToolArguments(tool, args) {
 const SAFE_CODES = new Set([
   "ABORT_ERR", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "EACCES", "EPERM",
   "ENOTFOUND", "EAI_AGAIN", "ERR_INVALID_ARG_VALUE", "ERR_INVALID_ARG_TYPE",
-  "BRIDGE_NOT_READY", "BRIDGE_CONFIG", "BRIDGE_START_FAILED", "BRIDGE_RECOVERY_FAILED", "IMAGE_OUTPUT_UNAVAILABLE", "IMAGE_MODELS_UNAVAILABLE",
+  "BRIDGE_NOT_READY", "BRIDGE_CONFIG", "BRIDGE_START_FAILED", "BRIDGE_RECOVERY_FAILED", "IMAGE_OUTPUT_UNAVAILABLE", "IMAGE_TOOL_FAILED",
   "CORE_CONFIG", "CORE_CANCELLED", "CORE_TIMEOUT", "CORE_CURL", "CORE_DOWNLOAD", "CORE_SIZE",
   "CORE_ARCHIVE_HASH", "CORE_BINARY_HASH", "CORE_ARCHIVE", "CORE_PATH", "CORE_CACHE",
   "CORE_PUBLISH", "CORE_CLEANUP", "CORE_LOCK",
@@ -256,13 +256,8 @@ async function callTool(name, ctx, handlers, signal, args = {}) {
       await handlers.openManagement(config, { signal });
       return textResult("已请求系统浏览器打开授权与账号管理页。");
     }
-    case "image_gen_gpt": {
-      // 族内模型决策与落盘由生图模块完成；多模型待选结果原样返回供宿主弹窗。
-      const family = "gpt";
-      const result = await handlers.generateImage(config,
-        { family, prompt: args.prompt, model: args.model, size: args.size, signal });
-      return textResult(result);
-    }
+    case "subscription_generate_image":
+      return textResult(await handlers.generateImage(config, { ...args, signal }));
   }
 }
 

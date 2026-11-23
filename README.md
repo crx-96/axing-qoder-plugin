@@ -6,12 +6,12 @@
 
 ## 安装和第一次使用
 
-1. 在 Qoder 安装并启用插件。如果使用本地文件，打开 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择 `qoder-subscription-proxy-v2.0.2.zip`。Windows x64、macOS x64 / ARM64、Linux x64 / ARM64 共用一个包。GitHub 自动生成的 `Source code` 是开发源码。
+1. 在 Qoder 安装并启用插件。如果使用本地文件，打开 **扩展 → 插件 → 添加插件 → 上传插件 ZIP**，选择 `qoder-subscription-proxy-v2.0.3.zip`。Windows x64、macOS x64 / ARM64、Linux x64 / ARM64 共用一个包。GitHub 自动生成的 `Source code` 是开发源码。
 2. 打开 **更多 → 订阅代理管理**。首次连接插件时，已有可用核心会直接复用。全新安装会下载并校验当前平台的官方最新稳定版，页面会显示实际进度或失败原因。
 3. 代理就绪后，点击打开 **Magpie 原生管理页**，配置自己的服务商或登录自己的订阅账号，然后选择能用的模型。
 4. **在 Qoder 添加自定义模型**，填写插件页面显示的模型端点和原生管理页中的 Model ID。如果希望用 Magpie 的 Agent 页面写入 Qoder 设置，请先启用客户端配置写回。两种方法及字段示例见 [插件使用指南](qoder-subscription-proxy/README.md)。
 
-当前插件版本为 **2.0.2**。已有核心会继续使用；全新安装才按平台下载 Magpie 最新稳定版。后续升级由用户在管理页决定。下载已发布版本请查看 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases)。本项目是独立开发的第三方插件，请仅使用本人拥有或已获授权的服务。详见[免责声明](qoder-subscription-proxy/DISCLAIMER.md)和[第三方软件许可](qoder-subscription-proxy/THIRD_PARTY_NOTICES.md)。
+当前插件版本为 **2.0.3**。已有核心会继续使用；全新安装才按平台下载 Magpie 最新稳定版。后续升级由用户在管理页决定。下载已发布版本请查看 [GitHub Releases](https://github.com/crx-96/axing-qoder-plugin/releases)。本项目是独立开发的第三方插件，请仅使用本人拥有或已获授权的服务。详见[免责声明](qoder-subscription-proxy/DISCLAIMER.md)和[第三方软件许可](qoder-subscription-proxy/THIRD_PARTY_NOTICES.md)。
 
 ## 开发者打包
 
@@ -19,7 +19,7 @@
 
 ```sh
 mkdir dist
-node qoder-subscription-proxy/scripts/package-plugin.mjs dist/qoder-subscription-proxy-v2.0.2.zip
+node qoder-subscription-proxy/scripts/package-plugin.mjs dist/qoder-subscription-proxy-v2.0.3.zip
 ```
 
 打包按白名单收集插件代码、图标、说明和许可，生成一个小于 20 MB 的通用 ZIP。输出文件已存在时脚本会拒绝覆盖。打包只使用本地文件。用户安装后的下载和升级会核对 Magpie 官方 Release 中对应资产的地址、大小与 SHA256。仓库保留的历史核心清单用于识别旧缓存和开发测试。

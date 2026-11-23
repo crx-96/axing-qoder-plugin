@@ -96,6 +96,7 @@ async function prepare(signal) {
 const handlers = {
   /** 用户明确调用授权指令时才打开本机浏览器。 */
   async openManagement(config, options) { return openManagement(await resolveActiveConfig(config), options); },
+  /** 每次生图重新读取已生效的模型端口，覆盖其他会话修改端口的情况。 */
   async generateImage(config, options) { return generateImage(await resolveActiveConfig(config), options); },
   async checkUpdate(config, options) { return checkCoreUpdate(await resolveActiveConfig(config), options); },
   async downloadUpdate(config, version, options) { return downloadCoreUpdate(await resolveActiveConfig(config), version, options); },

@@ -6,7 +6,7 @@
     {
       "name": "qoder-subscription-proxy",
       "source": "./qoder-subscription-proxy",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "description": "Qoder 专用本机订阅代理，随 Qoder 启停。可查看 Magpie 核心的下载进度、运行状态和故障原因。",
       "displayName": "订阅代理管理",
       "displayName_i18n": { "zh-CN": "订阅代理管理" },

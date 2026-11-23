@@ -295,22 +295,40 @@ test("工具发现公布管理与生图工具，旧生图调用按未知工具�
   const initialized = await handleMessage(request(1, "initialize", { protocolVersion: "2025-06-18" }), { config });
   assert.equal(initialized.result.instructions, undefined);
   const { result } = await handleMessage(request(2, "tools/list"), { config });
-  assert.deepEqual(result.tools.map(tool => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management", "image_gen_gpt"]);
+  assert.deepEqual(result.tools.map(tool => tool.name), ["bridge_status", "bridge_start", "bridge_stop", "bridge_open_management", "subscription_generate_image"]);
   for (const tool of result.tools.filter((entry) => entry.name.startsWith("bridge_"))) {
     assert.deepEqual(tool.inputSchema, { type: "object", properties: {}, additionalProperties: false });
     for (const args of [null, [], { force: true }]) {
       assert.equal((await handleMessage(call(3, tool.name, args), { config })).error.code, -32602);
     }
   }
-  for (const tool of result.tools.filter((entry) => entry.name.startsWith("image_gen_"))) {
-    assert.deepEqual(tool.inputSchema.required, ["prompt"]);
-    assert.equal(tool.inputSchema.additionalProperties, false);
+  const imageTool = result.tools.find(tool => tool.name === "subscription_generate_image");
+  assert.deepEqual(imageTool.inputSchema.required, ["prompt"]);
+  assert.equal(imageTool.inputSchema.additionalProperties, false);
+  assert.match(imageTool.description, /订阅代理生图/);
+  assert.doesNotMatch(imageTool.description, /Magpie|GPT/i);
+  for (const args of [{}, { prompt: "test", port: 12345 }]) {
+    assert.equal((await handleMessage(call(3, imageTool.name, args), { config })).error.code, -32602);
   }
   for (const supportsApps of [false, true]) {
-    for (const name of ["bridge_generate_image", "bridge_configure_approval", "bridge_approval_list", "bridge_approval_save", "bridge_approval_delete", "image_gen_gemini", "bridge_setup_antigravity"]) {
-      const removed = await handleMessage(call(4, name, {}), { config, supportsApps });
+    for (const name of ["bridge_generate_image", "bridge_configure_approval", "bridge_approval_list", "bridge_approval_save", "bridge_approval_delete", "image_gen_gemini", "image_gen_gpt", "bridge_setup_antigravity"]) {
+      const removed = await handleMessage(call(4, name, { prompt: "test" }), { config, supportsApps });
       assert.equal(removed.error.code, -32602);
     }
+  }
+});
+
+test("订阅代理生图将可选模型和取消信号交给生图处理器", async () => {
+  const signal = new AbortController().signal;
+  for (const args of [{ prompt: "一只猫" }, { prompt: "一只猫", model: "ai-studio/gemini-nano-banana-2.1", size: "16:9" }]) {
+    const image = { generated: true, path: "generated/image.png", size: "1x1" };
+    const generateImage = async (actual, options) => {
+      assert.equal(actual, config);
+      assert.deepEqual(options, { ...args, signal });
+      return image;
+    };
+    const response = await handleMessage(call(1, "subscription_generate_image", args), { config }, { signal, handlers: handlers({ generateImage }) });
+    assert.deepEqual(JSON.parse(resultText(response)), image);
   }
 });
 

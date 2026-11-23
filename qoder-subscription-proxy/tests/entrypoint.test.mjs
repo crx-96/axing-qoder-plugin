@@ -79,8 +79,8 @@ test("配置错误时管理页仍可读取具体原因，核心操作受限且�
     assert.equal(status.preparing, false);
     assert.match(status.startupError, /BRIDGE_PORT.*65535/);
   }
-  for (const name of ["bridge_start", "bridge_open_management", "bridge_stop", "image_gen_gpt"]) {
-    const args = name === "image_gen_gpt" ? { prompt: "test" } : {};
+  for (const name of ["bridge_start", "bridge_open_management", "bridge_stop", "subscription_generate_image"]) {
+    const args = name === "subscription_generate_image" ? { prompt: "test" } : {};
     const response = await f.request("tools/call", { name, arguments: args });
     assert.equal(response.result.isError, true);
     assert.match(response.result.content[0].text, /BRIDGE_PORT/);
@@ -127,7 +127,7 @@ test("缺失自定义核心只导致后台启动失败，MCP仍可查询状态�
 
 test("已暂停时允许管理MCP连接，不启动或下载核心", { timeout: 10000 }, async (t) => {
   const f = await fixture(t, { paused: true, env: { BRIDGE_BIN: process.execPath } });
-  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "2.0.2");
+  assert.equal((await f.request("initialize", { protocolVersion: "2025-06-18" })).result.serverInfo.version, "2.0.3");
   const status = JSON.parse((await f.request("tools/call", { name: "bridge_status", arguments: {} })).result.content[0].text);
   assert.equal(status.ready, false);
   assert.equal(status.autoRecoveryPaused, true);
